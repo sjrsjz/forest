@@ -144,6 +144,7 @@ def test_optional_service_absence_and_bound_provider_replacement_are_distinct():
     routing = RuntimeContractRouter(SimpleNamespace(
         graph_identity=SimpleNamespace(graph_id="graph/1", graph_revision=1),
         instances={"module.consumer": caller},
+        descriptors=(),
     ))
     handle = routing.request(
         caller_component_id="module.consumer", service_id="demo.request",
@@ -271,7 +272,7 @@ def test_agent_tool_contribution_freezes_contract_identity():
     tool = _tool("inspect", "module.inspect")
 
     assert tool.as_fact() == {
-        "protocol": "forest.agent-tool-contribution/1",
+        "protocol": "forest.agent-tool-contribution/2",
         "name": "inspect",
         "service_id": "module.inspect",
         "version": 1,
@@ -279,6 +280,8 @@ def test_agent_tool_contribution_freezes_contract_identity():
         "contract_digest": tool.contract_digest,
         "approval_required": True,
         "supports_query": False,
+        "query_service_id": None,
+        "timeout_seconds": 30,
     }
     assert tool.contract_digest.startswith("sha256:")
 

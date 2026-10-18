@@ -1,0 +1,22 @@
+{
+  "name": "onebot_ban_all",
+  "description": "Enable or disable mute for the whole group; requires configured group management permission.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "group_id": {
+        "type": "string",
+        "pattern": "^[1-9][0-9]{0,18}$"
+      },
+      "enable": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "group_id",
+      "enable"
+    ],
+    "additionalProperties": false
+  },
+  "strict": true
+}

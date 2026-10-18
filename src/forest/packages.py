@@ -733,6 +733,8 @@ MANIFEST_SCHEMA = {
                                 "declaration_schema": {"type": "string"},
                                 "approval_required": {"type": "boolean"},
                                 "supports_query": {"type": "boolean"},
+                                "query_service_id": {"type": ["string", "null"]},
+                                "timeout_s": {"type": "integer", "minimum": 1, "maximum": 900},
                             },
                         },
                     },
@@ -2413,6 +2415,16 @@ def _manifest(files: dict[str, bytes]) -> dict:
             declaration.get("service_version"),
         )
         tool_declaration = _schema(files, declaration.get("declaration_schema"))
+        query_service = declaration.get("query_service_id")
+        if (declaration["supports_query"] != (query_service is not None)
+                or query_service == declaration["service_id"]):
+            _fail("INVALID_AGENT_TOOL", "Queryable tools require a separate read-only query service")
+        if query_service is not None:
+            query_port = next((item for item in component.get("provides", ())
+                               if item["name"] == query_service
+                               and item["contract"].split(".")[0] == str(target[1])), None)
+            if query_port is None or query_port["semantics"] != "read":
+                _fail("INVALID_AGENT_TOOL", "Tool reconciliation must bind an explicit read service")
         parameters = tool_declaration.get("parameters")
         try:
             Draft202012Validator.check_schema(parameters)

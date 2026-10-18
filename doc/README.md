@@ -30,6 +30,8 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 
 ## 当前实现输入
 
+Agent 工具扩展采用 [24 工具网关与外部插件](24-agent-tool-gateway-and-external-plugins.md)：工具通过冻结目录接入，执行与只读查询分离，DeepSeek、HTTP 和 OneBot 工具属于外部包。安装和各包的设置入口见 [plugins 使用说明](../plugins/README.md)。
+
 编写任何模块前，必须先从 00、13、14 确定 `owner / namespace / Repository contract / provides / requires / UnitOfWork participants / Generation fence / management contribution / deletion behavior`；涉及会话 Agent 执行时还必须读取 15。缺少任一项就先补设计，不能从旧实现反推边界。
 
 00–23 定义目标契约，`research-*` 提供只读调研证据，`implementation-status.md` 记录完成度；操作指南、运行手册与验收记录说明具体操作和证据，不定义目标架构。新增的[23 触发策略控制页与群发现](23-trigger-policy-group-selection.md)约束模块自己的群选择 UI 和 Adapter 只读发现服务。旧 P0–P5 切片不再保留副本；其中仍有价值的算法必须先重新写入对应目标文档，才能进入实现。撤销的产品子 Agent、开发期 payload 迁移、旧库升级、固定业务后台和组合根不得从 Git 历史恢复。

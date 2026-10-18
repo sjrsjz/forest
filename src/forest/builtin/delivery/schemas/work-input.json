@@ -7,7 +7,7 @@
     "part_operation_id":{"type":"string"},"effect_operation_ref":{"type":"string"},"attempt_id":{"type":"string"},
     "semantic_digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"binding_ref":{"type":"string"},
     "cause_component_id":{"type":"string"},"cause_kind":{"type":"string"},"cause_id":{"type":"string"},
-    "lane_kind":{"enum":["CHAT","CONTROL"]},"ordering_key":{"type":"string"},"lane_sequence":{"type":"integer","minimum":1},
+    "lane_kind":{"enum":["CHAT","CONTROL","OUTBOUND"]},"ordering_key":{"type":"string"},"lane_sequence":{"type":"integer","minimum":1},
     "channel_kind":{"enum":["GROUP","PRIVATE"]},"channel_ref":{"type":"string"},"owner_epoch":{"type":"integer","minimum":1},
     "owner_expires_at":{"type":"string","format":"date-time"},
     "payload":{"type":"object","required":["payload_id","digest","owner_component_id","owner_kind","owner_id"],"properties":{"payload_id":{"type":"string"},"digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"owner_component_id":{"type":"string"},"owner_kind":{"type":"string"},"owner_id":{"type":"string"}},"additionalProperties":false}

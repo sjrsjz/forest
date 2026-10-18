@@ -29,6 +29,7 @@ def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
         "delivery.create-control-intent",
         "delivery.create-control-intent-uow",
         "delivery.create-core-rescue-intent-uow",
+        "delivery.create-outbound-intent",
         "delivery.record-prepare",
         "delivery.record-handoff",
         "delivery.record-observe",
@@ -47,6 +48,7 @@ def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
         "delivery.release",
         "delivery.abandon",
         "delivery.reject-prepare",
+        "delivery.submit-outbound",
     ]
     assert {item["id"] for item in snapshot.component["management_queries"]} == {
         "delivery.unknown.list", "delivery.unknown.get",

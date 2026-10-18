@@ -1,5 +1,7 @@
 # 原生 Python 插件与开发体验详细设计
 
+Agent 工具的当前接入契约见 [24 工具网关与外部插件](24-agent-tool-gateway-and-external-plugins.md)：外部包使用 `agent_tools` 声明贡献，执行服务与原结果只读查询服务分别提供；SDK 的 `AgentToolExecutor` 只处理准确回执，不解释工具业务或重新发现路由。[首批插件](../plugins/README.md)给出可构建的完整包与设置 UI。
+
 > 本文是 Python 模块 SDK 与工具链的目标契约，不陈述当前完成度。可运行能力、测试证据和缺口只见[实现状态](implementation-status.md)。示例代码只能帮助理解 API，不能覆盖本文、[00 架构总契约](00-architecture-contract.md)或准确模块 Generation 的约束。
 
 ## 1. 插件作者看到的接口

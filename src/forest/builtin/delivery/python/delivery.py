@@ -3,7 +3,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, job
+from forest.sdk import Plugin, job, service
 
 _CORE_RESCUE_DELIVERY_DENIALS = frozenset({
     "CORE_RESCUE_DELIVERY_REVOKED",
@@ -38,6 +38,39 @@ class Delivery(Plugin):
                 "Delivery configuration protocol is unsupported",
                 422,
             )
+
+    @service("delivery.submit", semantics="at-most-once", input_schema="schemas/submit-input.json",
+             output_schema="schemas/intent-output.json")
+    async def submit(self, payload, ctx):
+        caller = ctx.caller_component_id
+        if caller is None:
+            raise ForestError("DELIVERY_CALLER_REQUIRED", "Outbound messages require a routed module caller", 403)
+        intent_id = "outbound:" + _digest({"caller": caller, "cause_id": payload["cause_id"]})[7:]
+        reference = await ctx.payloads.put_json(
+            {"parts": _plain(payload["parts"])},
+            owner_kind="outbound.message", owner_id=intent_id,
+        )
+        intent = {
+            "protocol": "forest.delivery-intent/1", "intent_id": intent_id,
+            "binding_ref": payload["binding_ref"], "lane_kind": "OUTBOUND",
+            "ordering_key": "onebot:" + payload["channel_kind"].lower() + ":" + payload["channel_ref"],
+            "conversation_ref": None, "channel_kind": payload["channel_kind"],
+            "channel_ref": payload["channel_ref"], "cause_component_id": caller,
+            "cause_kind": "module.outbound", "cause_id": payload["cause_id"],
+            "delivery_generation_id": ctx.identity["generation_id"], "reply_ref": None,
+            "parts": [{"part_operation_id": ctx.operations.stable("outbound-part"),
+                       "effect_operation_ref": ctx.operations.stable("outbound-send"),
+                       "payload": _plain(reference)}],
+        }
+        return await ctx.uow.call(
+            "delivery.submit-outbound", {"delivery": intent},
+            operation_id=ctx.operations.stable("outbound-intent"), timeout=10,
+        )
+
+    @service("delivery.status", semantics="read", input_schema="schemas/status-input.json",
+             output_schema="schemas/status-output.json")
+    async def status(self, payload, ctx):
+        return await ctx.queries.call("delivery.intent-status", dict(payload), timeout=5)
 
     @staticmethod
     def _parts(value):

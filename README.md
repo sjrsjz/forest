@@ -11,7 +11,7 @@ Forest 是一个正在重构中的重型多 Bot 微内核框架。它以不可�
 后续设计和实现必须按以下顺序读取：
 
 1. [架构总契约](doc/00-architecture-contract.md)：最高权威，固定产品语义、模块边界、执行链和重构禁区。
-2. [设计索引](doc/README.md)：列出 01–22 的裁决顺序和各领域详细设计。
+2. [设计索引](doc/README.md)：列出各文档的裁决顺序和领域详细设计。
 3. [微内核运行时与控制面](doc/13-microkernel-control-plane-redesign.md)：模块代际、运行图、管理贡献和宿主职责。
 4. [干净数据库基线](doc/14-clean-schema-and-payload-provenance.md)：模块数据所有权、schema bundle、载荷来源和跨模块事务。
 5. [当前实现状态](doc/implementation-status.md)：只记录已实现能力、阻断项与实际运行证据，不定义目标架构。

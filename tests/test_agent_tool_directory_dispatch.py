@@ -28,6 +28,7 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
         },
         approval_required=False,
         supports_query=True,
+        query_service_id="module.inspect.query",
     )
     command = {
         "protocol": "forest.agent-tool-execute/1",
@@ -51,6 +52,8 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
         "contract_digest": contribution.contract_digest,
         "approval_required": False,
         "supports_query": True,
+        "query_service_id": "module.inspect.query",
+        "timeout_seconds": 30,
     }
     command["binding_digest"] = digest_json(binding)
     wire_digest = digest_json(command)
@@ -64,6 +67,12 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
         )
 
         async def invoke(self, payload, **values):
+            assert payload["protocol"] == "forest.agent-tool-execute/1"
+            invoked.append((payload, values))
+            return {"status": "SUCCEEDED"}
+
+        async def query(self, payload, **values):
+            assert payload["protocol"] == "forest.agent-tool-query/1"
             invoked.append((payload, values))
             return {"status": "SUCCEEDED"}
 
@@ -88,6 +97,10 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
         domain_queries=None,
         domain_query_declarations=(),
         agent_tool_effects=Effects(),
+    )
+    assert directory.requirements() == (
+        {"service_id": "module.inspect", "version": 1},
+        {"service_id": "module.inspect.query", "version": 1},
     )
     request = {
         "kind": "agent-tools",

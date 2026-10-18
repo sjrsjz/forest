@@ -31,8 +31,21 @@ from forest.worker_limits import WorkerLimits
 
 
 def _error_details(error: dict) -> dict | None:
-    """Only typed state-repair metadata may cross the private IPC boundary."""
+    """Allow typed repair metadata and code locations, never exception text or locals."""
     details = error.get("details")
+    if error.get("code") == "PLUGIN_FAILED" and isinstance(details, dict):
+        kind, frames = details.get("exception_type"), details.get("frames")
+        if (set(details) == {"exception_type", "frames"}
+                and isinstance(kind, str) and kind.isidentifier() and len(kind) <= 128
+                and isinstance(frames, list) and len(frames) <= 4
+                and all(isinstance(frame, dict) and set(frame) == {"file", "line", "function"}
+                        and isinstance(frame["file"], str) and 1 <= len(frame["file"]) <= 128
+                        and not any(c in frame["file"] for c in "/\\\r\n")
+                        and type(frame["line"]) is int and frame["line"] > 0
+                        and isinstance(frame["function"], str) and len(frame["function"]) <= 128
+                        for frame in frames)):
+            return {"exception_type": kind, "frames": frames}
+        return None
     if error.get("code") == "EMBEDDING_FACET_INVALID" and isinstance(details, dict):
         facet_id = details.get("facet_id")
         digest = details.get("facet_content_digest")
@@ -862,12 +875,14 @@ class PythonWorker:
         causal_root_id: str | None = None,
         timeout: float = 30,
         before_send: Callable[[], Awaitable[None]] | None = None,
+        caller_component_id: str | None = None,
     ) -> Any:
         return await self._invoke(
             "invoke", "service", service, payload,
             call_id=call_id, operation_id=operation_id,
             causal_root_kind=causal_root_kind, causal_root_id=causal_root_id, timeout=timeout,
             before_send=before_send,
+            caller_component_id=caller_component_id,
         )
 
     async def deliver_event(
@@ -971,6 +986,7 @@ class PythonWorker:
         causal_root_id: str | None,
         timeout: float,
         before_send: Callable[[], Awaitable[None]] | None,
+        caller_component_id: str | None = None,
     ) -> Any:
         if self.state != "ACTIVE":
             raise ForestError(
@@ -1067,6 +1083,7 @@ class PythonWorker:
                             "payload": payload,
                             "call_id": call_id,
                             "operation_id": operation_id,
+                            "caller_component_id": caller_component_id,
                         },
                         timeout=max(0.001, deadline - time.monotonic()),
                         request_id=request_id,

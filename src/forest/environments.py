@@ -37,7 +37,7 @@ from forest.security import private_directory
 
 SDK_API = "1.0"
 SDK_FILES = (
-    "__init__.py", "command_contract.py", "errors.py", "sdk.py", "drivers/__init__.py",
+    "__init__.py", "command_contract.py", "errors.py", "sdk.py", "sdk_tools.py", "drivers/__init__.py",
     "drivers/protocol.py", "drivers/python_worker.py", "drivers/worker.py",
     "model_contract.py", "embedding_contract.py", "scope_identity.py", "worker_limits.py",
 )

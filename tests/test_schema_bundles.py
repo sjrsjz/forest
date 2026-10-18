@@ -1314,6 +1314,7 @@ async def test_runtime_graph_retains_unchanged_generations_without_republishing_
     )
     registry = SimpleNamespace(
         graph_identity=first,
+        descriptors=(),
         instances={
             "example.provider": provider_instance,
             "example.caller": caller_instance,

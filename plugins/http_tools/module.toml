@@ -1,0 +1,100 @@
+manifest_version = 1
+package_id = "forest.plugins.http-tools"
+version = "1.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "plugin:Tools"
+
+[[components]]
+id = "tools.http"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+bootstrap_config = "defaults.json"
+configuration_apply = "worker-host/1"
+
+[components.capabilities]
+requests = ["state.read", "state.write", "payload.read", "payload.write", "service.call:tools.http.http"]
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 16
+max_queue_items = 64
+max_state_inflight = 8
+max_owned_tasks = 4
+max_owned_resources = 4
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 90
+stop_timeout_s = 10
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "tools.http.workspace"
+label = "Http Tools"
+group = "tools"
+order = 10
+
+[[components.effect_services]]
+name = "tools.http.http"
+kind = "network.http"
+contract = "1.0"
+semantics = "at-most-once"
+input_schema = "schemas/http-input.json"
+output_schema = "schemas/http-output.json"
+
+[[components.provides]]
+name = "tools.http.http-get"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.http.http-get.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "http_get"
+service_id = "tools.http.http-get"
+service_version = 1
+declaration_schema = "schemas/http_get.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.http.http-get.query"
+timeout_s = 90
+
+[[components.provides]]
+name = "tools.http.http-request"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.http.http-request.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "http_request"
+service_id = "tools.http.http-request"
+service_version = 1
+declaration_schema = "schemas/http_request.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.http.http-request.query"
+timeout_s = 90

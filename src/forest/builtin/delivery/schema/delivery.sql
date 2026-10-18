@@ -1,7 +1,7 @@
 CREATE TABLE delivery_lanes (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     binding_ref text NOT NULL CHECK (octet_length(binding_ref) BETWEEN 1 AND 256),
-    lane_kind text NOT NULL CHECK (lane_kind IN ('CHAT','CONTROL')),
+    lane_kind text NOT NULL CHECK (lane_kind IN ('CHAT','CONTROL','OUTBOUND')),
     ordering_key text NOT NULL CHECK (octet_length(ordering_key) BETWEEN 1 AND 256),
     next_sequence bigint NOT NULL DEFAULT 1 CHECK (next_sequence > 0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -17,7 +17,7 @@ CREATE TABLE send_intents (
     ),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     binding_ref text NOT NULL CHECK (octet_length(binding_ref) BETWEEN 1 AND 256),
-    lane_kind text NOT NULL CHECK (lane_kind IN ('CHAT','CONTROL')),
+    lane_kind text NOT NULL CHECK (lane_kind IN ('CHAT','CONTROL','OUTBOUND')),
     ordering_key text NOT NULL CHECK (octet_length(ordering_key) BETWEEN 1 AND 256),
     lane_sequence bigint NOT NULL CHECK (lane_sequence > 0),
     conversation_ref text,
@@ -50,7 +50,7 @@ CREATE TABLE send_intents (
     CHECK (reply_ref IS NULL OR octet_length(reply_ref) BETWEEN 1 AND 512),
     CHECK (
         (lane_kind='CHAT' AND conversation_ref IS NOT NULL AND reply_ref IS NOT NULL)
-        OR (lane_kind='CONTROL' AND reply_ref IS NULL)
+        OR (lane_kind IN ('CONTROL','OUTBOUND') AND reply_ref IS NULL)
     ),
     CHECK (current_part_index < part_count),
     CHECK (
@@ -429,7 +429,7 @@ BEGIN
        OR requested_operation IS NULL OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
        OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
        OR requested_intent IS NULL OR octet_length(requested_intent) NOT BETWEEN 1 AND 256
-       OR requested_lane NOT IN ('CHAT','CONTROL')
+       OR requested_lane NOT IN ('CHAT','CONTROL','OUTBOUND')
        OR input->>'channel_kind' NOT IN ('GROUP','PRIVATE')
        OR requested_generation IS DISTINCT FROM context->>'generation_id'
        OR jsonb_typeof(input->'parts') IS DISTINCT FROM 'array'
@@ -481,6 +481,13 @@ BEGIN
                 'code','DELIVERY_INPUT_INVALID','message','CONTROL intent cannot answer a reply','status',422
             )
         );
+    END IF;
+    IF requested_lane='OUTBOUND' AND (
+        input->>'reply_ref' IS NOT NULL OR input->>'conversation_ref' IS NOT NULL
+        OR input->>'cause_kind' IS DISTINCT FROM 'module.outbound'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+            jsonb_build_object('code','DELIVERY_CAUSE_INVALID','message','OUTBOUND cause is invalid','status',422));
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(requested_bot || E'\\0delivery-intent\\0' || requested_operation,0));
     SELECT * INTO existing FROM __forest_module_schema__.send_intents
@@ -1184,3 +1191,15 @@ BEGIN
       'observations',observed));
 END;
 $$;
+
+CREATE FUNCTION delivery_create_outbound_intent_uow(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog
+AS $$ SELECT __forest_module_schema__.delivery_create_intent(context,envelope->'input') $$;
+
+CREATE FUNCTION delivery_intent_status(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql STABLE SET search_path=pg_catalog
+AS $$ SELECT jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    (SELECT jsonb_build_object('intent_id',intent_id,'binding_ref',binding_ref,
+             'channel_kind',channel_kind,'channel_ref',channel_ref,'state',state,'error_code',error_code)
+       FROM __forest_module_schema__.send_intents
+      WHERE bot_id=context->>'bot_id' AND intent_id=input->>'intent_id')) $$;

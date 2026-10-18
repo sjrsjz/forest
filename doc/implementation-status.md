@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-19 Agent 工具网关与外部包已更新运行实例：DeepSeek 搜索/抓取、HTTP 读写与 13 项 OneBot 查询/发送/管理工具共 17 项，使用显式组件/代际绑定、独立只读查询、原 attempt 恢复及 Effect 不确定性证据。完整 PostgreSQL/真实 Worker 模拟实例通过全部工具、普通成员管理拒绝、CQ wire 与 1.0.0→1.0.1 热替换，1 passed in 610.59s；真实 Search/Fetch 各一次 HTTP 200。现役为 Graph 41、25/25 ACTIVE、25/25 bundle READY；三个独立设置 UI 与配置计划在真实控制台验收，发现 24 个已加入群。原人格、Provider、Adapter、触发策略、Shell 配置及 925 条记忆来源保留；只重建 Delivery 与 Worker Host 开发记录。新版唯一观察器首样本无违约，真实群管理未执行、24 小时稳定性未验收。设计见 [24](24-agent-tool-gateway-and-external-plugins.md)，证据见[外部工具验收](external-tools-acceptance-2026-10-19.md)。
+
 2026-10-19 触发策略群选择页：`conversation.trigger-policy` 1.1.1 随包提供 **对话触发策略** UI，消费 Adapter 3.2.1 的只读群目录服务；内核未增加 QQ 群管理业务。支持多账号选择、群名/群号搜索、每页 25 条、完整已选集合，以及群触发方式和私聊开关；翻页或查询失败均保留已有白名单。只读端口复用 Generation 的唯一 OneBot 连接，按代际和绑定身份隔离，没有新增数据库或后台轮询。46 项 OneBot 检查、2 项隔离 PostgreSQL/完整 BotHost 检查通过；桌面浏览器验证了分页、失败保留、账号切换和安全文本渲染。真实管理查询识别出一个账号的 24 个已加入群，真实控制台核对现有勾选状态，并成功生成、丢弃标准配置计划；原触发配置保持不变，未发送群聊测试消息。设计见 [23 群选择契约](23-trigger-policy-group-selection.md)，操作见[使用指南](user-guide.md#选择允许触发的群)。
 
 2026-10-19 00:30 CST 停启修复已部署：处理 `CONTROL_DRIVER_CONSUMER_CONFLICT` 的旧 BotHost 绑定残留。Registry 将已退休且资源已释放的事实与排空错误分开；BotHost 在异常路径也撤销已释放的绑定，尚未完成的资源、Graph 或租约清理继续保留所有者。10 项定向检查及隔离 PostgreSQL 的完整 BotHost 链通过。新镜像同一 Supervisor 内实际 OFFLINE → ONLINE 成功，RuntimeGraph 修订 26、22/22 ACTIVE、22/22 schema bundle READY，首观察样本零违规。见[停启验收](lifecycle-stop-start-acceptance-2026-10-19.md)。

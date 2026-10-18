@@ -262,6 +262,8 @@ class RuntimeAgentToolContribution:
     declaration: dict
     approval_required: bool = True
     supports_query: bool = False
+    query_service_id: str | None = None
+    timeout_seconds: int = 30
 
     def __post_init__(self) -> None:
         if (
@@ -271,6 +273,11 @@ class RuntimeAgentToolContribution:
             or self.version < 1
             or type(self.approval_required) is not bool
             or type(self.supports_query) is not bool
+            or type(self.timeout_seconds) is not int or not 1 <= self.timeout_seconds <= 900
+            or self.supports_query != (self.query_service_id is not None)
+            or self.query_service_id == self.service_id
+            or (self.query_service_id is not None and not re.fullmatch(
+                r"[a-z0-9][a-z0-9._-]{0,127}", self.query_service_id))
             or not isinstance(self.declaration, dict)
             or self.declaration.get("name") != self.name
             or not isinstance(self.declaration.get("description"), str)
@@ -294,7 +301,7 @@ class RuntimeAgentToolContribution:
 
     def as_fact(self) -> dict:
         return {
-            "protocol": "forest.agent-tool-contribution/1",
+            "protocol": "forest.agent-tool-contribution/2",
             "name": self.name,
             "service_id": self.service_id,
             "version": self.version,
@@ -302,6 +309,8 @@ class RuntimeAgentToolContribution:
             "contract_digest": self.contract_digest,
             "approval_required": self.approval_required,
             "supports_query": self.supports_query,
+            "query_service_id": self.query_service_id,
+            "timeout_seconds": self.timeout_seconds,
         }
 
 

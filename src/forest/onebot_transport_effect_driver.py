@@ -394,7 +394,7 @@ class OneBotTransportEffectDriver:
     async def quiesce(self) -> None:
         self._send_admission = False
 
-    async def groups_page(self, payload, *, scope):
+    async def _query_transport(self, payload, scope):
         transport = self._bindings.get(payload["binding_ref"])
         if (not self._send_admission or transport is None
                 or scope.component_id != self.identity.component_id
@@ -413,6 +413,10 @@ class OneBotTransportEffectDriver:
         await self.runtime.verify_generation_member(
             component_id=self.identity.component_id, generation_id=self.identity.generation_id,
         )
+        return transport
+
+    async def groups_page(self, payload, *, scope):
+        transport = await self._query_transport(payload, scope)
         groups = await transport.client.get_group_list(timeout=10)
         query, after = payload["query"].casefold(), payload["after_group_id"]
         matching = sorted(
@@ -423,6 +427,21 @@ class OneBotTransportEffectDriver:
         items = remaining[:25]
         return {"items": items, "total": len(matching),
                 "next_after_group_id": items[-1]["group_id"] if len(remaining) > 25 else None}
+
+    async def api_query(self, payload, *, scope):
+        transport = await self._query_transport(payload, scope)
+        if payload["action"] == "get_login_info":
+            data = await transport.client.get_login_info(timeout=10)
+        else:
+            data = await transport.client.query_api(payload["action"], payload["arguments"], timeout=10)
+        return {"binding_ref": transport.declaration["binding_ref"],
+                "self_id": transport.declaration["self_id"], "data": data}
+
+    async def api_command(self, payload, *, scope):
+        transport = await self._query_transport(payload, scope)
+        result = await transport.client.command_api(payload["action"], payload["arguments"], timeout=10)
+        return {"binding_ref": transport.declaration["binding_ref"],
+                "self_id": transport.declaration["self_id"], **result}
 
     async def resume(self) -> None:
         if any(transport.client.is_closed for transport in self._bindings.values()):
@@ -455,13 +474,14 @@ class OneBotTransportEffectDriver:
             ) from failures[0]
 
 
-class _OneBotGroupsReadView:
-    """Read port borrowing the sole transport owner of this Generation."""
+class _OneBotTransportPort:
+    """Service port borrowing the sole transport owner of this Generation."""
 
-    def __init__(self, owners, identity):
+    def __init__(self, owners, identity, operation="groups_page"):
         self._owners = owners
         self._generation_id = identity.generation_id
         self._active = False
+        self._operation = operation
 
     async def start(self):
         self._active = True
@@ -479,7 +499,7 @@ class _OneBotGroupsReadView:
         owner = self._owners.get(self._generation_id)
         if not self._active or owner is None:
             raise ForestError("ONEBOT_TRANSPORT_CLOSED", "OneBot group discovery is unavailable", 503)
-        return await owner.groups_page(payload, scope=scope)
+        return await getattr(owner, self._operation)(payload, scope=scope)
 
 
 def onebot_transport_effect_driver_factory(
@@ -500,7 +520,14 @@ def onebot_transport_effect_driver_factory(
         if (declaration.get("kind") == "onebot.websocket-v11"
                 and declaration.get("name") == "adapter.onebot.transport.groups-page"
                 and declaration.get("semantics") == "read"):
-            return _OneBotGroupsReadView(owners, identity)
+            return _OneBotTransportPort(owners, identity)
+        for name, operation, semantics in (
+            ("adapter.onebot.transport.api-query", "api_query", "read"),
+            ("adapter.onebot.transport.api-command", "api_command", "at-most-once"),
+        ):
+            if (declaration.get("kind") == "onebot.websocket-v11"
+                    and declaration.get("name") == name and declaration.get("semantics") == semantics):
+                return _OneBotTransportPort(owners, identity, operation)
         driver = OneBotTransportEffectDriver(
             configuration,
             configuration_revision,

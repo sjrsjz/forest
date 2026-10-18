@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "binding_ref": {
+      "type": "string"
+    },
+    "action": {
+      "enum": [
+        "get_login_info",
+        "get_group_info",
+        "get_group_member_info",
+        "get_group_member_list"
+      ]
+    },
+    "arguments": {
+      "type": "object"
+    },
+    "binding_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "connection_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "client_incarnation": {
+      "type": "string"
+    },
+    "adapter_generation_id": {
+      "type": "string"
+    },
+    "graph_id": {
+      "type": "string"
+    },
+    "graph_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "transport_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    }
+  },
+  "required": [
+    "binding_ref",
+    "action",
+    "arguments",
+    "binding_epoch",
+    "connection_epoch",
+    "client_incarnation",
+    "adapter_generation_id",
+    "graph_id",
+    "graph_revision",
+    "transport_digest"
+  ],
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "properties": {
+        "action": {
+          "const": "get_login_info"
+        },
+        "arguments": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "get_group_info"
+        },
+        "arguments": {
+          "type": "object",
+          "properties": {
+            "group_id": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,18}$"
+            }
+          },
+          "required": [
+            "group_id"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "get_group_member_info"
+        },
+        "arguments": {
+          "type": "object",
+          "properties": {
+            "group_id": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,18}$"
+            },
+            "user_id": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,18}$"
+            }
+          },
+          "required": [
+            "group_id",
+            "user_id"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "get_group_member_list"
+        },
+        "arguments": {
+          "type": "object",
+          "properties": {
+            "group_id": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,18}$"
+            },
+            "after_user_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[1-9][0-9]{0,18}$"
+            }
+          },
+          "required": [
+            "group_id",
+            "after_user_id"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

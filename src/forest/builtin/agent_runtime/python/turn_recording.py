@@ -87,6 +87,8 @@ def tool_directory(value: dict, *, identity: dict) -> tuple[list[dict], dict[str
         "contract_digest",
         "approval_required",
         "supports_query",
+        "query_service_id",
+        "timeout_seconds",
         "owner_component_id",
         "target_generation_id",
     }
@@ -94,7 +96,7 @@ def tool_directory(value: dict, *, identity: dict) -> tuple[list[dict], dict[str
         if (
             not isinstance(item, dict)
             or set(item) != expected
-            or item.get("protocol") != "forest.agent-tool-contribution/1"
+            or item.get("protocol") != "forest.agent-tool-contribution/2"
             or not isinstance(item.get("declaration"), dict)
             or item["declaration"].get("name") != item.get("name")
             or type(item.get("version")) is not int
@@ -122,6 +124,8 @@ def tool_directory(value: dict, *, identity: dict) -> tuple[list[dict], dict[str
             "contract_digest": item["contract_digest"],
             "approval_required": item["approval_required"],
             "supports_query": item["supports_query"],
+            "query_service_id": item["query_service_id"],
+            "timeout_seconds": item["timeout_seconds"],
         }
         binding["binding_digest"] = digest_json(
             {key: binding[key] for key in binding if key != "service_version"}

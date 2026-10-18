@@ -1,0 +1,16 @@
+{
+  "endpoint": "https://api.deepseek.com",
+  "transport": {
+    "allowed_origins": [
+      "https://api.deepseek.com"
+    ],
+    "allow_public_urls": false,
+    "allowed_private_hosts": [],
+    "timeout_seconds": 20,
+    "max_response_bytes": 2097152,
+    "credential_ref": null,
+    "credential_purpose": "tools.deepseek-web.credential"
+  },
+  "max_result_chars": 12000,
+  "max_results": 10
+}

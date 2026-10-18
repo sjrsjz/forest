@@ -102,7 +102,9 @@ ToolCall 固定目标 component、Generation、service、契约摘要、完整 b
 
 授权完成后，`agent.handoff-tool-effect/1` 在同一事务内把 Kernel Effect 与 Agent ToolCall 推进到 `DISPATCHING`。提交成功后，受限工具网关才可调用 RuntimeGraph 中已冻结的目标服务；网关必须复核 Effect permit、wire digest、目标 Generation、service/version、binding digest 和当前调用因果根，不能按工具名重新发现路由。工具服务接收 `forest.agent-tool-execute/1` DTO，返回自身拥有的 `tool.result` 精确 PayloadRef 或类型化失败；它不能取得 Agent Repository、授权对象或回调。
 
-执行回执只能进入 `agent.observe-tool-effect/1`：`kernel.effect` 先冻结 executor evidence，Agent participant 在同一事务内复核 evidence 与当前 ToolCall 后收敛状态。handoff 后超时、断连或 Worker/Generation 切换一律进入 `UNKNOWN`；只有 manifest 声明 `supports_query=true` 时，才允许通过同一冻结服务的 `forest.agent-tool-query/1` 查询原 operation，并以 `RECONCILIATION` evidence 收敛。查询不是重发。目标 Generation 必须在已 handoff Effect 得出可证明终态之前保留恢复端口和资源租约；无法证明时 Run 保持 `BLOCKED_UNKNOWN`。
+执行回执只能进入 `agent.observe-tool-effect/1`：`kernel.effect` 先冻结 executor evidence，Agent participant 在同一事务内复核 evidence 与当前 ToolCall 后收敛状态。handoff 后超时、断连或 Worker/Generation 切换一律进入 `UNKNOWN`；只有 manifest 声明 `supports_query=true` 和独立的 `query_service_id` 时，才允许通过同一组件、同一冻结 Generation 的 read 服务发送 `forest.agent-tool-query/1` 查询原 operation，并以 `RECONCILIATION` evidence 收敛。查询不能复用执行服务，不能写状态或重发。目标 Generation 必须在已 handoff Effect 得出可证明终态之前保留恢复端口和资源租约；无法证明时 Run 保持 `BLOCKED_UNKNOWN`。
+
+工具贡献协议 `forest.agent-tool-contribution/2` 同时冻结执行端口、查询端口与执行超时；查询契约随提供者工件和准确 Generation 固定。30 秒授权票据和 Effect permit 只约束交接，不能用作已交接请求的执行超时。[24 外部工具设计](24-agent-tool-gateway-and-external-plugins.md)定义 HTTP 传输与首批外部工具的职责边界。
 
 Agent 的工具目录 SDK 因此只有 `list`、`dispatch_prepared` 和 `query_handed_off` 三种能力。后两者都要求内核签发的精确 permit，不能接受裸工具名、临时 service handle 或 Worker 提供的“已授权”布尔值。旧 `KernelToolExecutionPort` 的进程内 callback、直接 Python `ToolDispatchResult` 和宿主工具映射已删除。`kernel.runtime` 自有的 `runtime_status` 工具也接受同一 `forest.agent-tool-execute/1` 命令，并返回 `forest.agent-tool-receipt/1` 与归属明确的 PayloadRef。
 

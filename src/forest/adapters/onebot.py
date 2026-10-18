@@ -736,6 +736,75 @@ class OneBotWebSocketClient:
                 "ONEBOT_GROUP_LIST_UNAVAILABLE", "Could not read the OneBot group list", 502
             ) from None
 
+    async def query_api(self, action: str, arguments: dict, *, timeout=10) -> dict:
+        if action not in {"get_group_info", "get_group_member_info", "get_group_member_list"}:
+            raise _invalid("Unsupported OneBot query")
+        params = {key: int(value) for key, value in arguments.items() if key in {"group_id", "user_id"}}
+        if action in {"get_group_info", "get_group_member_info"}:
+            params["no_cache"] = True
+        try:
+            body = await self._request(action, params, self._timeout(timeout),
+                                       response_limit=MAX_GROUP_LIST_BYTES)
+            result = _json(body, MAX_GROUP_LIST_BYTES)
+            if (not isinstance(result, dict) or result.get("status") != "ok"
+                    or type(result.get("retcode")) is not int or result["retcode"] != 0):
+                raise _invalid()
+            data = result.get("data")
+            if action == "get_group_info":
+                if not isinstance(data, dict) or _id(data.get("group_id")) != str(params["group_id"]):
+                    raise _invalid()
+                counts = {key: data.get(key) for key in ("member_count", "max_member_count")}
+                if any(type(value) is not int or value < 0 for value in counts.values()):
+                    raise _invalid()
+                return {"group_id": _id(data["group_id"]),
+                        "group_name": _string(data.get("group_name"), limit=256), **counts}
+            rows = data if action == "get_group_member_list" else [data]
+            if not isinstance(rows, list) or len(rows) > 10000:
+                raise _invalid()
+            members, seen = [], set()
+            for row in rows:
+                if (not isinstance(row, dict) or _id(row.get("group_id")) != str(params["group_id"])
+                        or row.get("role") not in {"owner", "admin", "member"}):
+                    raise _invalid()
+                user_id = _id(row.get("user_id"))
+                if user_id in seen or ("user_id" in params and user_id != str(params["user_id"])):
+                    raise _invalid()
+                seen.add(user_id)
+                members.append({"group_id": str(params["group_id"]), "user_id": user_id,
+                                "nickname": _string(row.get("nickname"), limit=256),
+                                "card": _string(row.get("card"), limit=256), "role": row["role"]})
+            if action == "get_group_member_info":
+                return members[0]
+            members.sort(key=lambda row: int(row["user_id"]))
+            after = arguments["after_user_id"]
+            remaining = [row for row in members if after is None or int(row["user_id"]) > int(after)]
+            items = remaining[:25]
+            return {"items": items, "total": len(members),
+                    "next_after_user_id": items[-1]["user_id"] if len(remaining) > 25 else None}
+        except (ForestError, _ActionError, ValueError, TypeError):
+            raise ForestError("ONEBOT_QUERY_FAILED", "OneBot query did not return valid data", 502) from None
+
+    async def command_api(self, action: str, arguments: dict, *, timeout=10) -> dict:
+        if action not in {"set_group_ban", "set_group_whole_ban", "set_group_kick",
+                          "set_group_card", "set_group_name"}:
+            raise _invalid("Unsupported OneBot command")
+        params = {key: int(value) if key in {"group_id", "user_id"} else value
+                  for key, value in arguments.items()}
+        try:
+            body = await self._request(action, params, self._timeout(timeout))
+            result = _json(body, MAX_RESPONSE_BYTES)
+            if not isinstance(result, dict) or type(result.get("retcode")) is not int:
+                raise _invalid()
+            if result.get("status") == "ok" and result["retcode"] == 0:
+                return {"outcome": "SUCCEEDED", "error_code": None}
+            if result.get("status") == "failed" and result["retcode"] != 0:
+                return {"outcome": "FAILED", "error_code": "ONEBOT_RETCODE_" + str(result["retcode"])}
+            return {"outcome": "UNKNOWN", "error_code": "ONEBOT_COMMAND_RESULT_INVALID"}
+        except _ActionError as error:
+            return {"outcome": "UNKNOWN" if error.uncertain else "FAILED", "error_code": error.code}
+        except (ForestError, ValueError, TypeError):
+            return {"outcome": "UNKNOWN", "error_code": "ONEBOT_COMMAND_RESULT_INVALID"}
+
     async def get_status(self, *, timeout: float | None = None) -> dict[str, bool]:
         try:
             body = await self._request("get_status", {}, self._timeout(timeout))

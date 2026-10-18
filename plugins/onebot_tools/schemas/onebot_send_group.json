@@ -1,0 +1,23 @@
+{
+  "name": "onebot_send_group",
+  "description": "Queue a proactive group message through Delivery. Supports CQ at/reply/face and managed media references. QUEUED is not SENT.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "group_id": {
+        "type": "string",
+        "pattern": "^[1-9][0-9]{0,18}$"
+      },
+      "message": {
+        "type": "string",
+        "maxLength": 16000
+      }
+    },
+    "required": [
+      "group_id",
+      "message"
+    ],
+    "additionalProperties": false
+  },
+  "strict": true
+}

@@ -1,0 +1,13 @@
+{
+  "transport": {
+    "allowed_origins": [],
+    "allow_public_urls": true,
+    "allowed_private_hosts": [],
+    "timeout_seconds": 20,
+    "max_response_bytes": 2097152,
+    "credential_ref": null,
+    "credential_purpose": "network.http.credential"
+  },
+  "max_result_chars": 12000,
+  "write_principals": []
+}

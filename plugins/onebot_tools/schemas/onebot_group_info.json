@@ -1,0 +1,18 @@
+{
+  "name": "onebot_group_info",
+  "description": "Read one allowed group by group_id.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "group_id": {
+        "type": "string",
+        "pattern": "^[1-9][0-9]{0,18}$"
+      }
+    },
+    "required": [
+      "group_id"
+    ],
+    "additionalProperties": false
+  },
+  "strict": true
+}

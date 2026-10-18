@@ -23,7 +23,7 @@ RUNTIME_STATUS_TOOL = RuntimeAgentToolContribution(
         "strict": True,
     },
     approval_required=False,
-    supports_query=True,
+    supports_query=False,
 )
 
 

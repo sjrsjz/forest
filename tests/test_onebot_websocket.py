@@ -129,6 +129,89 @@ async def test_group_discovery_uses_existing_socket_and_its_own_response_bound(m
         await client.aclose()
 
 
+async def test_member_queries_normalize_ids_and_page_without_changing_the_socket(monkeypatch):
+    client, socket = await create_client(monkeypatch)
+    rows = [{"group_id": 101, "user_id": i, "nickname": "Fixture", "card": "", "role": "member"}
+            for i in range(60, 30, -1)]
+
+    async def respond(wire):
+        request = json.loads(wire)
+        assert request["action"] == "get_group_member_list"
+        assert request["params"] == {"group_id": 101}
+        await socket.incoming.put(json.dumps({"status": "ok", "retcode": 0,
+                                              "data": rows, "echo": request["echo"]}))
+
+    socket.send = respond
+    try:
+        page = await client.query_api("get_group_member_list", {"group_id": "101", "after_user_id": None})
+        assert [item["user_id"] for item in page["items"]] == [str(i) for i in range(31, 56)]
+        assert page["total"] == 30 and page["next_after_user_id"] == "55"
+        last = await client.query_api("get_group_member_list", {"group_id": "101", "after_user_id": "55"})
+        assert [item["user_id"] for item in last["items"]] == [str(i) for i in range(56, 61)]
+        assert last["next_after_user_id"] is None
+        rows.append(rows[0])
+        with pytest.raises(onebot.ForestError, match="valid data"):
+            await client.query_api("get_group_member_list", {"group_id": "101", "after_user_id": None})
+        assert not client.is_closed and not client._pending
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("status,code,outcome", [("ok", 0, "SUCCEEDED"),
+                                               ("failed", 403, "FAILED"),
+                                               ("async", 1, "UNKNOWN")])
+async def test_management_commands_require_a_conclusive_platform_receipt(monkeypatch, status, code, outcome):
+    client, socket = await create_client(monkeypatch)
+
+    async def respond(wire):
+        request = json.loads(wire)
+        assert request["action"] == "set_group_ban"
+        assert request["params"] == {"group_id": 101, "user_id": 42, "duration": 0}
+        await socket.incoming.put(json.dumps({"status": status, "retcode": code,
+                                              "data": None, "echo": request["echo"]}))
+
+    socket.send = respond
+    try:
+        result = await client.command_api("set_group_ban", {"group_id": "101", "user_id": "42", "duration": 0})
+        assert result["outcome"] == outcome
+        with pytest.raises(onebot.ForestError, match="Unsupported"):
+            await client.command_api("delete_msg", {})
+    finally:
+        await client.aclose()
+
+
+async def test_management_handoff_disconnect_is_unknown_and_never_retried(monkeypatch):
+    client, socket = await create_client(monkeypatch)
+    try:
+        operation = asyncio.create_task(client.command_api(
+            "set_group_kick", {"group_id": "101", "user_id": "42", "reject_add_request": False}))
+        await asyncio.wait_for(socket.sent_event.wait(), timeout=3)
+        await socket.remote_disconnect()
+        result = await asyncio.wait_for(operation, timeout=3)
+        assert result["outcome"] == "UNKNOWN"
+        assert sum(row["action"] == "set_group_kick" for row in socket.sent) == 1
+    finally:
+        await client.aclose()
+
+
+async def test_member_authority_queries_explicitly_bypass_platform_cache(monkeypatch):
+    client, socket = await create_client(monkeypatch)
+
+    async def respond(wire):
+        request = json.loads(wire)
+        assert request["params"] == {"group_id": 101, "user_id": 42, "no_cache": True}
+        await socket.incoming.put(json.dumps({"status": "ok", "retcode": 0,
+            "data": {"group_id": 101, "user_id": 42, "nickname": "Fixture", "card": "", "role": "admin"},
+            "echo": request["echo"]}))
+
+    socket.send = respond
+    try:
+        result = await client.query_api("get_group_member_info", {"group_id": "101", "user_id": "42"})
+        assert result["role"] == "admin"
+    finally:
+        await client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_sustained_event_stream_is_buffered_then_consumed_once_in_order(monkeypatch):
     client, socket = await create_client(monkeypatch, event_capacity=1200)

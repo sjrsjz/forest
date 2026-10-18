@@ -12,8 +12,8 @@ from forest.errors import ForestError
 from forest.onebot_wire_effect_driver import OneBotWireEffectDriver
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'src/forest/builtin/onebot_codec/python'))
-from cq_presentation import prepare_template
 from cq_memory import encode_message
+from cq_presentation import prepare_template
 
 
 def prepare(text):

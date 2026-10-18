@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.delivery"
-version = "0.7.0"
+version = "0.8.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "delivery:Delivery"
@@ -14,7 +14,6 @@ config_schema = "schemas/config.json"
 bootstrap_config = "bootstrap.json"
 auto_install = true
 configuration_apply = "worker-host/1"
-provides = []
 
 [components.resources]
 max_frame_bytes = 262144
@@ -32,6 +31,9 @@ stop_timeout_s = 10
 
 [components.capabilities]
 requests = [
+  "payload.write",
+  "uow.execute:delivery.submit-outbound",
+  "domain.query:delivery.intent-status",
   "service.call:kernel.payload.json-read",
   "service.call:kernel.effect.json-materialize",
   "service.call:adapter.onebot.delivery.prepare",
@@ -93,9 +95,9 @@ order = 20
 
 [components.storage]
 schema_id = "forest.delivery"
-schema_version = "3.4.0"
+schema_version = "3.5.0"
 baseline = "schema/delivery.sql"
-baseline_sha256 = "e3a4c5ddc33a63d727ffa55790c076e2423ff1dcc8dc14379c189a4f38fd658c"
+baseline_sha256 = "0995ac3f48af08dfd6f282f17bc0ce898fe73425105f62ca918bee899fc954ae"
 scope = "bot"
 repository_contract = "forest.delivery.repository/3"
 execution_profile = "official"
@@ -332,3 +334,47 @@ input_schema = "schemas/release-plan.json"
 output_schema = "schemas/delivery-result.json"
 timeout_s = 10
 steps = [{ id = "delivery", component_id = "delivery", participant = "delivery.reject-prepare-record" }]
+
+[[components.provides]]
+name = "delivery.submit"
+contract = "1.0"
+semantics = "at-most-once"
+input_schema = "schemas/submit-input.json"
+output_schema = "schemas/intent-output.json"
+
+[[components.provides]]
+name = "delivery.status"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/status-input.json"
+output_schema = "schemas/status-output.json"
+
+[[components.domain_queries]]
+name = "delivery.intent-status"
+contract = "1.0"
+function = "delivery_intent_status"
+input_schema = "schemas/status-input.json"
+output_schema = "schemas/status-output.json"
+
+[[components.unit_of_work_participants]]
+name = "delivery.create-outbound-intent"
+contract = "1.0"
+function = "delivery_create_outbound_intent_uow"
+input_schema = "schemas/outbound-intent-envelope.json"
+output_schema = "schemas/intent-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/parts/*/payload"
+owner_component = "delivery"
+owner_kind = "outbound.message"
+owner_id_path = "/input/parts/*/payload/owner_id"
+
+[[components.unit_of_work_plans]]
+name = "delivery.submit-outbound"
+contract = "1.0"
+input_schema = "schemas/submit-plan.json"
+output_schema = "schemas/intent-output.json"
+timeout_s = 10
+steps = [
+  { id = "delivery", component_id = "delivery", participant = "delivery.create-outbound-intent", input_path = "/delivery" }
+]

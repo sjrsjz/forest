@@ -41,6 +41,7 @@ from forest.control_effect_driver import control_export_effect_driver_factory
 from forest.core_runtime import bootstrap_kernel
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
 from forest.errors import ForestError
+from forest.http_effect_driver import http_effect_driver_factory
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
 from forest.kernel_resource_admission import assess_worker_capacity_in
 from forest.media_capture_effect_driver import media_image_fetch_effect_driver_factory
@@ -649,6 +650,10 @@ class BotHost:
             **adapter_driver_options,
         )
         effect_factories = {
+                "network.http": http_effect_driver_factory(
+                    runtime=self._kernel.runtime, payloads=self._kernel.payload,
+                    credential_resolver=self._credential_resolver,
+                ),
                 "chat-completions.http": provider_effect_factory,
                 "chat-completions.result-lookup": provider_effect_factory,
                 "embedding.multimodal.http": embedding_effect_factory,

@@ -20,6 +20,24 @@ _SERVICE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 
 
 @dataclass(frozen=True)
+class FrozenAgentToolHandle:
+    execution: Any
+    observation: Any = None
+
+    @property
+    def route(self):
+        return self.execution.route
+
+    async def invoke(self, payload, **kwargs):
+        return await self.execution.invoke(payload, **kwargs)
+
+    async def query(self, payload, **kwargs):
+        if self.observation is None:
+            raise ForestError("AGENT_TOOL_QUERY_UNSUPPORTED", "Tool has no observation port", 409)
+        return await self.observation.invoke(payload, **kwargs)
+
+
+@dataclass(frozen=True)
 class FrozenServiceRoute:
     service_id: str
     version: int
@@ -424,7 +442,15 @@ class RuntimeContractRouter:
                     admission_lane="DATA",
                     owned_work=True,
                 )
-                discovered.append((descriptor.component_id, contribution, handle))
+                observation = None
+                if contribution.query_service_id is not None:
+                    observation = self.request(
+                        caller_component_id=caller_component_id,
+                        service_id=contribution.query_service_id, version=contribution.version,
+                        admission_lane="DATA", owned_work=True,
+                    )
+                discovered.append((descriptor.component_id, contribution,
+                                   FrozenAgentToolHandle(handle, observation)))
         return tuple(discovered)
 
     def shell_commands(
@@ -706,6 +732,15 @@ class RuntimeContractRouter:
                 admission_lane=admission_lane,
                 owned_work=owned_work,
             )
+        for descriptor in self.registry.descriptors:
+            for tool in descriptor.agent_tools:
+                endpoints = [(tool.service_id, tool.version)]
+                if tool.query_service_id is not None:
+                    endpoints.append((tool.query_service_id, tool.version))
+                    if endpoints[-1] not in self._read_only_services:
+                        raise ForestError("AGENT_TOOL_QUERY_INVALID", "Tool observation must be read-only", 409)
+                if any(self._providers.get(key, (None,))[0] != descriptor.component_id for key in endpoints):
+                    raise ForestError("AGENT_TOOL_ROUTE_STALE", "Tool ports must belong to the contributing component", 409)
         self._sealed = True
 
     def activate(self) -> None:

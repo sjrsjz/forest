@@ -196,6 +196,12 @@ class FrozenContributionDirectories:
                 }
                 for _owner, contribution, _service in routed
             )
+            if kind == "agent-tools":
+                required.extend(
+                    {"service_id": contribution.query_service_id, "version": contribution.version}
+                    for _owner, contribution, _service in routed
+                    if contribution.query_service_id is not None
+                )
         return tuple(required)
 
     def projection(self, graph_identity) -> dict:
@@ -402,6 +408,8 @@ class FrozenContributionDirectories:
             "contract_digest": contribution.contract_digest,
             "approval_required": contribution.approval_required,
             "supports_query": contribution.supports_query,
+            "query_service_id": contribution.query_service_id,
+            "timeout_seconds": contribution.timeout_seconds,
         }
         if (
             (
@@ -577,6 +585,8 @@ class FrozenContributionDirectories:
             "contract_digest": contribution.contract_digest,
             "approval_required": contribution.approval_required,
             "supports_query": contribution.supports_query,
+            "query_service_id": contribution.query_service_id,
+            "timeout_seconds": contribution.timeout_seconds,
         }
         if not contribution.supports_query:
             raise ForestError(
@@ -641,7 +651,7 @@ class FrozenContributionDirectories:
                 "Kernel Effect is not at a queryable handed-off boundary",
                 409,
             )
-        result = await service.invoke(
+        result = await service.query(
             command,
             operation_id=request["operation_id"],
             causal_root_kind=scope.causal_root_kind,

@@ -6,7 +6,7 @@
     "protocol": {"const": "forest.delivery-intent/1"},
     "intent_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "binding_ref": {"type": "string", "minLength": 1, "maxLength": 256},
-    "lane_kind": {"enum": ["CHAT", "CONTROL"]},
+    "lane_kind": {"enum": ["CHAT", "CONTROL", "OUTBOUND"]},
     "ordering_key": {"type": "string", "minLength": 1, "maxLength": 256},
     "conversation_ref": {"type": ["string", "null"], "maxLength": 256},
     "channel_kind": {"enum": ["GROUP", "PRIVATE"]},

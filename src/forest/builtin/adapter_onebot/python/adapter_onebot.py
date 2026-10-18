@@ -119,6 +119,24 @@ class AdapterOneBot(Plugin):
             operation_id=ctx.operations.stable("payload:" + owner_kind + ":" + owner_id[-24:]),
         )
 
+    @service("adapter.onebot.api.query", semantics="read", input_schema="schemas/api-query-input.json",
+             output_schema="schemas/api-query-output.json")
+    async def api_query(self, payload, ctx):
+        binding = self._binding(payload["binding_ref"])
+        return await ctx.services.call(
+            "adapter.onebot.transport.api-query", {**_plain(payload), **_transport_identity(ctx, binding)},
+            operation_id=ctx.operations.stable("onebot-api-query"), timeout=12,
+        )
+
+    @service("adapter.onebot.api.command", semantics="at-most-once", input_schema="schemas/api-command-input.json",
+             output_schema="schemas/api-command-output.json")
+    async def api_command(self, payload, ctx):
+        binding = self._binding(payload["binding_ref"])
+        return await ctx.services.call(
+            "adapter.onebot.transport.api-command", {**_plain(payload), **_transport_identity(ctx, binding)},
+            operation_id=ctx.operations.stable("onebot-api-command"), timeout=12,
+        )
+
     @service("adapter.onebot.delivery.prepare", semantics="idempotent")
     async def prepare_delivery(self, payload, ctx):
         value = _plain(payload)

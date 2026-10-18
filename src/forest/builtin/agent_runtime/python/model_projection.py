@@ -24,7 +24,7 @@ from turn_recording import digest_json
 from forest.model_contract import (
     MAX_EVENT_BYTES,
     MAX_REQUEST_BYTES,
-    MAX_TOOL_CALLS,
+    MAX_TOOL_DECLARATIONS,
     SERIALIZER_REVISION,
     MediaSnapshot,
     ModelCapabilities,
@@ -77,7 +77,9 @@ def _tool_parameters(schema: dict) -> dict:
 
 
 def _tools(value: Sequence[dict], capabilities: ModelCapabilities) -> list[dict]:
-    if len(value) > MAX_TOOL_CALLS or (value and not capabilities.supports_tools):
+    if len(value) > MAX_TOOL_DECLARATIONS:
+        raise _error("MODEL_TOOL_DIRECTORY_TOO_LARGE", "Tool declarations exceed the request protocol limit")
+    if value and not capabilities.supports_tools:
         raise _error("MODEL_TOOLS_UNSUPPORTED", "Deployment does not support these tools")
     result, names = [], set()
     for tool in _decode(_encode(list(value), limit=MAX_EVENT_BYTES)):

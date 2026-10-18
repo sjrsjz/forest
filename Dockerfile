@@ -15,6 +15,7 @@ COPY src ./src
 FROM build AS test
 COPY tests ./tests
 COPY examples ./examples
+COPY plugins ./plugins
 COPY doc ./doc
 COPY scripts ./scripts
 RUN --mount=type=cache,target=/root/.cache/uv \

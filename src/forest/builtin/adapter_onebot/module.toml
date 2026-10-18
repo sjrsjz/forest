@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "3.2.1"
+version = "3.3.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -70,7 +70,9 @@ requests = [
   "uow.execute:adapter.ingress-rescue-media",
   "service.call:kernel.payload.bytes-write",
   "service.call:adapter.onebot.transport.send",
-  "service.call:adapter.onebot.transport.groups-page"
+  "service.call:adapter.onebot.transport.groups-page",
+  "service.call:adapter.onebot.transport.api-query",
+  "service.call:adapter.onebot.transport.api-command"
 ]
 
 [[components.requires]]
@@ -336,3 +338,33 @@ kind = "onebot.websocket-v11"
 semantics = "idempotent"
 input_schema = "schemas/wire-materialize-input.json"
 output_schema = "schemas/wire-materialize-output.json"
+
+[[components.provides]]
+name = "adapter.onebot.api.query"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/api-query-input.json"
+output_schema = "schemas/api-query-output.json"
+
+[[components.effect_services]]
+name = "adapter.onebot.transport.api-query"
+kind = "onebot.websocket-v11"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/transport-api-query-input.json"
+output_schema = "schemas/api-query-output.json"
+
+[[components.provides]]
+name = "adapter.onebot.api.command"
+contract = "1.0"
+semantics = "at-most-once"
+input_schema = "schemas/api-command-input.json"
+output_schema = "schemas/api-command-output.json"
+
+[[components.effect_services]]
+name = "adapter.onebot.transport.api-command"
+kind = "onebot.websocket-v11"
+contract = "1.0"
+semantics = "at-most-once"
+input_schema = "schemas/transport-api-command-input.json"
+output_schema = "schemas/api-command-output.json"

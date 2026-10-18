@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "intent_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "binding_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "channel_kind": {
+          "enum": [
+            "GROUP",
+            "PRIVATE"
+          ]
+        },
+        "channel_ref": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,18}$"
+        },
+        "state": {
+          "enum": [
+            "QUEUED",
+            "SENDING",
+            "SENT",
+            "FAILED",
+            "UNKNOWN",
+            "CANCELLED"
+          ]
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "intent_id",
+        "binding_ref",
+        "channel_kind",
+        "channel_ref",
+        "state",
+        "error_code"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "null"
+    }
+  ]
+}

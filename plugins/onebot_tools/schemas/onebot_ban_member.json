@@ -1,0 +1,29 @@
+{
+  "name": "onebot_ban_member",
+  "description": "Mute a group member. duration=0 unmutes; requires configured operator or verified group administrator.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "group_id": {
+        "type": "string",
+        "pattern": "^[1-9][0-9]{0,18}$"
+      },
+      "user_id": {
+        "type": "string",
+        "pattern": "^[1-9][0-9]{0,18}$"
+      },
+      "duration": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2592000
+      }
+    },
+    "required": [
+      "group_id",
+      "user_id",
+      "duration"
+    ],
+    "additionalProperties": false
+  },
+  "strict": true
+}

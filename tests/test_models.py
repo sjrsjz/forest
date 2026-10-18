@@ -121,6 +121,14 @@ def tool_spec(name="lookup"):
     }}
 
 
+def test_tool_directory_capacity_is_independent_of_response_call_count():
+    tools = [tool_spec("tool_" + str(index)) for index in range(128)]
+    assert len(json.loads(prepared(tools=tools).body)["tools"]) == 128
+    with pytest.raises(ForestError) as exceeded:
+        prepared(tools=tools + [tool_spec("extra")])
+    assert exceeded.value.code == "MODEL_TOOL_DIRECTORY_TOO_LARGE"
+
+
 def tool_group(*, images=False):
     assistant = unit("assistant-1", "checking", role="assistant")
     assistant["tool_calls"] = [{"id": "call-1", "name": "lookup", "arguments": {"query": "hello"}}]

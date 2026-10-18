@@ -1,0 +1,421 @@
+manifest_version = 1
+package_id = "forest.plugins.onebot-tools"
+version = "1.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "plugin:Tools"
+
+[[components]]
+id = "tools.onebot"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+bootstrap_config = "defaults.json"
+configuration_apply = "worker-host/1"
+
+[components.capabilities]
+requests = ["state.read", "state.write", "payload.read", "payload.write", "service.call:adapter.onebot.groups.page", "service.call:adapter.onebot.api.query", "service.call:adapter.onebot.api.command", "service.call:delivery.submit", "service.call:delivery.status"]
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 16
+max_queue_items = 64
+max_state_inflight = 8
+max_owned_tasks = 4
+max_owned_resources = 4
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 90
+stop_timeout_s = 10
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "tools.onebot.workspace"
+label = "Onebot Tools"
+group = "tools"
+order = 10
+
+[[components.requires]]
+name = "adapter.onebot.groups.page"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "adapter.onebot.api.query"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "adapter.onebot.api.command"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "delivery.submit"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "delivery.status"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.provides]]
+name = "tools.onebot.onebot-account-info"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-account-info.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_account_info"
+service_id = "tools.onebot.onebot-account-info"
+service_version = 1
+declaration_schema = "schemas/onebot_account_info.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-account-info.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-groups"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-groups.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_groups"
+service_id = "tools.onebot.onebot-groups"
+service_version = 1
+declaration_schema = "schemas/onebot_groups.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-groups.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-group-info"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-group-info.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_group_info"
+service_id = "tools.onebot.onebot-group-info"
+service_version = 1
+declaration_schema = "schemas/onebot_group_info.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-group-info.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-member-info"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-member-info.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_member_info"
+service_id = "tools.onebot.onebot-member-info"
+service_version = 1
+declaration_schema = "schemas/onebot_member_info.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-member-info.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-members"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-members.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_members"
+service_id = "tools.onebot.onebot-members"
+service_version = 1
+declaration_schema = "schemas/onebot_members.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-members.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-send-group"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-send-group.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_send_group"
+service_id = "tools.onebot.onebot-send-group"
+service_version = 1
+declaration_schema = "schemas/onebot_send_group.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-send-group.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-send-private"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-send-private.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_send_private"
+service_id = "tools.onebot.onebot-send-private"
+service_version = 1
+declaration_schema = "schemas/onebot_send_private.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-send-private.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-ban-member"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-ban-member.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_ban_member"
+service_id = "tools.onebot.onebot-ban-member"
+service_version = 1
+declaration_schema = "schemas/onebot_ban_member.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-ban-member.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-ban-all"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-ban-all.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_ban_all"
+service_id = "tools.onebot.onebot-ban-all"
+service_version = 1
+declaration_schema = "schemas/onebot_ban_all.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-ban-all.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-kick-member"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-kick-member.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_kick_member"
+service_id = "tools.onebot.onebot-kick-member"
+service_version = 1
+declaration_schema = "schemas/onebot_kick_member.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-kick-member.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-set-card"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-set-card.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_set_card"
+service_id = "tools.onebot.onebot-set-card"
+service_version = 1
+declaration_schema = "schemas/onebot_set_card.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-set-card.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-set-group-name"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-set-group-name.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_set_group_name"
+service_id = "tools.onebot.onebot-set-group-name"
+service_version = 1
+declaration_schema = "schemas/onebot_set_group_name.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-set-group-name.query"
+timeout_s = 30
+
+[[components.provides]]
+name = "tools.onebot.onebot-delivery-status"
+contract = "1.0"
+semantics = "at-most-once"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/execute.json"
+output_schema = "schemas/receipt.json"
+
+[[components.provides]]
+name = "tools.onebot.onebot-delivery-status.query"
+contract = "1.0"
+semantics = "read"
+allowed_callers = ["agent.runtime"]
+input_schema = "schemas/query.json"
+output_schema = "schemas/receipt.json"
+
+[[components.agent_tools]]
+name = "onebot_delivery_status"
+service_id = "tools.onebot.onebot-delivery-status"
+service_version = 1
+declaration_schema = "schemas/onebot_delivery_status.json"
+approval_required = false
+supports_query = true
+query_service_id = "tools.onebot.onebot-delivery-status.query"
+timeout_s = 30
+
+[[components.management_queries]]
+id = "groups.page"
+port = "tools.onebot.configuration.groups"
+timeout_s = 15
+
+[[components.provides]]
+name = "tools.onebot.configuration.groups"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/groups-page-input.json"
+output_schema = "schemas/groups-page-output.json"

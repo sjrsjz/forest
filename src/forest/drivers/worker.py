@@ -9,7 +9,9 @@ import json
 import os
 import sys
 import time
+import traceback
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -174,7 +176,8 @@ class WorkerRuntime:
                 raise ForestError(missing, "Requested invocation target is not registered", 404)
             if len(self.calls) >= self.limits.max_inflight or call_id in self.calls:
                 raise ForestError("OVERLOADED", "Worker service slots are exhausted", 429)
-            scope = CallScope(call_id, deadline, payload["operation_id"])
+            scope = CallScope(call_id, deadline, payload["operation_id"],
+                              caller_component_id=payload.get("caller_component_id"))
             token = _current_call.set(scope)
             context = self.ctx._for_call(scope)
             self.calls[call_id] = asyncio.current_task()
@@ -461,13 +464,21 @@ class WorkerRuntime:
             )
         except ForestError as error:
             response.update(ok=False, error=_error_envelope(error))
-        except Exception:
+        except Exception as error:
             response.update(
                 ok=False,
                 error={
                     "code": "PLUGIN_FAILED",
                     "message": "Plugin operation failed",
                     "status": 500,
+                    "details": {
+                        "exception_type": type(error).__name__,
+                        "frames": [
+                            {"file": Path(frame.filename).name, "line": frame.lineno,
+                             "function": frame.name}
+                            for frame in traceback.extract_tb(error.__traceback__, limit=-4)
+                        ],
+                    },
                 },
             )
         try:

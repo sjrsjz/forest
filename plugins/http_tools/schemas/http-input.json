@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "method": {
+      "enum": [
+        "GET",
+        "HEAD",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS"
+      ]
+    },
+    "url": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "headers": {
+      "type": "object",
+      "maxProperties": 32,
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 8192
+      }
+    },
+    "body": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 32768
+    },
+    "read_only": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "method",
+    "url",
+    "headers",
+    "body",
+    "read_only"
+  ],
+  "additionalProperties": false
+}

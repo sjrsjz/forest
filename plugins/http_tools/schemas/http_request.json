@@ -1,0 +1,59 @@
+{
+  "name": "http_request",
+  "description": "Perform an authorized HTTP(S) write request. Never automatically retry an uncertain result. Credentials and target permissions come from plugin settings.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "maxLength": 8192
+      },
+      "method": {
+        "enum": [
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE",
+          "OPTIONS"
+        ]
+      },
+      "headers": {
+        "type": "array",
+        "maxItems": 32,
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "value": {
+              "type": "string",
+              "maxLength": 8192
+            }
+          },
+          "required": [
+            "name",
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "body": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "maxLength": 32768
+      }
+    },
+    "required": [
+      "url",
+      "method",
+      "headers",
+      "body"
+    ],
+    "additionalProperties": false
+  },
+  "strict": true
+}

@@ -536,6 +536,9 @@ async def test_prepare_failure_reaps_candidate_and_manifest_mismatch(tmp_path):
     with pytest.raises(ForestError) as error:
         await worker.prepare({})
     assert error.value.code == "PLUGIN_FAILED"
+    assert error.value.details["exception_type"] == "RuntimeError"
+    assert all("/" not in frame["file"] and "\\" not in frame["file"]
+               for frame in error.value.details["frames"])
     assert not worker.alive
     mismatch = PythonWorker(package(tmp_path, services=["probe.echo"]), identity())
     await mismatch.launch()

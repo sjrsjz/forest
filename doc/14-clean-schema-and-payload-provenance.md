@@ -88,6 +88,8 @@ SendIntent 只保存 cause、目标、顺序和受管 part PayloadRef；最终�
 
 ## 3. Schema bundle 生命周期
 
+`baseline_sha256` 校验 SQL 的原始字节，包括行尾；包内 baseline、公共配置 baseline 和内核存储 baseline 在 Git 中使用 `-text` 保留原始字节，不能由平台的自动行尾转换改写。修改分发或源码格式时，不得悄悄更改已安装 bundle 的身份；编辑 baseline 时必须同步验证声明摘要。其他包源码仍统一 LF。
+
 模块 manifest 声明：
 
 ```toml

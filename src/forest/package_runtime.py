@@ -1451,6 +1451,7 @@ class PackageGenerationAdapter:
                         causal_root_id=invocation.causal_root_id,
                         timeout=invocation.timeout_seconds,
                         before_send=lambda: self._verify_dispatch(route),
+                        caller_component_id=route.caller_component_id,
                 ),
                 normalize=lambda result: result,
                 result_valid=output_validator.is_valid,
@@ -3702,6 +3703,8 @@ def package_runtime_descriptor(
             declaration=compiled_schemas[item["declaration_schema"]],
             approval_required=item["approval_required"],
             supports_query=item["supports_query"],
+            query_service_id=item.get("query_service_id"),
+            timeout_seconds=item.get("timeout_s", 30),
         )
         for item in component.get("agent_tools", ())
     )

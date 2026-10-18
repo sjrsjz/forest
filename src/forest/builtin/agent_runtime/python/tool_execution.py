@@ -132,8 +132,9 @@ class ToolExecution:
                 "Tool arguments differ from the durable authority trigger",
                 409,
             )
-        attempt_id = self.ctx.operations.stable(
-            f"tool-attempt:{tool['tool_call_id']}"
+        attempt_id = (
+            tool["effect_attempt_id"] if tool["state"] in {"DISPATCHING", "UNKNOWN"}
+            else self.ctx.operations.stable(f"tool-attempt:{tool['tool_call_id']}")
         )
         command = {
             "protocol": "forest.agent-tool-execute/1",
@@ -298,7 +299,7 @@ class ToolExecution:
                         "evidence_kind": "RECONCILIATION",
                         "effect_observation_ref": receipt["observation_ref"],
                         "approval_ref": None,
-                        "error_code": receipt["error_code"],
+                        "error_code": None if observed_state == "UNKNOWN" else receipt["error_code"],
                         "results": [] if result is None else [result],
                         "effect_step_id": "effect",
                         "evidence_digest": digest_json(receipt),
@@ -440,11 +441,11 @@ class ToolExecution:
                     "permit": prepared["permit"],
                     "command": command,
                     "operation_id": tool["effect_operation_ref"],
-                    "timeout": 30,
+                    "timeout": binding["timeout_seconds"],
                 }
             )
             receipt = self._receipt(raw, tool=tool, attempt_id=attempt_id)
-        except Exception:
+        except Exception as error:
             receipt = {
                 "protocol": "forest.agent-tool-receipt/1",
                 "status": "UNKNOWN",
@@ -452,7 +453,7 @@ class ToolExecution:
                 "effect_operation_id": tool["effect_operation_ref"],
                 "effect_attempt_id": attempt_id,
                 "result": None,
-                "error_code": None,
+                "error_code": error.code if isinstance(error, ForestError) else "AGENT_TOOL_EXECUTION_UNCERTAIN",
                 "observation_ref": attempt_id,
             }
         observed_state = receipt["status"]
@@ -484,7 +485,7 @@ class ToolExecution:
                     "evidence_kind": "EXECUTOR",
                     "effect_observation_ref": receipt["observation_ref"],
                     "approval_ref": None,
-                    "error_code": receipt["error_code"],
+                    "error_code": None if observed_state == "UNKNOWN" else receipt["error_code"],
                     "results": [] if result is None else [result],
                     "effect_step_id": "effect",
                     "evidence_digest": digest_json(receipt),

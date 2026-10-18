@@ -158,7 +158,8 @@ def test_official_onebot_adapter_graph_can_omit_optional_shell_provider(tmp_path
     descriptor = package_runtime_descriptor(
         snapshot, bot_id="bot/optional-shell", module_configuration=object(),
         grants=SimpleNamespace(entries=()),
-        resolved_contracts={item["name"]: "1.0" for item in snapshot.component["requires"]},
+        resolved_contracts={item["name"]: ("2.0" if item["name"] == "onebot.codec.prepare-send" else "1.0")
+                            for item in snapshot.component["requires"]},
         generation_verifier=object(), generation_member_verifier=object(),
         state_queries=object(), state_commands=object(),
         service_operation_ledger=object(), unit_of_work_authority=object(),
@@ -183,8 +184,10 @@ def test_official_onebot_adapter_graph_can_omit_optional_shell_provider(tmp_path
         "conversation.scheduler": (("conversation.trigger.classify", "1.0"),),
         "codec.provider": (
             ("onebot.codec.normalize", "1.0"),
-            ("onebot.codec.prepare-send", "1.0"),
+            ("onebot.codec.memory-message", "1.0"),
+            ("onebot.codec.prepare-send", "2.0"),
         ),
+        "media.provider": (("media.context.resolve", "1.0"),),
     }
     provider_ids = (
         set(descriptor.requires) | set(descriptor.retention_requires)
@@ -203,7 +206,7 @@ def test_official_onebot_adapter_graph_can_omit_optional_shell_provider(tmp_path
     )
     assert "shell.command" not in registry.order
     assert registry._service_retention_requires["adapter.onebot"] == (
-        "codec.provider", "conversation.scheduler", "kernel.runtime",
+        "codec.provider", "conversation.scheduler", "kernel.runtime", "media.provider",
     )
 
 
@@ -476,7 +479,7 @@ def test_package_publishes_agent_tool_from_its_own_service(tmp_path):
         service_operation_ledger=NoServiceLedger(),
     )
     assert descriptor.agent_tools[0].as_fact() == {
-        "protocol": "forest.agent-tool-contribution/1",
+        "protocol": "forest.agent-tool-contribution/2",
         "name": "counter_increment",
         "service_id": "counter.increment",
         "version": 1,
@@ -484,6 +487,8 @@ def test_package_publishes_agent_tool_from_its_own_service(tmp_path):
         "contract_digest": descriptor.agent_tools[0].contract_digest,
         "approval_required": True,
         "supports_query": False,
+        "query_service_id": None,
+        "timeout_seconds": 30,
     }
 
 
@@ -1298,6 +1303,7 @@ async def test_read_only_route_rejects_unclassified_and_mutating_kernel_services
     })
     registry = SimpleNamespace(
         instances={"caller": caller, "provider": provider},
+        descriptors=(),
         states={
             "caller": SimpleNamespace(value="ACTIVE"),
             "provider": SimpleNamespace(value="ACTIVE"),

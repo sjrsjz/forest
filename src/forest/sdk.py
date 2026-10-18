@@ -390,6 +390,7 @@ class CallScope:
     deadline_at: float
     operation_id: str
     active: bool = True
+    caller_component_id: str | None = None
 
 
 _current_call: contextvars.ContextVar[CallScope | None] = contextvars.ContextVar(
@@ -1476,6 +1477,10 @@ class PluginContext:
     @property
     def call_id(self) -> str:
         return _require_call(self._scope).call_id
+
+    @property
+    def caller_component_id(self) -> str | None:
+        return _require_call(self._scope).caller_component_id
 
 
 class OperationsHandle:
