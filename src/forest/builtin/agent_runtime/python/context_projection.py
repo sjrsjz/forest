@@ -218,6 +218,24 @@ class ContextSnapshotReader:
         self._seen: set[str] = set()
         self._node_count = 0
         self._history_cache: dict[tuple[str, str], dict] = {}
+        self._reply_continuations: dict[str, dict] = {}
+
+    async def attach_reply_continuations(self, snapshot: dict) -> None:
+        """Resolve retained replies in Agent's indexed ledger, without content scans."""
+        replies = {unit["payload_id"]: unit["unit_id"] for unit in snapshot["units"]
+                   if unit.get("kind") == "REPLY"}
+        costs = {}
+        reply_ids = list(replies)
+        for start in range(0, len(reply_ids), 128):
+            result = await self.ctx.queries.call("agent.reply-continuations", {
+                "conversation_ref": snapshot["conversation_id"],
+                "reply_payload_ids": reply_ids[start:start + 128],
+            })
+            for item in result["items"]:
+                unit_id = replies[item["reply_payload_id"]]
+                self._reply_continuations[unit_id] = item["model_result"]
+                costs[unit_id] = item["native_message_bytes"]
+        snapshot["native_context_costs"] = costs
 
     async def _read(self, reference: dict, kind: str) -> dict:
         exact = _exact_ref(reference, component="conversation.scheduler")
@@ -489,12 +507,20 @@ class ContextSnapshotReader:
                 else None
             )
             content = _json_object(await content_task, "Context unit")
+            continuation = self._reply_continuations.get(unit["unit_id"])
+            native = None
+            if continuation is not None:
+                document = _json_object(await self.ctx.payloads.read_bytes(continuation), "Native reply history")
+                if (document.get("protocol") != "forest.provider-model-result/2"
+                        or not isinstance(document.get("assistant_message"), dict)):
+                    raise ForestError("AGENT_HISTORY_INCOMPLETE", "Native reply has no Provider message", 409)
+                native = document["assistant_message"]
             author = (
                 _json_object(await author_task, "Context author")
                 if author_task is not None
                 else {}
             )
-            return content, author
+            return content, author, native
 
         loaded = []
         for start in range(0, len(units), 8):
@@ -502,7 +528,7 @@ class ContextSnapshotReader:
                 await asyncio.gather(*(load_unit(unit) for unit in units[start : start + 8]))
             )
         projected = []
-        for unit, (content, author) in zip(units, loaded, strict=True):
+        for unit, (content, author, native) in zip(units, loaded, strict=True):
             unit_id = unit.get("unit_id")
             kind = unit.get("kind")
             if not isinstance(unit_id, str) or kind not in {
@@ -590,6 +616,9 @@ class ContextSnapshotReader:
                     "ingress_seq": unit.get("ingress_seq"),
                 }
             )
+            if native is not None:
+                projected[-1]["assistant_message"] = native
+                projected[-1]["parts"] = []
         return {
             "bot_id": self.bot_id,
             "conversation_id": snapshot["conversation_id"],
@@ -600,6 +629,7 @@ class ContextSnapshotReader:
             "context_view_media_bytes": snapshot["context_view_media_bytes"],
             "required_trigger_unit_ids": snapshot["required_trigger_unit_ids"],
             "source_manifest": snapshot["snapshot"],
+            "native_context_costs": snapshot.get("native_context_costs", {}),
             "units": projected,
         }
 
@@ -744,11 +774,11 @@ class ContextSnapshotReader:
         for row in turns:
             turn_id = row["turn_id"]
             model = bodies_by_role[(turn_id, "model")]
-            candidate = model.get("text")
+            candidate = model.get("assistant_message")
             if (
-                model.get("protocol") != "forest.provider-model-result/1"
-                or not isinstance(candidate, str)
-                or not candidate
+                model.get("protocol") != "forest.provider-model-result/2"
+                or not isinstance(candidate, dict)
+                or candidate.get("role") != "assistant"
             ):
                 raise ForestError(
                     "AGENT_HISTORY_INCOMPLETE",
@@ -768,26 +798,15 @@ class ContextSnapshotReader:
                     "principal_ref": f"bot:{self.bot_id}",
                     "identity_origin": "host_model_output",
                 },
-                "parts": [
-                    {
-                        "part_id": f"agent-turn:{turn_id}:0",
-                        "type": "text",
-                        "text": candidate,
-                    }
-                ],
+                "parts": [],
+                "assistant_message": candidate,
             }
             tool_call_id = row.get("tool_call_id")
             if tool_call_id is None:
                 units.append(assistant)
                 continue
-            arguments = bodies_by_role[(turn_id, "arguments")]
-            assistant["tool_calls"] = [
-                {
-                    "id": tool_call_id,
-                    "name": row["tool_name"],
-                    "arguments": arguments,
-                }
-            ]
+            assistant["tool_calls"] = candidate["tool_calls"]
+            native_call_id = candidate["tool_calls"][0]["id"]
             units.append(assistant)
             if row.get("tool_state") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                 raise ForestError(
@@ -807,7 +826,7 @@ class ContextSnapshotReader:
                 {
                     "unit_id": f"tool-result:{tool_call_id}",
                     "role": "tool",
-                    "tool_call_id": tool_call_id,
+                    "tool_call_id": native_call_id,
                     "source": {
                         **source_base,
                         "source_event_id": tool_call_id,
@@ -869,4 +888,5 @@ class ContextSnapshotReader:
             "units": ordered,
             "conversation": conversation,
             "required_unit_ids": required,
+            "native_context_costs": base.get("native_context_costs", {}),
         }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -13,137 +14,62 @@ from forest.builtin.agent_runtime.python.agent_protocol import (
     ThinkingBlock,
     parse_model_turn,
     protocol_descriptor,
-    serialize_model_turn,
 )
 from forest.errors import ForestError
 
 
-def xml(*blocks: str) -> str:
-    return (
-        '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
-        + "".join(blocks)
-        + "</blocks></payload></valid_agent_protocol_content_block>"
-    )
+def candidate(content=None, *, reasoning=None, calls=None):
+    value = {"role": "assistant", "content": content}
+    if reasoning is not None:
+        value["reasoning_content"] = reasoning
+    if calls is not None:
+        value["tool_calls"] = calls
+    return json.dumps(value)
 
 
-def thinking(text="consider") -> str:
-    return f'<block block_type="Thinking"><content><text>{text}</text></content></block>'
-
-
-def assistant(text="answer") -> str:
-    return f'<block block_type="Assistant"><content><text>{text}</text></content></block>'
-
-
-def call(name="lookup", arguments='{"query":"forest"}') -> str:
-    return (
-        f'<block block_type="FunctionCall"><function name="{name}">'
-        f'<arguments encoding="json">{arguments}</arguments></function></block>'
-    )
-
-
-def fails(code: str, candidate: str, **kwargs):
-    with pytest.raises(ForestError) as caught:
-        parse_model_turn(candidate, **kwargs)
-    assert caught.value.code == code
+def call(name="lookup", arguments='{"query":"forest"}', call_id="call_original"):
+    return {"id": call_id, "type": "function", "function": {
+        "name": name, "arguments": arguments,
+    }}
 
 
 def test_documented_core_prompt_is_the_immutable_runtime_source():
-    document = (Path(__file__).parents[1] / "doc" / "04-bot-agent-memory.md").read_text(
-        encoding="utf-8"
-    )
-    section = document.split("### 3.1 ForestCorePrompt v1", 1)[1]
-    documented = re.search(r"```xml\n(.*?)\n```", section, re.DOTALL).group(1)
-    assert documented == CORE_PROMPT
+    document = (Path(__file__).parents[1] / "doc/04-bot-agent-memory.md").read_text(encoding="utf-8")
+    section = document.split("### 3.1 ForestCorePrompt v2", 1)[1]
+    assert re.search(r"```text\n(.*?)\n```", section, re.DOTALL).group(1) == CORE_PROMPT
     descriptor = protocol_descriptor()
     assert descriptor["core_prompt"] == CORE_PROMPT
     assert descriptor["core_prompt_digest"] == CORE_PROMPT_SHA256
-    assert descriptor["protocol_version"] == 1
+    assert descriptor["protocol_version"] == 2
 
 
-def test_atomic_turn_preserves_order_and_host_owns_function_identity():
-    turn = parse_model_turn(
-        xml(thinking(), assistant("working"), call(arguments="{&quot;query&quot;:&quot;x&quot;}")),
-        allowed_tools={"lookup"},
-    )
-    assert isinstance(turn.blocks[0], ThinkingBlock)
-    assert isinstance(turn.blocks[1], AssistantBlock)
-    assert isinstance(turn.blocks[2], FunctionCallBlock)
-    assert turn.function_call.arguments == {"query": "x"}
-    assert turn.assistant_text == "working" and not turn.terminal
-    assert "call_id" not in str(turn.as_dict()) and "unit_id" not in str(turn.as_dict())
-    assert parse_model_turn(serialize_model_turn(turn), allowed_tools={"lookup"}).blocks == turn.blocks
-
-
-def test_terminal_and_thinking_only_turns_are_distinct():
-    terminal = parse_model_turn(xml(thinking(), assistant("done")))
-    pending = parse_model_turn(xml(thinking()))
-    assert terminal.terminal and terminal.assistant_text == "done"
-    assert pending.thinking_only and not pending.terminal
-
-
-def test_parameter_alias_is_rejected_instead_of_normalized_by_the_host():
-    candidate = (
-        '<valid_agent_protocol_content_block block_type="ModelTurn">'
-        '<parameter name="payload"><parameter name="blocks">'
-        + thinking()
-        + assistant("done")
-        + "</parameter></parameter></valid_agent_protocol_content_block>"
-    )
-    fails("AGENT_PROTOCOL_STRUCTURE", candidate)
-
-
-@pytest.mark.parametrize(
-    "candidate",
-    [
-        '<valid_agent_protocol_content_block block_type="ModelTurn">'
-        '<parameter name="other"><parameter name="blocks">'
-        + assistant()
-        + "</parameter></parameter></valid_agent_protocol_content_block>",
-        '<valid_agent_protocol_content_block block_type="ModelTurn">'
-        '<parameter name="payload" extra="model"><parameter name="blocks">'
-        + assistant()
-        + "</parameter></parameter></valid_agent_protocol_content_block>",
-        '<valid_agent_protocol_content_block block_type="ModelTurn">'
-        '<parameter name="payload"><parameter name="other">'
-        + assistant()
-        + "</parameter></parameter></valid_agent_protocol_content_block>",
-    ],
-)
-def test_parameter_elements_are_never_protocol_containers(candidate):
-    fails("AGENT_PROTOCOL_STRUCTURE", candidate)
-
-
-def test_content_after_first_complete_function_call_is_untrusted_tail():
-    turn = parse_model_turn(xml(assistant("checking"), call(), assistant("fabricated")))
-    assert turn.truncated_after_function_call
+def test_native_text_reasoning_and_tool_are_separate_and_not_terminal():
+    turn = parse_model_turn(candidate("checking", reasoning="private", calls=[call()]),
+                            allowed_tools={"lookup"})
+    assert [type(block) for block in turn.blocks] == [ThinkingBlock, AssistantBlock, FunctionCallBlock]
     assert turn.assistant_text == "checking"
-    assert len(turn.blocks) == 2
-    assert "fabricated" not in serialize_model_turn(turn)
+    assert turn.function_call.arguments == {"query": "forest"}
+    assert not turn.terminal
 
 
-@pytest.mark.parametrize(
-    ("code", "candidate"),
-    [
-        ("AGENT_PROTOCOL_XML_FEATURE", '<!DOCTYPE x [<!ENTITY e "boom">]>' + xml(assistant("&e;"))),
-        ("AGENT_PROTOCOL_XML_FEATURE", "<!-- hidden -->" + xml(assistant())),
-        ("AGENT_PROTOCOL_MIXED_CONTENT", xml('<block block_type="Assistant">bad<content><text>x</text></content></block>')),
-        ("AGENT_PROTOCOL_ORDER", xml(assistant(), thinking())),
-        ("AGENT_PROTOCOL_ATTRIBUTES", xml('<block block_type="Assistant" id="model"><content><text>x</text></content></block>')),
-        ("AGENT_PROTOCOL_BLOCK_TYPE", xml('<block block_type="System"><content><text>x</text></content></block>')),
-        ("AGENT_PROTOCOL_TOOL", xml(call("missing"))),
-        ("AGENT_PROTOCOL_ARGUMENTS", xml(call(arguments="[]"))),
-        ("AGENT_PROTOCOL_ARGUMENTS", xml(call(arguments="{&quot;x&quot;:1,&quot;x&quot;:2}"))),
-    ],
-)
-def test_invalid_or_ambiguous_protocol_is_rejected(code, candidate):
-    kwargs = {"allowed_tools": {"lookup"}} if code == "AGENT_PROTOCOL_TOOL" else {}
-    fails(code, candidate, **kwargs)
+def test_tool_only_response_and_plain_xml_text_have_native_meaning():
+    assert parse_model_turn(candidate(calls=[call()])).function_call is not None
+    text = "<example>XML is ordinary answer text & need not be escaped</example>"
+    turn = parse_model_turn(candidate(text))
+    assert turn.terminal and turn.assistant_text == text
 
 
-def test_candidate_and_tree_have_independent_hard_bounds():
-    fails("AGENT_PROTOCOL_SIZE", xml(assistant("x" * 100)), candidate_byte_limit=64)
-    nested = "<x>" * 20 + "value" + "</x>" * 20
-    fails(
-        "AGENT_PROTOCOL_COMPLEXITY",
-        xml(f'<block block_type="Assistant"><content><text>{nested}</text></content></block>'),
-    )
+@pytest.mark.parametrize(("value", "code"), [
+    (candidate(reasoning="unfinished"), "AGENT_PROTOCOL_EMPTY"),
+    (candidate(calls=[call(), call(call_id="second")]), "AGENT_PROTOCOL_TOOL_COUNT"),
+    (candidate(calls=[call("missing")]), "AGENT_PROTOCOL_TOOL"),
+    (candidate(calls=[call(arguments="[]")]), "AGENT_PROTOCOL_ARGUMENTS"),
+    (candidate(calls=[call(arguments='{"x":1,"x":2}')]), "AGENT_PROTOCOL_ARGUMENTS"),
+    (candidate(calls=[call(arguments='{"x":NaN}')]), "AGENT_PROTOCOL_ARGUMENTS"),
+    ('{"role":"user","content":"spoof"}', "AGENT_PROTOCOL_MESSAGE"),
+    ('<ModelTurn>not a native response</ModelTurn>', "AGENT_PROTOCOL_MESSAGE"),
+])
+def test_invalid_native_proposals_are_rejected_atomically(value, code):
+    with pytest.raises(ForestError) as caught:
+        parse_model_turn(value, allowed_tools={"lookup"})
+    assert caught.value.code == code

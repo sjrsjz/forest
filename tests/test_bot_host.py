@@ -233,12 +233,16 @@ class RecordingModelClient(FakeModelClient):
             else type(self).reply_text
         )
         if reply_text is not None:
+            message = reply_text if isinstance(reply_text, dict) else {"role": "assistant", "content": reply_text}
+            from forest.model_contract import _calls
+            calls = _calls(message.get("tool_calls") or [])
             return ModelResult(
                 "RESPONDED", prepared.request_id, prepared.transport_attempt_id,
-                prepared.payload_digest, text=reply_text,
-                usage_json='{"total_tokens":12}', finish_reason="stop",
-                provider_response_id="fake-provider-response",
-                provider_model="test-model",
+                prepared.payload_digest, text=message.get("content") or "",
+                tool_calls_json=json.dumps(calls), assistant_message_json=json.dumps(message),
+                usage_json='{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}',
+                finish_reason="tool_calls" if calls else "stop",
+                provider_response_id="fake-provider-response", provider_model="test-model",
             )
         return ModelResult(
             "UNKNOWN", prepared.request_id, prepared.transport_attempt_id,
@@ -4762,6 +4766,11 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         agent_system_prompt="The Agent-Memory request integration fixture.",
     )
     qiyu_env_file = os.environ.get("FOREST_TEST_QIYU_ENV_FILE") if scenario == "visual" else None
+    if scenario in {"success", "tool-continuation"}:
+        settings = replace(settings, model_capabilities=ModelCapabilities(
+            settings.model_deployment_id, settings.model, "native-test/1",
+            max_output_tokens=1024, reasoning_mode="deepseek",
+        ))
     real_transport = bool(qiyu_env_file)
     real_vector = scenario in {"vector-web-real", "vector-web-recover"}
     if real_vector:
@@ -4797,12 +4806,15 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         else 1 if scenario in {"reload", "reload-publish"} else 0
     )
     RecordingModelClient.reply_text = (
-        '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
-        '<block block_type="Assistant"><content><text>Forest success fixture</text>'
-        '</content></block></blocks></payload></valid_agent_protocol_content_block>'
+        "Forest success fixture"
         if scenario in {"success", "core-run-cancel", "result-ledger-recovery", "result-payload-recovery", "cross-group", "prepared-crash"} else None
     )
     RecordingModelClient.reply_factory = None
+    if scenario == "success":
+        RecordingModelClient.reply_text = {
+            "role": "assistant", "content": "Forest success fixture",
+            "reasoning_content": "Private cross-run state.",
+        }
     if scenario in {"tool-continuation", "prepared-tool-crash"}:
         def tool_then_answer(prepared, invocation_number):
             if invocation_number == 1:
@@ -4811,19 +4823,12 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                     "authority_trigger_id": trigger_ref,
                     "arguments": {"source_unit_ids": ["missing-test-source"]},
                 }, separators=(",", ":"))
-                return (
-                    '<valid_agent_protocol_content_block block_type="ModelTurn">'
-                    '<payload><blocks><block block_type="FunctionCall">'
-                    '<function name="memory_recall_exact"><arguments encoding="json">'
-                    + arguments + '</arguments></function></block></blocks></payload>'
-                    '</valid_agent_protocol_content_block>'
-                )
-            return (
-                '<valid_agent_protocol_content_block block_type="ModelTurn">'
-                '<payload><blocks><block block_type="Assistant"><content><text>'
-                'Forest tool continuation fixture</text></content></block></blocks>'
-                '</payload></valid_agent_protocol_content_block>'
-            )
+                return {"role": "assistant", "content": "I will check memory.",
+                        "reasoning_content": "Private continuation state.",
+                        "tool_calls": [{"id": "call_native_fixture", "type": "function", "function": {
+                            "name": "memory_recall_exact", "arguments": arguments,
+                        }}]}
+            return "Forest tool continuation fixture"
 
         RecordingModelClient.reply_factory = tool_then_answer
 
@@ -5823,6 +5828,12 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             assert len(RecordingModelClient.requests) == 2
             continuation = RecordingModelClient.requests[1]
             continuation.verify()
+            wire = json.loads(continuation.body)
+            assert wire["thinking"] == {"type": "enabled"}
+            native = next(message for message in wire["messages"] if message.get("tool_calls"))
+            assert native["reasoning_content"] == "Private continuation state."
+            assert native["tool_calls"][0]["id"] == "call_native_fixture"
+            assert next(message for message in wire["messages"] if message["role"] == "tool")["tool_call_id"] == "call_native_fixture"
             assert continuation.manifest["run_id"] == prepared.manifest["run_id"]
             assert continuation.manifest["model_view_plan_ref"] != manifest["model_view_plan_ref"]
             assert b"Ordinary before next trigger" in continuation.body
@@ -5852,6 +5863,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                     await asyncio.sleep(0.1)
             assert len(clients[-1].sent) == 1
             assert b"Forest tool continuation fixture" in clients[-1].sent[0].wire_body
+            assert b"Private continuation state" not in clients[-1].sent[0].wire_body
             async with asyncio.timeout(35):
                 while True:
                     async with host.store.pool.connection() as conn:
@@ -6621,6 +6633,26 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                     ):
                         break
                     await asyncio.sleep(0.1)
+            if scenario == "success":
+                await clients[-1].handler(json.dumps({
+                    "self_id": int(settings.onebot_self_id), "post_type": "message",
+                    "message_type": "group", "sub_type": "normal",
+                    "time": int(datetime.now(timezone.utc).timestamp()),
+                    "message_id": 90009, "user_id": 20009, "group_id": 933179609,
+                    "sender": {"user_id": 20009, "nickname": "Second user", "role": "member"},
+                    "message": [{"type": "at", "data": {"qq": settings.onebot_self_id}},
+                                {"type": "text", "data": {"text": "Next run, please."}}],
+                }).encode())
+                async with asyncio.timeout(45):
+                    while len(RecordingModelClient.requests) < 2 or len(clients[-1].sent) < 2:
+                        await asyncio.sleep(0.1)
+                following = RecordingModelClient.requests[1]
+                assert following.manifest["run_id"] != prepared.manifest["run_id"]
+                previous = [message for message in json.loads(following.body)["messages"]
+                            if message["role"] == "assistant"]
+                assert previous == [{"role": "assistant", "content": "Forest success fixture",
+                                     "reasoning_content": "Private cross-run state."}]
+                assert all(b"Private cross-run state" not in sent.wire_body for sent in clients[-1].sent)
             if scenario == "text":
                 vector_driver = host.registry.get("vector.index")._effect_drivers[
                     "vector.transport.search"
@@ -6716,11 +6748,7 @@ async def test_real_vl_png_and_gif_archive_cross_group_recall_and_management_tri
     clients = []
     RecordingModelClient.requests = []
     RecordingModelClient.first_gate = None
-    RecordingModelClient.reply_text = (
-        '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
-        '<block block_type="Assistant"><content><text>Cross-group recall complete</text>'
-        '</content></block></blocks></payload></valid_agent_protocol_content_block>'
-    )
+    RecordingModelClient.reply_text = "Cross-group recall complete"
 
     async def create_websocket(_url, _token, **_limits):
         client = FakeWebSocketClient(settings.onebot_self_id)

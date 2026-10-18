@@ -65,7 +65,7 @@
       "type": "object",
       "required": ["protocol_version", "blocks", "raw_candidate_digest", "truncated_after_function_call"],
       "properties": {
-        "protocol_version": {"const": 1},
+        "protocol_version": {"const": 2},
         "blocks": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/block"}},
         "raw_candidate_digest": {"$ref": "#/$defs/digest"},
         "truncated_after_function_call": {"type": "boolean"}

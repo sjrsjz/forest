@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-18 18:42 CST：原生 assistant/tool_calls 与 thinking 实现完成，删除模型输出 XML 解析；同 Run 工具续轮、跨 Run 推理恢复的两个隔离 PostgreSQL 集成场景通过，真实 DeepSeek 原生工具与推理回传探针通过。独立 v40 候选已 READY/OFFLINE，显式启用 DeepSeek thinking；v39 暂仍在线。设计见 [21 原生协议](21-native-assistant-and-thinking.md)，证据与当前部署状态见 [原生协议验收](native-assistant-acceptance-2026-10-18.md)。
+
 2026-10-18 17:42 CST：现役 v39 的允许群 `933179609` 已通过 3 次群友真实 `@` 闭环：3 次触发均 `ANSWERED`，3 个 Agent Run `COMPLETED`，5 次模型调用均成功且记录用量，3 条逐一对应的群回复均由 OneBot 发送账本标记 `SENT`。后两次首轮输出各因 `AGENT_PROTOCOL_XML` 发起一次 REPAIR，产生额外模型调用；第 175 次在线观察样本零违规。完整 24 小时观察尚未结束。详见 [v39 切换与真实回复记录](live-v39-cutover-2026-10-18.md)。
 
 2026-10-18 03:17 CST：现役已从 v38 正式切换到 v39，主 Bot `forest-main-v39` 为 `ONLINE/ONLINE`、22/22 ACTIVE，树莓派 OneBot 只有一条来自 Forest 的连接；v39 只读 24 小时观察正在运行，前两次采样零违规。树莓派 NapCat 只读状态查询显示 QQ 已登录且 Core READY。此前的“版本低”快速登录失败属于 10 月 13 日历史事件，当前未复现。允许群真实 `@` 回复和完整 24 小时观察仍待验证；详细证据见 [v39 切换记录](live-v39-cutover-2026-10-18.md)。下表的“现役 v38”是切换前的历史快照，不再代表当前部署。

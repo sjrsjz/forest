@@ -38,8 +38,9 @@ async def test_agent_package_interleaves_run_history_at_input_revision_boundary(
     first_author = {"display_name": "Alice", "external_user_id": "100"}
     second_author = {"display_name": "Bob", "external_user_id": "200"}
     result = {
-        "protocol": "forest.provider-model-result/1",
-        "text": "<valid_agent_protocol_content_block />",
+        "protocol": "forest.provider-model-result/2",
+        "text": "checking",
+        "assistant_message": {"role": "assistant", "content": "checking", "reasoning_content": "private state"},
     }
     values = {
         "payload:first": first,

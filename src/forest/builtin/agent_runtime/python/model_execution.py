@@ -124,6 +124,7 @@ def _provider_result(value, *, receipt: dict) -> dict:
         "transport_attempt_id",
         "payload_digest",
         "text",
+        "assistant_message",
         "tool_calls",
         "finish_reason",
         "provider_response_id",
@@ -133,12 +134,13 @@ def _provider_result(value, *, receipt: dict) -> dict:
     if (
         not isinstance(value, dict)
         or set(value) != fields
-        or value.get("protocol") != "forest.provider-model-result/1"
+        or value.get("protocol") != "forest.provider-model-result/2"
         or value.get("status") != "RESPONDED"
         or value.get("request_id") != receipt["request_id"]
         or value.get("transport_attempt_id") != receipt["transport_attempt_id"]
         or value.get("payload_digest") != receipt["payload_digest"]
         or not isinstance(value.get("text"), str)
+        or not isinstance(value.get("assistant_message"), dict)
         or not isinstance(value.get("tool_calls"), list)
         or value.get("error_code") != receipt["error_code"]
     ):

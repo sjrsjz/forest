@@ -156,6 +156,16 @@ async def publish_model_view(scheduler, payload: dict, ctx) -> dict:
         profile["model_view_budget_tokens"], profile["model_view_media_bytes"],
         profile["model_view_decoded_bytes"],
     )
+    native_costs = quote.get("native_context_costs", {})
+    by_id = {item["unit_id"]: item for item in pages}
+    if (not isinstance(native_costs, dict) or len(native_costs) > 4096
+            or any(unit_id not in by_id or by_id[unit_id].get("kind") != "REPLY"
+                   or type(size) is not int or not 1 <= size <= 1048576
+                   for unit_id, size in native_costs.items())):
+        raise ForestError("CONTEXT_MODEL_VIEW_QUOTE_INVALID", "Native continuation cost differs from Context replies", 409)
+    # Context owns selection; private reasoning stays out of archived source data.
+    pages = [{**item, "payload_byte_length": item["payload_byte_length"] + native_costs.get(item["unit_id"], 0)}
+             for item in pages]
     try:
         joint = select_joint_view(
             pages, quote["evidence"]["evidence"] if quote.get("evidence") else [],

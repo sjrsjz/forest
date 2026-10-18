@@ -55,6 +55,7 @@ async def quote_and_read_plan(
         "preset_context": preset_context,
         "tools": tools,
         "fixed_units": fixed_units,
+        "native_context_costs": raw_snapshot.get("native_context_costs", {}),
         "evidence_ref": _exact(evidence_ref) if evidence_ref else None,
         "evidence": evidence,
         "output_tokens": output_tokens,
@@ -160,6 +161,7 @@ async def verify_model_view(
         or quote.get("input_modalities") != list(input_modalities)
         or quote.get("model_capability_digest") != model_capability_digest
         or quote.get("evidence_ref") != evidence_ref
+        or quote.get("native_context_costs", {}) != snapshot.get("native_context_costs", {})
         or quote.get("core_prompt") != compose_core_instructions(
             [{"type": "function", "function": tool} for tool in tools]
         )

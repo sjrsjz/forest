@@ -242,12 +242,13 @@ class ChatCompletionsEffectDriver:
             return receipt
 
         result_document = {
-            "protocol": "forest.provider-model-result/1",
+            "protocol": "forest.provider-model-result/2",
             "status": value["status"],
             "request_id": value["request_id"],
             "transport_attempt_id": value["transport_attempt_id"],
             "payload_digest": value["payload_digest"],
             "text": value["text"],
+            "assistant_message": value["assistant_message"],
             "tool_calls": value["tool_calls"],
             "finish_reason": value["finish_reason"],
             "provider_response_id": value["provider_response_id"],
@@ -519,14 +520,15 @@ class ChatCompletionsResultLookupDriver:
             or set(result) != {
                 "protocol", "status", "request_id", "transport_attempt_id",
                 "payload_digest", "text", "tool_calls", "finish_reason",
-                "provider_response_id", "provider_model", "error_code",
+                "provider_response_id", "provider_model", "error_code", "assistant_message",
             }
-            or result["protocol"] != "forest.provider-model-result/1"
+            or result["protocol"] != "forest.provider-model-result/2"
             or result["status"] != "RESPONDED"
             or result["request_id"] != prepared["request_id"]
             or result["transport_attempt_id"] != attempt["attempt_id"]
             or result["payload_digest"] != prepared["payload_digest"]
             or not isinstance(result["text"], str)
+            or not isinstance(result["assistant_message"], dict)
             or not isinstance(result["tool_calls"], list)
             or result["error_code"] not in {
                 None, "MODEL_USAGE_INVALID", "MODEL_TOOL_ARGUMENTS",

@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "conversation_ref",
+    "reply_payload_ids"
+  ],
+  "properties": {
+    "conversation_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "reply_payload_ids": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    }
+  }
+}

@@ -1,5 +1,7 @@
 # 单 Agent 生产执行与会话协调
 
+原生 assistant/tool_calls、thinking 保存与回放采用 [21 原生模型协议](21-native-assistant-and-thinking.md)，取代旧输出 XML 协议。
+
 > **权威性：生产执行边界详细设计。** 本文展开 [00 架构总契约](00-architecture-contract.md)、[08 群聊上下文](08-group-context-interaction.md)与[13 微内核运行时](13-microkernel-control-plane-redesign.md)。Agent 始终是一条 QiYu Agentlib 风格的 Session/Run 状态机；“下一轮”是同一 Run 中的下一次模型调用，不创建产品子 Agent。
 
 ## 1. 所有权与调用边界
@@ -88,7 +90,7 @@ Request 已写为 `READY` 但尚无 Effect 时，以及既有 Attempt 全部明�
 
 冻结投影或 wire 的精确 PayloadRef 无效、身份不符、正文缺失或已撤销、字节摘要不符，以及继承或 `NOT_APPLIED` 重试复制 wire 时同一 owner 内容冲突或父载荷不可用，均属于确定性载荷失败；Worker 只在调用 Payload 读写端口时将这些错误归入 `AGENT_FROZEN_PAYLOAD_INVALID` 的持久阻断，不把失效的冻结请求继续发给 Provider。`agent.inherit-model-request` 的 Effect 证明和 Agent 事务回执保持各自原始错误码，即使错误码恰好带有 `PAYLOAD_` 前缀，也不能由 Worker 推断为冻结载荷损坏。Payload authority 暂时不可用、分块协议暂时异常和继承事务失败仍向外传播以保留重试与对账语义。
 
-解析失败只能提交 `agent.record-protocol-failure/1`。该端口在同一事务中验证当前成功 Attempt、写入不可变 failure 与 checkpoint、清除当前 Model 请求，并把 Run 推进到 `REPAIR_READY` 或 `FAILED`；第一次进入 `REPAIR_READY` 即持久消耗唯一 repair 配额并固定下一步号，后续候选不能再次申请修复。修复输入仅从 failure 引用的有界 feedback Payload 恢复，禁止容错解析、从错误 XML 猜字段或在 Provider 层重试协议。
+解析失败只能提交 `agent.record-protocol-failure/1`。该端口在同一事务中验证当前成功 Attempt、写入不可变 failure 与 checkpoint、清除当前 Model 请求，并把 Run 推进到 `REPAIR_READY` 或 `FAILED`；第一次进入 `REPAIR_READY` 即持久消耗唯一 repair 配额并固定下一步号，后续候选不能再次申请修复。修复输入仅从 failure 引用的有界 feedback Payload 恢复，禁止容错解析、从正文猜测工具调用或在 Provider 层重试协议。
 
 解析成功只能提交 `agent.record-model-turn/1`。它接收包内解析器生成的规范块和受管 PayloadRef，在单个 Agent 事务中复核 `PARSING` 头、repair 来源、块顺序及 FunctionCall 的 trigger authority；随后一次性写入 ModelTurn，并在存在 FunctionCall 时同时写入 ToolCall 与真实 principal。Run 只能据此进入 `PREPARING_MODEL`、`WAIT_TOOL` 或 `SAFE_BOUNDARY`。宿主不能先保存“差不多合法”的回复，再补写工具或修改终止语义。
 

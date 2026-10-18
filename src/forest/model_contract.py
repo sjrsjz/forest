@@ -11,9 +11,9 @@ from typing import Any, Literal
 
 from forest.errors import ForestError
 
-SERIALIZER_REVISION = "chat-completions-agent-protocol-v1"
+SERIALIZER_REVISION = "chat-completions-native-assistant-v2"
 SUPPORTED_SERIALIZER_REVISIONS = frozenset(
-    {SERIALIZER_REVISION, "chat-completions-json-v1"}
+    {SERIALIZER_REVISION}
 )
 MAX_REQUEST_BYTES = 24 * 1024 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -85,6 +85,8 @@ class ModelCapabilities:
     system_role: str = "system"
     output_token_parameter: str = "max_completion_tokens"
     tool_image_mapping: str = "omit"
+    reasoning_mode: str = "none"
+    reasoning_effort: str | None = None
 
     def __post_init__(self):
         for name in ("deployment_id", "model", "capability_revision", "model_revision"):
@@ -103,6 +105,13 @@ class ModelCapabilities:
                 or self.output_token_parameter not in {"max_tokens", "max_completion_tokens"}
                 or self.tool_image_mapping not in {"omit", "user_after_tool_group_v1"}):
             raise _error("MODEL_CAPABILITIES_INVALID", "Unsupported model capability mapping")
+        if (self.reasoning_mode not in {"none", "deepseek", "openai"}
+                or (self.reasoning_mode == "none" and self.reasoning_effort is not None)
+                or (self.reasoning_mode == "deepseek"
+                    and self.reasoning_effort not in {None, "low", "high", "max"})
+                or (self.reasoning_mode == "openai"
+                    and self.reasoning_effort not in {"minimal", "low", "medium", "high", "xhigh"})):
+            raise _error("MODEL_CAPABILITIES_INVALID", "Invalid explicit reasoning protocol/effort")
         for name, minimum, maximum in (("max_output_tokens", 1, 262144),):
             value = getattr(self, name)
             if type(value) is not int or not minimum <= value <= maximum:
@@ -202,6 +211,11 @@ class ModelResult:
     provider_response_id: str | None = None
     provider_model: str | None = None
     error_code: str | None = None
+    assistant_message_json: str | None = field(default=None, repr=False)
+
+    @property
+    def assistant_message(self) -> dict | None:
+        return _decode(self.assistant_message_json) if self.assistant_message_json is not None else None
 
     @property
     def tool_calls(self) -> list[dict]:
@@ -217,7 +231,8 @@ class ModelResult:
                 "transport_attempt_id": self.transport_attempt_id, "payload_digest": self.payload_digest,
                 "text": self.text, "tool_calls": self.tool_calls, "usage": self.usage,
                 "finish_reason": self.finish_reason, "provider_response_id": self.provider_response_id,
-                "provider_model": self.provider_model, "error_code": self.error_code}
+                "provider_model": self.provider_model, "error_code": self.error_code,
+                "assistant_message": self.assistant_message}
 
 
 PermitCheck = Callable[[PreparedModelRequest], Awaitable[Any]]

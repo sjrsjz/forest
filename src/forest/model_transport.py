@@ -38,6 +38,21 @@ def _usage(value: Any) -> dict | None:
         result[name] = amount
     if result["total_tokens"] < result["prompt_tokens"] + result["completion_tokens"]:
         raise _error("MODEL_USAGE_INVALID", "Provider total usage is inconsistent")
+    for name in ("prompt_cache_hit_tokens", "prompt_cache_miss_tokens"):
+        if name in value:
+            amount = value[name]
+            if type(amount) is not int or not 0 <= amount <= result["prompt_tokens"]:
+                raise _error("MODEL_USAGE_INVALID", "Invalid cache token count")
+            result[name] = amount
+    for name in ("prompt_tokens_details", "completion_tokens_details"):
+        if value.get(name) is not None:
+            details = value[name]
+            if not isinstance(details, dict) or any(
+                type(amount) is not int or not 0 <= amount <= 1000000000
+                for amount in details.values() if amount is not None
+            ):
+                raise _error("MODEL_USAGE_INVALID", "Invalid token usage details")
+            result[name] = details
     return result
 
 
@@ -54,6 +69,14 @@ def _completion(prepared: PreparedModelRequest, value: Any) -> ModelResult:
             or choice["message"].get("role") != "assistant"):
         raise _error("MODEL_RESPONSE_INVALID", "Chat choice is incomplete or malformed")
     message = choice["message"]
+    native_message = {key: message[key] for key in (
+        "role", "content", "refusal", "reasoning_content", "tool_calls",
+    ) if key in message}
+    reasoning = message.get("reasoning_content")
+    if reasoning is not None and (
+        not isinstance(reasoning, str) or len(reasoning.encode("utf-8")) > MAX_RESPONSE_BYTES
+    ):
+        raise _error("MODEL_RESPONSE_INVALID", "Invalid native reasoning content")
     text = message.get("content")
     if text is None:
         text = message.get("refusal") or ""
@@ -84,13 +107,15 @@ def _completion(prepared: PreparedModelRequest, value: Any) -> ModelResult:
         usage_json=_encode(usage).decode() if usage is not None else None,
         finish_reason=choice["finish_reason"], provider_response_id=response_id,
         provider_model=provider_model, error_code=error_code,
+        assistant_message_json=_encode(native_message, limit=MAX_RESPONSE_BYTES).decode(),
     )
 
 
 class _StreamCollector:
     def __init__(self):
         self.response_id = self.model = self.finish = None
-        self.text, self.refusal, self.tools = [], [], {}
+        self.text, self.refusal, self.reasoning, self.tools = [], [], [], {}
+        self.has_reasoning = False
         self.usage = None
         self.content_bytes = 0
         self.done = False
@@ -132,12 +157,15 @@ class _StreamCollector:
             raise _error("MODEL_RESPONSE_INVALID", "Stream changed its assistant role")
         if delta.get("function_call") is not None:
             raise _error("MODEL_RESPONSE_INVALID", "Deprecated function_call stream is unsupported")
-        for name, target in (("content", self.text), ("refusal", self.refusal)):
+        for name, target in (("content", self.text), ("refusal", self.refusal),
+                             ("reasoning_content", self.reasoning)):
             fragment = delta.get(name)
             if fragment is not None:
                 if not isinstance(fragment, str):
                     raise _error("MODEL_RESPONSE_INVALID", "Stream text delta must be text")
                 target.append(fragment)
+                if name == "reasoning_content":
+                    self.has_reasoning = True
                 self.content_bytes += len(fragment.encode("utf-8"))
         if self.content_bytes > MAX_RESPONSE_BYTES:
             raise _error("MODEL_RESPONSE_TOO_LARGE", "Stream exceeds bounded output size")
@@ -175,9 +203,19 @@ class _StreamCollector:
             raise _error("MODEL_STREAM_INCOMPLETE", "Stream did not finish completely")
         if sorted(self.tools) != list(range(len(self.tools))):
             raise _error("MODEL_RESPONSE_INVALID", "Stream tool indices contain a gap")
-        message = {"role": "assistant", "content": "".join(self.text), "refusal": "".join(self.refusal),
-                   "tool_calls": [self.tools[index] for index in sorted(self.tools)]}
-        if not message["content"] and message["refusal"]:
+        message = {"role": "assistant", "content": "".join(self.text)}
+        if self.refusal:
+            message["refusal"] = "".join(self.refusal)
+        if self.has_reasoning:
+            message["reasoning_content"] = "".join(self.reasoning)
+        if self.tools:
+            message["tool_calls"] = [
+                {"id": self.tools[index]["id"], "type": "function", "function": {
+                    "name": self.tools[index]["name"],
+                    "arguments": self.tools[index]["arguments"],
+                }} for index in sorted(self.tools)
+            ]
+        if not message["content"] and message.get("refusal"):
             message["content"] = message["refusal"]
         return _completion(prepared, {"id": self.response_id, "model": self.model,
                                      "choices": [{"index": 0, "finish_reason": self.finish,

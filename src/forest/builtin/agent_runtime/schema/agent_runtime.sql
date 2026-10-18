@@ -160,6 +160,7 @@ CREATE TABLE agent_runs (
         reload_generation_id IS NULL OR octet_length(reload_generation_id) BETWEEN 1 AND 256
     ),
     final_candidate_payload_id text,
+    native_message_bytes integer CHECK (native_message_bytes BETWEEN 1 AND 1048576),
     final_candidate_payload_digest text CHECK (
         final_candidate_payload_digest IS NULL
         OR final_candidate_payload_digest ~ '^sha256:[a-f0-9]{64}$'
@@ -4767,7 +4768,8 @@ BEGIN
         );
     END IF;
     IF run_row.state='FINAL_READY' THEN
-        IF run_row.final_candidate_payload_id IS DISTINCT FROM candidate_value->>'payload_id'
+        IF run_row.native_message_bytes IS DISTINCT FROM (body->>'native_message_bytes')::integer
+           OR run_row.final_candidate_payload_id IS DISTINCT FROM candidate_value->>'payload_id'
            OR run_row.final_candidate_payload_digest IS DISTINCT FROM candidate_value->>'digest' THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
@@ -4792,6 +4794,7 @@ BEGIN
     END IF;
     UPDATE __forest_module_schema__.agent_runs
     SET state='FINAL_READY',
+        native_message_bytes=(body->>'native_message_bytes')::integer,
         final_candidate_payload_id=candidate_value->>'payload_id',
         final_candidate_payload_digest=candidate_value->>'digest',
         updated_at=clock_timestamp()
@@ -6755,4 +6758,39 @@ BEGIN
         )
     );
 END;
+$$;
+
+
+-- Resolve only the retained visible reply identities in the same conversation.
+-- Native reasoning stays in the Agent/Provider payload lineage, never Memory.
+CREATE UNIQUE INDEX agent_final_reply_lookup
+    ON agent_runs(bot_id,final_candidate_payload_id)
+    WHERE final_candidate_payload_id IS NOT NULL;
+
+CREATE FUNCTION agent_reply_continuations(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('items',COALESCE(jsonb_agg(jsonb_build_object(
+            'reply_payload_id',r.final_candidate_payload_id,
+            'native_message_bytes',r.native_message_bytes,
+            'model_result',jsonb_build_object(
+                'payload_id',a.result_payload_id,'digest',a.result_payload_digest,
+                'owner_component_id',m.provider_component_id,
+                'owner_kind','model.result','owner_id',a.attempt_id
+            )) ORDER BY ids.position),'[]'::jsonb)))
+    FROM jsonb_array_elements_text(input->'reply_payload_ids')
+        WITH ORDINALITY ids(payload_id,position)
+    JOIN __forest_module_schema__.agent_runs r
+      ON r.bot_id=context->>'bot_id' AND r.final_candidate_payload_id=ids.payload_id
+     AND r.conversation_ref=input->>'conversation_ref' AND r.state='COMPLETED'
+     AND r.native_message_bytes IS NOT NULL
+    JOIN LATERAL (
+        SELECT request_id FROM __forest_module_schema__.model_turns t
+        WHERE t.bot_id=r.bot_id AND t.run_id=r.run_id AND t.terminal
+        ORDER BY t.step_seq DESC LIMIT 1
+    ) t ON true
+    JOIN __forest_module_schema__.model_requests m
+      ON m.bot_id=r.bot_id AND m.request_id=t.request_id
+    JOIN __forest_module_schema__.model_transport_attempts a
+      ON a.bot_id=m.bot_id AND a.attempt_id=m.current_attempt_id AND a.state='SUCCEEDED';
 $$;

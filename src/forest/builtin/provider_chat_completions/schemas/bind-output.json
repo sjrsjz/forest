@@ -37,7 +37,77 @@
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "capabilities": {
-      "$ref": "#/$defs/capabilities"
+      "$ref": "#/$defs/capabilities",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "reasoning_mode": {
+                "const": "none"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reasoning_effort": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "reasoning_mode"
+            ],
+            "properties": {
+              "reasoning_mode": {
+                "const": "deepseek"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reasoning_effort": {
+                "enum": [
+                  null,
+                  "low",
+                  "high",
+                  "max"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "reasoning_mode"
+            ],
+            "properties": {
+              "reasoning_mode": {
+                "const": "openai"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reasoning_effort"
+            ],
+            "properties": {
+              "reasoning_effort": {
+                "enum": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
+            }
+          }
+        }
+      ]
     }
   },
   "$defs": {
@@ -142,6 +212,27 @@
             "omit",
             "user_after_tool_group_v1"
           ]
+        },
+        "reasoning_mode": {
+          "enum": [
+            "none",
+            "deepseek",
+            "openai"
+          ],
+          "default": "none",
+          "description": "Explicit native reasoning protocol; never inferred from the endpoint."
+        },
+        "reasoning_effort": {
+          "enum": [
+            null,
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default": null
         }
       }
     }

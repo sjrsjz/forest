@@ -7,6 +7,7 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
+from xml.sax.saxutils import escape, quoteattr
 
 from agent_protocol import (
     CORE_PROMPT_SHA256,
@@ -35,9 +36,10 @@ from forest.model_contract import (
 )
 from forest.model_contract import _encode as _contract_encode
 
-PROJECTION_REVISION = "forest-model-view-v2"
+PROJECTION_REVISION = "forest-native-model-view-v3"
 MEMORY_EVIDENCE_REVISION = "forest-memory-evidence-v2"
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+_XML_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 # Conversation publishes at most 4096 active units and one archive reference.
 # One Agent Run can add at most 256 model turns and their paired tool results.
 _MAX_FROZEN_MODEL_UNITS = 4096 + 1 + 2 * 256
@@ -47,6 +49,31 @@ def _encode(value: Any, *, limit: int = MAX_REQUEST_BYTES) -> bytes:
     return _contract_encode(
         value, limit=limit, size_error_code="MODEL_INPUT_BYTES_EXCEEDED"
     )
+
+
+def _tool_parameters(schema: dict) -> dict:
+    """Nest the contributed schema without changing its local JSON pointers."""
+    def relocate(value):
+        if isinstance(value, dict):
+            return {
+                key: ("#/properties/arguments" + child[1:]
+                      if key in {"$ref", "$dynamicRef"} and isinstance(child, str)
+                      and (child == "#" or child.startswith("#/")) else relocate(child))
+                for key, child in value.items()
+            }
+        if isinstance(value, list):
+            return [relocate(child) for child in value]
+        return value
+
+    return {
+        "type": "object",
+        "properties": {
+            "authority_trigger_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "arguments": relocate(schema),
+        },
+        "required": ["authority_trigger_id", "arguments"],
+        "additionalProperties": False,
+    }
 
 
 def _tools(value: Sequence[dict], capabilities: ModelCapabilities) -> list[dict]:
@@ -79,8 +106,21 @@ def _tools(value: Sequence[dict], capabilities: ModelCapabilities) -> list[dict]
             elif isinstance(item, list):
                 pending.extend(item)
         names.add(tool["name"])
+        tool["parameters"] = _tool_parameters(tool["parameters"])
         result.append({"type": "function", "function": tool})
     return result
+
+
+def _native_options(body: dict, declarations: list[dict], capabilities: ModelCapabilities) -> None:
+    if declarations:
+        body["tools"] = declarations
+        body["parallel_tool_calls"] = False
+    if capabilities.reasoning_mode == "deepseek":
+        body["thinking"] = {"type": "enabled"}
+        if capabilities.reasoning_effort is not None:
+            body["reasoning_effort"] = capabilities.reasoning_effort
+    elif capabilities.reasoning_mode == "openai":
+        body["reasoning_effort"] = capabilities.reasoning_effort
 
 
 def _attribution(value: Any, *, author: bool = False) -> dict:
@@ -387,7 +427,23 @@ class _Projection:
 
     @staticmethod
     def text(value: dict) -> dict:
-        return {"type": "text", "text": _encode(value, limit=MAX_EVENT_BYTES).decode()}
+        # Each host data part is a complete stable XML element. Arbitrary keys
+        # are attributes, never tag names; text cannot close a host boundary.
+        def safe_text(text):
+            return _XML_CONTROL.sub(lambda match: f"\\u{ord(match[0]):04x}", text)
+
+        def node(item):
+            if isinstance(item, dict):
+                return "".join(
+                    f"<field name={quoteattr(safe_text(key))}>{node(child)}</field>"
+                    for key, child in sorted(item.items())
+                )
+            if isinstance(item, list):
+                return "".join("<item>" + node(child) + "</item>" for child in item)
+            return escape(safe_text(item) if isinstance(item, str) else _encode(item).decode())
+
+        _encode(value, limit=MAX_EVENT_BYTES)
+        return {"type": "text", "text": "<forest_data>" + node(value) + "</forest_data>"}
 
     def memory_image(self, unit: dict, part: dict, part_id: str) -> MediaSnapshot | None:
         original, media_ref = unit["source_unit_id"], part.get("media_ref")
@@ -589,8 +645,28 @@ class _Projection:
         messages, semantic_messages, deferred = [], [], []
         for unit in units:
             role = "user" if unit["role"] == "control_data" else unit["role"]
+            native = unit.get("assistant_message")
+            if native is not None:
+                if role != "assistant" or not isinstance(native, dict) or native.get("role") != role:
+                    raise _error("MODEL_INPUT_INVALID", "Native assistant history has invalid ownership")
+                # Preserve content and argument spelling. Reasoning is a
+                # provider-specific continuation field, never visible content.
+                rendered = _decode(_encode(native))
+                if self.capabilities.reasoning_mode != "deepseek":
+                    rendered.pop("reasoning_content", None)
+                messages.append(rendered)
+                semantic_messages.append(rendered.copy())
+                self.sources.append({"unit_id": unit["unit_id"], "source": unit["source"], "author": unit["author"]})
+                self.included.extend({"unit_id": unit["unit_id"], "part_id": part.get("part_id", str(index))}
+                                     for index, part in enumerate(unit["parts"]))
+                continue
             header = self.text({"unit_id": unit["unit_id"], "context_role": unit["role"],
-                                "source": unit["source"], "author": unit["author"]})
+                                "source": unit["source"], "author": unit["author"],
+                                "ingress_seq": unit.get("ingress_seq"),
+                                "authority_trigger_id": next((
+                                    claim["last_trigger_ref"] for claim in self.snapshot["trigger_claims"]
+                                    if claim["last_trigger_ingress_seq"] == unit.get("ingress_seq")
+                                ), None)})
             self.sources.append({"unit_id": unit["unit_id"], "source": unit["source"], "author": unit["author"]})
             if (role == "tool" and self.capabilities.tool_image_mapping == "user_after_tool_group_v1"
                     and "image" in self.capabilities.input_modalities):
@@ -705,7 +781,8 @@ def prepare_model_request(
                 "Protocol repair cannot contain Preset, Context, Memory, or media",
             )
         repair_message = repair_view.render(declarations)
-        messages = [{"role": capabilities.system_role, "content": repair_message}]
+        messages = [{"role": capabilities.system_role, "content": PROTOCOL_REPAIR_PROMPT},
+                    {"role": "user", "content": repair_message}]
         body = {
             "model": capabilities.model,
             "messages": messages,
@@ -715,6 +792,7 @@ def prepare_model_request(
         }
         if stream and capabilities.stream_usage:
             body["stream_options"] = {"include_usage": True}
+        _native_options(body, declarations, capabilities)
         encoded = _encode(body)
         cut_names = (
             "input_revision",
@@ -807,7 +885,6 @@ def prepare_model_request(
         for index, item in enumerate(preset_context)
     )
     semantic = [message.copy() for message in messages]
-    prefix_length = len(messages)
     for group in grouped:
         rendered, semantic_rendered = projector.group(group)
         messages.extend(rendered)
@@ -841,8 +918,8 @@ def prepare_model_request(
             memory_reference["status_projected"] = True
             evidence_messages.append(marker)
             evidence_semantic.append(marker)
-        messages = [*messages[:prefix_length], *evidence_messages, *messages[prefix_length:]]
-        semantic = [*semantic[:prefix_length], *evidence_semantic, *semantic[prefix_length:]]
+        messages.extend(evidence_messages)
+        semantic.extend(evidence_semantic)
         for name in ("included", "omitted", "sources", "materialized"):
             setattr(projector, name, getattr(extra, name) + getattr(projector, name))
         projector.image_bytes += extra.image_bytes
@@ -857,6 +934,7 @@ def prepare_model_request(
             capabilities.output_token_parameter: output_tokens, "n": 1}
     if stream and capabilities.stream_usage:
         body["stream_options"] = {"include_usage": True}
+    _native_options(body, declarations, capabilities)
     encoded = _encode(body)
     manifest = {
         "request_id": request_id, **{name: snapshot[name] for name in (

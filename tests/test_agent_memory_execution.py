@@ -99,9 +99,10 @@ async def test_model_recovery_prefers_committed_receipt_and_never_dispatches():
     async def read_result(reference):
         assert reference == result_ref
         return {
-            "protocol": "forest.provider-model-result/1", "status": "RESPONDED",
+            "protocol": "forest.provider-model-result/2", "status": "RESPONDED",
             "request_id": "request/1", "transport_attempt_id": "attempt/1",
             "payload_digest": receipt["payload_digest"], "text": "recovered",
+            "assistant_message": {"role": "assistant", "content": "recovered"},
             "tool_calls": [], "finish_reason": "stop",
             "provider_response_id": "response/1", "provider_model": "model/1",
             "error_code": None,
@@ -564,9 +565,10 @@ async def test_persisted_incomplete_response_reconciles_without_dispatch_and_set
         "owner_kind": "model.result", "owner_id": "attempt/quality",
     }
     result = {
-        "protocol": "forest.provider-model-result/1", "status": "RESPONDED",
+        "protocol": "forest.provider-model-result/2", "status": "RESPONDED",
         "request_id": "request/quality", "transport_attempt_id": "attempt/quality",
         "payload_digest": digest, "text": "", "tool_calls": [],
+        "assistant_message": {"role": "assistant", "content": ""},
         "finish_reason": "length", "provider_response_id": "response/quality",
         "provider_model": "model/quality", "error_code": "MODEL_OUTPUT_INCOMPLETE",
     }

@@ -9,15 +9,21 @@
     "model": "unconfigured",
     "capability_revision": "configuration/1",
     "model_revision": "configured",
-    "input_modalities": ["text"],
+    "input_modalities": [
+      "text"
+    ],
     "supports_tools": true,
     "supports_streaming": true,
     "stream_usage": true,
     "max_output_tokens": 4096,
-    "image_roles": ["user"],
+    "image_roles": [
+      "user"
+    ],
     "image_detail": "auto",
     "system_role": "system",
     "output_token_parameter": "max_completion_tokens",
-    "tool_image_mapping": "omit"
+    "tool_image_mapping": "omit",
+    "reasoning_mode": "none",
+    "reasoning_effort": null
   }
 }

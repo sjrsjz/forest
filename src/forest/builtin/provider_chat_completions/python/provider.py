@@ -31,8 +31,7 @@ class ChatCompletionsProvider(Plugin):
                 "PROVIDER_CONFIGURATION_INVALID", "Provider protocol is unsupported", 422
             )
         plain_config = _plain(config)
-        self.capabilities = plain_config["capabilities"]
-        ModelCapabilities(**self.capabilities)
+        self.capabilities = ModelCapabilities(**plain_config["capabilities"]).as_dict()
         self.capability_digest = _digest(self.capabilities)
         self.profile_ref = "profile:" + _digest(plain_config)[7:]
 

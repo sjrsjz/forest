@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.53.3"
+version = "5.0.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -70,6 +70,7 @@ requests = [
   "domain.query:agent.management-effects-page",
   "domain.query:agent.run-recovery",
   "domain.query:agent.execution-history",
+  "domain.query:agent.reply-continuations",
   "domain.query:agent.frozen-model-resume",
   "uow.execute:agent.start-from-conversation",
   "uow.execute:agent.append-run-input",
@@ -219,9 +220,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.33.1"
+schema_version = "3.0.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "0568ef06559d7899e23a45bde08fba95a8a44f628e96383d663fcfb0807fc154"
+baseline_sha256 = "18ed8a4c1cb973193f82f89208076ae55047ee3fd8a4e2b95a0ec3d5e8225833"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -1098,3 +1099,10 @@ handler_timeout_s = 15
 settle_timeout_s = 5
 lease_seconds = 45
 drain_policy = "inflight"
+
+[[components.domain_queries]]
+name = "agent.reply-continuations"
+contract = "1.0"
+function = "agent_reply_continuations"
+input_schema = "schemas/reply-continuations-input.json"
+output_schema = "schemas/reply-continuations-output.json"

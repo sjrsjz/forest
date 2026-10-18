@@ -1,0 +1,68 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "items"
+  ],
+  "properties": {
+    "items": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reply_payload_id",
+          "native_message_bytes",
+          "model_result"
+        ],
+        "properties": {
+          "reply_payload_id": {
+            "type": "string"
+          },
+          "native_message_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1048576
+          },
+          "model_result": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "payload_id",
+              "digest",
+              "owner_component_id",
+              "owner_kind",
+              "owner_id"
+            ],
+            "properties": {
+              "payload_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "digest": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "owner_component_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "owner_kind": {
+                "const": "model.result"
+              },
+              "owner_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

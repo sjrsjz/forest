@@ -228,6 +228,18 @@ class TurnRecorder:
             )
         try:
             turn = parse_model_turn(candidate, allowed_tools=tuple(bindings))
+            if turn.function_call is not None:
+                wrapper = turn.function_call.arguments
+                if (set(wrapper) != {"authority_trigger_id", "arguments"}
+                        or not isinstance(wrapper.get("authority_trigger_id"), str)
+                        or not 1 <= len(wrapper["authority_trigger_id"]) <= 512
+                        or not isinstance(wrapper.get("arguments"), dict)):
+                    raise ForestError("AGENT_PROTOCOL_ARGUMENTS", "Tool arguments require an authority trigger and business arguments", 422)
+                validation = await self.ctx.agent_tools.validate_arguments(
+                    turn.function_call.name, wrapper["arguments"],
+                )
+                if not validation["valid"]:
+                    raise ForestError("AGENT_PROTOCOL_ARGUMENTS", validation["reason"], 422)
         except ForestError as exc:
             if not exc.code.startswith("AGENT_PROTOCOL_"):
                 raise
@@ -256,7 +268,7 @@ class TurnRecorder:
         assistant_ref = None
         if turn.assistant_text:
             assistant_ref = await self.ctx.payloads.put_json(
-                {"text": turn.assistant_text},
+                {"text": turn.assistant_text, "assistant_message": json.loads(candidate)},
                 owner_kind="assistant.candidate",
                 owner_id=turn_id,
                 parents=(turn_ref,),
@@ -272,17 +284,6 @@ class TurnRecorder:
                     503,
                 )
             wrapper = turn.function_call.arguments
-            if (
-                set(wrapper) != {"authority_trigger_id", "arguments"}
-                or not isinstance(wrapper.get("authority_trigger_id"), str)
-                or not wrapper["authority_trigger_id"]
-                or not isinstance(wrapper.get("arguments"), dict)
-            ):
-                raise ForestError(
-                    "AGENT_TOOL_AUTHORITY_INVALID",
-                    "Tool arguments must bind to one durable trigger",
-                    409,
-                )
             call_digest = digest_json(
                 {
                     "turn_id": turn_id,
@@ -417,8 +418,9 @@ class TurnRecorder:
         assistant = await self.ctx.payloads.read_json(source)
         if (
             not isinstance(assistant, dict)
-            or set(assistant) != {"text"}
+            or set(assistant) != {"text", "assistant_message"}
             or not isinstance(assistant["text"], str)
+            or not isinstance(assistant["assistant_message"], dict)
         ):
             raise ForestError(
                 "MODEL_TURN_PAYLOAD_CONFLICT",
@@ -427,7 +429,7 @@ class TurnRecorder:
             )
         reply_ref = stable("reply", owner["run_id"])
         candidate = await self.ctx.payloads.put_json(
-            assistant,
+            {"text": assistant["text"]},
             owner_kind="final.reply",
             owner_id=reply_ref,
             parents=(source,),
@@ -439,6 +441,10 @@ class TurnRecorder:
                 "turn_id": turn_id,
                 "source_candidate": source,
                 "candidate": candidate,
+                "native_message_bytes": len(json.dumps(
+                    assistant["assistant_message"], ensure_ascii=False,
+                    separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8")),
             },
             operation_id=self.ctx.operations.stable(f"finalize-candidate:{turn_id}"),
             timeout=15,

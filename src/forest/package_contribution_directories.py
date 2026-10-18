@@ -293,6 +293,8 @@ class FrozenContributionDirectories:
                 remaining_timeout=remaining_timeout,
             )
         if kind == "agent-tools":
+            if request.get("action") == "validate-arguments":
+                return self._validate_agent_tool_arguments(request)
             if request.get("action") == "query-handed-off":
                 return await self._query_handed_off_agent_tool(
                     request,
@@ -311,6 +313,20 @@ class FrozenContributionDirectories:
             "Contribution directory kind is unsupported",
             422,
         )
+
+    def _validate_agent_tool_arguments(self, request: dict) -> dict:
+        if (set(request) != {"kind", "action", "tool_name", "arguments"}
+                or not isinstance(request.get("tool_name"), str)
+                or not isinstance(request.get("arguments"), dict)):
+            raise ForestError("CONTRIBUTION_DIRECTORY_REQUEST_INVALID", "Invalid tool validation request", 422)
+        selected = self._agent_tool_routes.get(request["tool_name"])
+        if selected is None:
+            raise ForestError("AGENT_TOOL_NOT_FOUND", "Agent tool is not available", 404)
+        _owner, contribution, _service = selected
+        error = next(Draft202012Validator(contribution.declaration["parameters"]).iter_errors(
+            request["arguments"],
+        ), None)
+        return {"valid": error is None, "reason": error.message[:2048] if error else None}
 
     async def _dispatch_agent_tool(
         self,

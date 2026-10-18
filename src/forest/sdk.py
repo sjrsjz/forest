@@ -1306,6 +1306,16 @@ class AgentToolsDirectoryHandle:
             {"kind": "agent-tools", "action": "list"},
         )
 
+    async def validate_arguments(self, name: str, arguments: dict) -> dict:
+        """Read-only validation against the frozen tool's business schema."""
+        scope = _require_call(self._scope)
+        if self._rpc is None:
+            raise ForestError("CAPABILITY_DENIED", "No contribution directory gateway is available", 403)
+        return await self._rpc(scope.call_id, {
+            "kind": "agent-tools", "action": "validate-arguments",
+            "tool_name": name, "arguments": arguments,
+        })
+
     async def dispatch_prepared(self, request: dict) -> dict:
         scope = _require_call(self._scope)
         if self._rpc is None:

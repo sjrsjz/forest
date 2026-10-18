@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -41,12 +42,12 @@ def _deadline(value: str) -> datetime:
 def _candidate(value: object, *, request_id: str, attempt_id: str) -> str:
     if (
         not isinstance(value, dict)
-        or value.get("protocol") != "forest.provider-model-result/1"
+        or value.get("protocol") != "forest.provider-model-result/2"
         or value.get("status") != "RESPONDED"
         or value.get("request_id") != request_id
         or value.get("transport_attempt_id") != attempt_id
         or not isinstance(value.get("text"), str)
-        or (not value["text"] and value.get("error_code") is None)
+        or not isinstance(value.get("assistant_message"), dict)
         or value.get("error_code") not in {
             None, "MODEL_USAGE_INVALID", "MODEL_TOOL_ARGUMENTS",
             "MODEL_TOOL_SEQUENCE", "MODEL_TOOL_UNDECLARED",
@@ -58,7 +59,8 @@ def _candidate(value: object, *, request_id: str, attempt_id: str) -> str:
             "Durable Provider result differs from the Agent execution head",
             409,
         )
-    return value["text"]
+    return json.dumps(value["assistant_message"], ensure_ascii=False,
+                      sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 class AgentExecution:
@@ -704,6 +706,7 @@ class AgentExecution:
                 "context_view_revision": run["progress"]["context_view_revision"],
             },
         )
+        await reader.attach_reply_continuations(snapshot)
         history = await self._history(run["run_id"])
         logical_step_id = f"{run['run_id']}:step:{step_seq}"
         fixed_view = await reader.model_view(

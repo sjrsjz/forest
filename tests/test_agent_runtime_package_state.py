@@ -2460,7 +2460,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             kernel,
             owner_kind="model.turn",
             owner_id="model-turn/package/repair",
-            value=b'{"protocol_version":1,"blocks":[{"block_type":"FunctionCall","name":"lookup"}]}',
+            value=b'{"protocol_version":2,"blocks":[{"block_type":"FunctionCall","name":"lookup"}]}',
         )
         tool_arguments = await _payload(
             kernel,
@@ -2484,7 +2484,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "turn_id": "model-turn/package/repair",
                 "request_id": "model-request/package/repair",
                 "turn": {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "blocks": [function_block],
                     "raw_candidate_digest": digest_json({"candidate": "valid"}),
                     "truncated_after_function_call": False,

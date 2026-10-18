@@ -124,6 +124,20 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
         "conversation",
         "conversation:1",
     )
+    validation = await directory.invoke(
+        {"kind": "agent-tools", "action": "validate-arguments", "tool_name": "inspect",
+         "arguments": {"object_id": 42}},
+        graph_identity=SimpleNamespace(graph_id="graph:1", graph_revision=1),
+        scope=scope, parent_call_id="call:1", remaining_timeout=lambda value: value,
+    )
+    assert validation["valid"] is False
+    assert invoked == []
+    assert (await directory.invoke(
+        {"kind": "agent-tools", "action": "validate-arguments", "tool_name": "inspect",
+         "arguments": {"object_id": "object:1"}},
+        graph_identity=SimpleNamespace(graph_id="graph:1", graph_revision=1),
+        scope=scope, parent_call_id="call:1", remaining_timeout=lambda value: value,
+    )) == {"valid": True, "reason": None}
     result = await directory.invoke(
         request,
         graph_identity=SimpleNamespace(graph_id="graph:1", graph_revision=1),

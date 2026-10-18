@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import sys
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -140,10 +141,10 @@ def test_group_authors_and_literal_data_are_preserved_without_role_forgery():
     assert messages[1]["content"][0]["text"] != messages[2]["content"][0]["text"]
     for message, expected_author, expected_group in ((messages[1], "alice", "group-a"),
                                                     (messages[2], "bob", "group-b")):
-        header = json.loads(message["content"][0]["text"])
-        assert header["author"]["external_user_id"] == expected_author
-        assert header["source"]["channel_id"] == expected_group
-    assert json.loads(messages[1]["content"][1]["text"])["text"] == value["units"][0]["parts"][0]["text"]
+        header = ET.fromstring(message["content"][0]["text"])
+        assert header.find("./field[@name='author']/field[@name='external_user_id']").text == expected_author
+        assert header.find("./field[@name='source']/field[@name='channel_id']").text == expected_group
+    assert ET.fromstring(messages[1]["content"][1]["text"]).find("./field[@name='text']").text == value["units"][0]["parts"][0]["text"]
     assert value == before
     assert result.manifest["trigger_claims"] == value["trigger_claims"]
     assert result.manifest["selected_input_end_seq"] == 8
@@ -156,16 +157,16 @@ def test_protocol_repair_projection_contains_only_the_durable_invalid_candidate(
     value["units"] = []
     repair = ProtocolRepairView(
         repair_count=1,
-        error_code="AGENT_PROTOCOL_XML",
-        validation_reason="Model candidate is not one complete XML document",
+        error_code="AGENT_PROTOCOL_ARGUMENTS",
+        validation_reason="Native tool arguments do not match the declared schema",
         candidate_digest="sha256:" + "a" * 64,
         invalid_candidate="invalid candidate excerpt",
     )
     result = prepared(value, stream=False, repair_view=repair)
     body = json.loads(result.body)
-    assert len(body["messages"]) == 1
-    content = body["messages"][0]["content"]
-    assert "<forest_protocol_repair" in content
+    assert len(body["messages"]) == 2
+    content = body["messages"][0]["content"] + body["messages"][1]["content"]
+    assert "<invalid_assistant" in content
     assert "invalid candidate excerpt" in content
     assert "Rewrite that candidate only" in content
     assert result.manifest["agent_protocol"]["repair_count"] == 1
@@ -179,10 +180,10 @@ def test_protocol_repair_projection_contains_only_the_durable_invalid_candidate(
 def test_protocol_repair_rejects_normal_agent_inputs():
     repair = ProtocolRepairView(
         1,
-        "AGENT_PROTOCOL_XML",
-        "invalid XML",
+        "AGENT_PROTOCOL_ARGUMENTS",
+        "invalid tool arguments",
         "sha256:" + "a" * 64,
-        "not xml",
+        "invalid native candidate",
     )
     with pytest.raises(ForestError) as caught:
         prepared(snapshot(unit(text="conversation data")), repair_view=repair)
@@ -397,9 +398,10 @@ def test_json_tool_results_retain_structure_and_project_nested_media_before_seri
     result = prepared(value)
     assert "hidden.invalid" not in result.body.decode() and "base64" not in result.body.decode()
     text = json.loads(result.body)["messages"][-1]["content"].splitlines()[-1]
-    projected = json.loads(text)["value"]
-    assert projected["count"] == 3 and projected["rows"][0] == {"label": "plain value"}
-    assert projected["rows"][1]["type"] == "unavailable"
+    projected = ET.fromstring(text).find("./field[@name='value']")
+    assert projected.find("./field[@name='count']").text == "3"
+    assert projected.find("./field[@name='rows']/item/field[@name='label']").text == "plain value"
+    assert projected.findall("./field[@name='rows']/item")[1].find("./field[@name='type']").text == "unavailable"
     assert {ref["json_pointer"] for ref in result.manifest["omitted_part_refs"]} == {"/rows/1", "/rows/2"}
     assert value == before
 
@@ -578,6 +580,75 @@ async def respond(writer, body, status=200, content_type="application/json", fra
 
 async def allowed(prepared):
     prepared.verify()
+
+
+async def test_native_thinking_stream_replays_exact_message_and_keeps_cache_usage():
+    native_arguments = '{ "query": "value" }'
+    usage = {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30,
+             "prompt_cache_hit_tokens": 16, "prompt_cache_miss_tokens": 4,
+             "prompt_tokens_details": {"cached_tokens": 16},
+             "completion_tokens_details": {"reasoning_tokens": 6}}
+    stream = b"".join([
+        event({"role": "assistant", "reasoning_content": "private "}),
+        event({"reasoning_content": "state", "content": "checking"}),
+        event({"tool_calls": [{"index": 0, "id": "call_original", "type": "function",
+                               "function": {"name": "lookup", "arguments": native_arguments[:12]}}]}),
+        event({"tool_calls": [{"index": 0, "function": {"arguments": native_arguments[12:]}}]}),
+        event({}, finish="tool_calls"), event({}, choices=False, usage=usage), b"data: [DONE]\r\n\r\n",
+    ])
+
+    async def handler(writer, request):
+        body = json.loads(request["body"])
+        assert body["thinking"] == {"type": "enabled"}
+        assert body["tools"][0]["function"]["name"] == "lookup"
+        assert body["parallel_tool_calls"] is False
+        await respond(writer, stream, content_type="text/event-stream", fragments=[stream[:71], stream[71:]])
+
+    caps = capabilities(reasoning_mode="deepseek", reasoning_effort="high")
+    async with server(handler) as (url, _requests):
+        client = ChatCompletionsClient(url, "test-key")
+        try:
+            result = await client.dispatch(prepared(caps=caps, tools=[tool_spec()]), permitcheck=allowed)
+        finally:
+            await client.aclose()
+    assert result.error_code is None
+    assert result.usage == usage
+    message = result.assistant_message
+    assert message["content"] == "checking"
+    assert message["reasoning_content"] == "private state"
+    assert message["tool_calls"][0]["function"]["arguments"] == native_arguments
+    assistant = unit("previous-model", role="assistant", parts=[])
+    assistant.update(assistant_message=message, tool_calls=message["tool_calls"])
+    tool_result = unit("result", role="tool", text="found")
+    tool_result["tool_call_id"] = "call_original"
+    replay = prepared(snapshot(unit(), assistant, tool_result), caps=caps, tools=[tool_spec()])
+    replayed = json.loads(replay.body)["messages"][2]
+    assert replayed == message
+    assert "private state" not in replayed["content"]
+
+
+def test_reasoning_parameters_are_explicit_and_vendor_specific():
+    normal = json.loads(prepared().body)
+    assert "thinking" not in normal and "reasoning_effort" not in normal
+    openai = json.loads(prepared(caps=capabilities(reasoning_mode="openai", reasoning_effort="medium")).body)
+    assert openai["reasoning_effort"] == "medium" and "thinking" not in openai
+    with pytest.raises(ForestError):
+        capabilities(reasoning_mode="none", reasoning_effort="high")
+
+
+def test_native_tool_schema_preserves_nested_schema_references_and_trigger_authority():
+    tool = {"name": "lookup", "description": "Lookup", "parameters": {
+        "type": "object", "$defs": {"query": {"type": "string", "minLength": 1}},
+        "properties": {"query": {"$ref": "#/$defs/query"}},
+        "required": ["query"], "additionalProperties": False,
+    }}
+    wire = json.loads(prepared(tools=[tool]).body)
+    schema = wire["tools"][0]["function"]["parameters"]
+    valid = {"authority_trigger_id": "trigger-1", "arguments": {"query": "memory"}}
+    Draft202012Validator(schema).validate(valid)
+    assert not Draft202012Validator(schema).is_valid({**valid, "arguments": {"query": 42}})
+    assert not Draft202012Validator(schema).is_valid({"arguments": {"query": "memory"}})
+    assert tool["parameters"]["properties"]["query"]["$ref"] == "#/$defs/query"
 
 
 async def test_self_hosted_provider_can_omit_credentials_without_inheriting_them(monkeypatch):

@@ -140,7 +140,7 @@ async def test_agent_protocol_is_owned_by_an_isolated_builtin_generation(tmp_pat
         )
         assert result == {
             "protocol_id": "forest-agent-protocol",
-            "protocol_version": 1,
+            "protocol_version": 2,
             "core_prompt_digest": CORE_PROMPT_SHA256,
             "parser_revision": PARSER_REVISION,
             "core_prompt": CORE_PROMPT,
