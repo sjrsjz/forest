@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-19 整条 CQ 记忆：Codec 2.1.1、Adapter 3.1.1 已经正式热替换，维护后 RuntimeGraph 修订 11、22/22 ACTIVE。OneBot 的 @、回复、表情与正文按一个完整 CQ TEXT part 保存、查询和召回，当前 Context 使用相同编码；图片只放受管引用，实际像素继续走 VL。旧 599 条消息已从原事件离线重建，104 个图片 part、人格和原费用账本保留，旧向量及旧种子联想清除，Memory 图重建 SUCCEEDED、发布修订 51。00:04 CST 569 个 DOCUMENT facet 全部 READY，待嵌入、RESERVED/UNKNOWN 为零，新观察首样本零违规。文本与图文完整 BotHost 检查通过；真实群回复的语义效果及完整 24 小时观察未据此宣称验收。见[验收记录](cq-memory-acceptance-2026-10-19.md)。
+
 2026-10-18 23:21 CST Bot 提示词设置已发布：Agent 5.3.0 工作区默认“Bot 提示词”文本编辑，另有执行记录和只读核心协议视图；通过包声明式配置文档、原子计划和现有换代协议生效。实现提交 `b3435f01`，沿用既有 Bot/记忆库，原人格保留；正式换代后图修订 5、22/22 ACTIVE、22/22 schema bundle READY、OneBot 单连接。事务并发、回滚和引用所有权验证，以及正式 BotHost 新提示词进入模型输入及准确 Run 引用验证通过；现役人格文档与编辑工件可读，新观察首样本零违规，真实 QQ 新人格与长期观察仍待实际验收。见[验收记录](agent-preset-acceptance-2026-10-18.md)。
 
 2026-10-18 20:55 CST OneBot CQ：实现提交 `50cccc56` 已交接至 `forest-main-v42`，ONLINE/ONLINE、22/22 ACTIVE、22/22 schema bundle READY，Supervisor healthy、树莓派 OneBot 单连接，管理地址仍为 `<MANAGEMENT_URL>`。支持 at/reply/face/受管图片、单次转义与引用式 wire 交接；定向检查 68 passed，正式 BotHost 正常 CQ 和缺图拒绝分别通过，后者无传输 attempt、无模拟平台发送。采用新记忆库、保留旧库，冻结 VL 和真实配置沿用；首条只读观察零违规，真实 QQ CQ 呈现与完整长期观察未验收。见 [设计](22-onebot-cq-presentation.md)及[验收记录](onebot-cq-acceptance-2026-10-18.md)。

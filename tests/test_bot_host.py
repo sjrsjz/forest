@@ -5638,8 +5638,18 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         user_message = next(item for item in json.loads(prepared.body)["messages"] if item["role"] == "user")
         account_header = ElementTree.fromstring(user_message["content"][0]["text"])
         assert account_header.find("./field[@name='receiving_account']/field[@name='external_user_id']").text == settings.onebot_self_id
-        assert any("targets_assistant" in part.get("text", "") and ">true<" in part["text"]
+        assert any("[CQ:at,qq=" + settings.onebot_self_id + "]" in part.get("text", "")
                    for part in user_message["content"])
+        memory_schema = next(item.storage.spec.namespace for item in host.registry.descriptors
+                             if item.component_id == "memory.graph")
+        async with host.store.pool.connection() as conn:
+            query_inputs = await (await conn.execute(sql.SQL(
+                "SELECT p.query_id,count(*) FILTER (WHERE modality='TEXT') AS text_count "
+                "FROM {}.memory_query_parts p JOIN {}.memory_queries q USING(bot_id,query_id) "
+                "WHERE p.bot_id=%s AND q.input_kind='SOURCE_UNIT' GROUP BY p.query_id"
+            ).format(sql.Identifier(memory_schema), sql.Identifier(memory_schema)),
+                (settings.bot_id,))).fetchall()
+        assert query_inputs and all(item["text_count"] == 1 for item in query_inputs)
         if scenario == "preset-update":
             sent_messages = json.loads(prepared.body)["messages"]
             system_messages = [message for message in sent_messages if message["role"] in {"system", "developer"}]

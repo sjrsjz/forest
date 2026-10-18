@@ -13,10 +13,34 @@ from forest.onebot_wire_effect_driver import OneBotWireEffectDriver
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'src/forest/builtin/onebot_codec/python'))
 from cq_presentation import prepare_template
+from cq_memory import encode_message
 
 
 def prepare(text):
     return prepare_template('group', '933179609', [{'type': 'text', 'format': 'platform-markup', 'text': text}])
+
+
+def test_memory_cq_round_trip_preserves_message_order_and_literal_cq():
+    parts = [
+        {'type': 'reply', 'platform_message_id': '-7'},
+        {'type': 'mention', 'external_user_id': '123'},
+        {'type': 'text', 'text': ' A&B [CQ:at,qq=42] &amp;#91;'},
+        {'type': 'face', 'face_id': '178'},
+        {'type': 'image', 'media_ref': 'media:' + 'a' * 64, 'media_revision': 1,
+         'source_unit_id': 'unit,1', 'part_id': 'part:image:4'},
+    ]
+    text = encode_message(parts)
+    assert text.startswith('[CQ:reply,id=-7][CQ:at,qq=123] A&amp;B &#91;CQ:at,qq=42&#93;')
+    wire = prepare(text)['body']['message']
+    assert [part['type'] for part in wire] == ['reply', 'at', 'text', 'face', 'image']
+    assert wire[2]['data']['text'] == parts[2]['text']
+    assert wire[4]['data']['file']['media_reference']['source_unit_id'] == 'unit,1'
+
+
+def test_memory_cq_does_not_copy_unsupported_media_data():
+    text = encode_message([{'type': 'unsupported', 'platform_type': 'record',
+                           'data': {'file': 'base64://' + 'a' * 50000}}])
+    assert text == '[CQ:record]'
 
 
 def test_cq_is_recognized_before_single_unescape_and_keeps_literal_text():

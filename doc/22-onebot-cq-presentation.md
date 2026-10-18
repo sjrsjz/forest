@@ -2,6 +2,16 @@
 
 Agent 的 assistant 正文允许使用当前 Adapter 声明的平台呈现语法。人格配置不承担实际账号、当前群、媒体引用或平台协议的权威；接收账号继续由 [21](21-native-assistant-and-thinking.md) 的 Context 消息头提供。首版支持文本、at、reply、face 和受管 image。
 
+## 入站消息、归档与检索
+
+OneBot Codec 同时负责入站消息的规范 CQ 编码。Adapter 将已规范化的消息段及本消息确定的受管图片引用交给 Codec，获得保持段顺序的完整 CQ 文本。Memory 将该完整文本作为一个 TEXT part 保存；不得将 at、reply、face 或相邻 text 段分别建立语义查询。入库与查询读取同一份文本，召回原样呈现该编码，让模型看到可正确复用的 CQ 语法。作者、群来源、接收账号及时间继续作为结构化元数据保存，不混进 CQ 正文。
+
+文本先转义 `&`、`[`、`]`，CQ 参数另转义逗号；文字中出现的 CQ 示例必须仍为文字。at、reply、face 使用 CQ 表示。未知消息类型只保留无参数的类型标记，完整原事件另存；不把未知段的任意 data 序列化进正文。图片 CQ 只包含受管 media_ref、revision、source_unit_id、part_id，不含 URL、本地路径、平台临时 file 或 base64。实际图片仍为独立 IMAGE part，沿现有 Media 捕获、VL 编码和模型能力投影链处理，不能用图片引用字符串代替像素嵌入。
+
+每条普通消息只有一个完整 CQ 文本输入；超长文本仍可按 Memory 声明的有界窗口处理，窗口不按 OneBot 控制段切分。多图片输入可分别编码并融合，但不能给一个 @ 或回复标记增加独立检索票数。图扩散、跨群来源和成本账本不承担平台编码职责。
+
+旧 `[mention:…]` / `[reply:…]` 分段索引不符合此契约。预上线维护必须从原事件重建规范消息与派生索引，并清除由旧检索种子产生的错误联想；新旧编码不能混合发布，不增加在线兼容分支。
+
 ## 所有权与数据流
 
 Agent 最终回复发布为 `parts=[{type:text,format:platform-markup,text:...}]`。Shell、控制回执及其他未声明格式的 text 保持字面语义。通用 Delivery 只传递 parts 和准备结果引用，不解析 CQ 或图片，不携带图片字节。

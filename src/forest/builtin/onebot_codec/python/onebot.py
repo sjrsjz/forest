@@ -1,6 +1,7 @@
 import base64
 import binascii
 
+from cq_memory import encode_message
 from cq_presentation import prepare_template
 from onebot_codec import parse_event
 
@@ -9,6 +10,14 @@ from forest.sdk import Plugin, service
 
 
 class OneBotCodec(Plugin):
+    @service(
+        "onebot.codec.memory-message", semantics="read", contract="1.0",
+        input_schema="schemas/memory-message.json",
+        output_schema="schemas/memory-message-result.json",
+    )
+    async def memory_message(self, payload, ctx):
+        return {"text": encode_message(payload["segments"])}
+
     @service(
         "onebot.codec.normalize",
         semantics="read",

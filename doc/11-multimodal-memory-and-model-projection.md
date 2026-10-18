@@ -151,6 +151,8 @@ Embedding Worker 在预热时依据本包的模型协议、预处理策略与冻
 
 ## 6. 异步索引、成本与合流
 
+平台适配层提供规范的完整消息文本。OneBot 使用 [22](22-onebot-cq-presentation.md) 的 CQ 编码：整条消息的正文、@、回复与表情保持顺序，作为同一个 TEXT part 入库和查询，不把控制段拆成独立向量。图片在 CQ 中只出现受管引用，实际像素仍作为独立 IMAGE part 编码；原始传输 URL、file、base64 不进入检索正文。此规则也适用于召回呈现，禁止使用自造 `[mention:…]` / `[reply:…]` 替代规范 CQ。
+
 ```text
 EmbeddingArtifact
   embedding_id, bot_id, artifact_slot_id

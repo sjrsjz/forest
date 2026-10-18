@@ -213,6 +213,8 @@ def _segments(message: Any) -> list[dict[str, Any]]:
                 normalized.append({"type": "unsupported", "platform_type": kind, "data": data})
             else:
                 normalized.append({"type": "reply", "platform_message_id": message_id})
+        elif kind == "face" and isinstance(data.get("id"), (int, str)) and re.fullmatch(r"[0-9]{1,5}", str(data["id"])):
+            normalized.append({"type": "face", "face_id": str(int(data["id"]))})
         elif kind == "image":
             # This is a typed acquisition hint, not a fetch permit or Context URL.
             source = {

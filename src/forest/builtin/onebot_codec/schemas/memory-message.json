@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false, "required": ["segments"],
+  "properties": {
+    "segments": {"type": "array", "maxItems": 256, "items": {"oneOf": [
+      {"type": "object", "additionalProperties": false, "required": ["type", "text"], "properties": {"type": {"const": "text"}, "text": {"type": "string", "maxLength": 131072}}},
+      {"type": "object", "additionalProperties": false, "required": ["type", "external_user_id"], "properties": {"type": {"const": "mention"}, "external_user_id": {"type": "string", "maxLength": 20}}},
+      {"type": "object", "additionalProperties": false, "required": ["type", "platform_message_id"], "properties": {"type": {"const": "reply"}, "platform_message_id": {"type": "string", "maxLength": 20}}},
+      {"type": "object", "additionalProperties": false, "required": ["type", "face_id"], "properties": {"type": {"const": "face"}, "face_id": {"type": "string", "pattern": "^[0-9]{1,5}$"}}},
+      {"type": "object", "additionalProperties": false, "required": ["type", "media_ref", "media_revision", "source_unit_id", "part_id"], "properties": {"type": {"const": "image"}, "media_ref": {"type": "string", "pattern": "^media:[a-f0-9]{64}$"}, "media_revision": {"type": "integer", "minimum": 1}, "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256}, "part_id": {"type": "string", "minLength": 1, "maxLength": 256}}},
+      {"type": "object", "additionalProperties": false, "required": ["type", "platform_type"], "properties": {"type": {"const": "unsupported"}, "platform_type": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"}}}
+    ]}}
+  }
+}

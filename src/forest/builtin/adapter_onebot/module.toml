@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "3.0.0"
+version = "3.1.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -56,6 +56,7 @@ requests = [
   "service.call:adapter.onebot.wire.materialize",
   "service.call:media.context.resolve",
   "service.call:onebot.codec.normalize",
+  "service.call:onebot.codec.memory-message",
   "service.call:onebot.codec.prepare-send",
   "service.call:conversation.trigger.classify",
   "service.call:shell.gate.inspect",
@@ -70,6 +71,12 @@ requests = [
   "service.call:kernel.payload.bytes-write",
   "service.call:adapter.onebot.transport.send"
 ]
+
+[[components.requires]]
+name = "onebot.codec.memory-message"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
 
 [[components.requires]]
 name = "onebot.codec.normalize"

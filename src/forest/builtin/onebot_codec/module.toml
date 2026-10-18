@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.codec.onebot"
-version = "2.0.0"
+version = "2.1.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "onebot:OneBotCodec"
@@ -28,6 +28,13 @@ prepare_timeout_s = 10
 start_timeout_s = 10
 drain_timeout_s = 10
 stop_timeout_s = 5
+
+[[components.provides]]
+name = "onebot.codec.memory-message"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/memory-message.json"
+output_schema = "schemas/memory-message-result.json"
 
 [[components.provides]]
 name = "onebot.codec.normalize"

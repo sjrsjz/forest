@@ -245,12 +245,13 @@ class AdapterOneBot(Plugin):
             content=_canonical(author),
             source=source,
         )
-        context_parts, memory_texts, images = [], [], []
+        context_parts, memory_segments, images = [], [], []
         for index, part in enumerate(normalized["segments"]):
             kind = part["type"]
             if kind == "image":
+                image_index = len(images) + 1
                 media_ref = "media:" + hashlib.sha256(
-                    (event_id + "\0" + str(index)).encode()
+                    (event_id + "\0" + str(image_index)).encode()
                 ).hexdigest()
                 context_parts.append(
                     {
@@ -263,8 +264,8 @@ class AdapterOneBot(Plugin):
                 locator = part["media_ref"]
                 images.append(
                     {
-                        "part_id": "part:image:" + str(index),
-                        "part_index": index,
+                        "part_id": "part:image:" + str(image_index),
+                        "part_index": image_index,
                         "media_ref": media_ref,
                         "locator": {
                             "kind": "onebot-source",
@@ -273,23 +274,31 @@ class AdapterOneBot(Plugin):
                         },
                     }
                 )
+                memory_segments.append({
+                    "type": "image", "media_ref": media_ref, "media_revision": 1,
+                    "source_unit_id": "onebot-unit:" + event_hash,
+                    "part_id": "part:image:" + str(image_index),
+                })
                 continue
             context_parts.append(part)
-            if kind == "text":
-                memory_texts.append((index, part["text"]))
-            elif kind == "mention":
-                memory_texts.append((index, "[mention:" + part["external_user_id"] + "]"))
-            elif kind == "reply":
-                memory_texts.append((index, "[reply:" + part["platform_message_id"] + "]"))
-            else:
-                memory_texts.append((index, "[unsupported:" + part.get("platform_type", kind) + "]"))
+            memory_segments.append(
+                {"type": "unsupported", "platform_type": part["platform_type"]}
+                if kind == "unsupported" else part
+            )
+        cq_message = await ctx.services.call(
+            "onebot.codec.memory-message", {"segments": memory_segments},
+            operation_id=ctx.operations.stable("memory-message"),
+        )
         normalized_saved = await self._write_payload(
             ctx,
             owner_kind="onebot.normalized-event",
             owner_id=event_id,
             media_type="application/json",
             content=_canonical({
-                "parts": context_parts,
+                "parts": [
+                    {"type": "text", "text": cq_message["text"]},
+                    *(part for part in context_parts if part["type"] == "image"),
+                ],
                 "platform_message_id": message_ref,
                 "output_format": {
                     "syntax": "cq-code",
@@ -304,8 +313,7 @@ class AdapterOneBot(Plugin):
             }),
             source=source,
         )
-        if not memory_texts and not images:
-            memory_texts.append((0, "[empty message]"))
+        memory_texts = [(0, cq_message["text"])]
         memory_parts = []
         for part_index, text in memory_texts:
             owner_id = event_id + ":memory-text:" + str(part_index)
