@@ -2,19 +2,21 @@
 
 Forest 是一个正在重构中的重型多 Bot 微内核框架。它以不可变模块代际、严格生命周期、类型化契约和持久因果事实组织平台接入、对话调度、Agent、记忆、Shell、发送与管理能力。
 
-> **当前状态：不可发布，也不应按旧页面启动说明部署。** 工作树仍同时包含目标微内核实现和等待删除的旧产品路径。当前完成度与可信验证只看[实现状态](doc/implementation-status.md)；目标语义只看[架构总契约](doc/00-architecture-contract.md)。
+**使用控制台从[中文操作指南](doc/user-guide.md)开始**：进入 Bot 工作区、查看对话、筛选记忆、修改配置和热重载的具体步骤。无需先阅读架构文档。
+
+> **当前状态：开发中，尚未发布。** 当前完成度、运行实例与可信验证见[实现状态](doc/implementation-status.md)；目标语义见[架构总契约](doc/00-architecture-contract.md)。操作指南描述当前界面，不代表全部目标能力已完成。
 
 ## 架构入口
 
 后续设计和实现必须按以下顺序读取：
 
 1. [架构总契约](doc/00-architecture-contract.md)：最高权威，固定产品语义、模块边界、执行链和重构禁区。
-2. [设计索引](doc/README.md)：列出 01–14 的裁决顺序和各领域详细设计。
+2. [设计索引](doc/README.md)：列出 01–22 的裁决顺序和各领域详细设计。
 3. [微内核运行时与控制面](doc/13-microkernel-control-plane-redesign.md)：模块代际、运行图、管理贡献和宿主职责。
 4. [干净数据库基线](doc/14-clean-schema-and-payload-provenance.md)：模块数据所有权、schema bundle、载荷来源和跨模块事务。
 5. [当前实现状态](doc/implementation-status.md)：只记录已实现能力、阻断项与实际运行证据，不定义目标架构。
 
-`doc/p0-*` 至 `doc/p5-*` 是旧纵向实现的历史快照。每个文件都明确标记为非权威材料；它们不能用来恢复旧表、编号迁移、固定业务页面、专用宿主 API、巨型 Store 或业务组合根。
+旧 `doc/p0-*` 至 `doc/p5-*` 纵向实现文档已删除，只能通过 Git 回查；不能据此恢复旧表、编号迁移、固定业务页面、专用宿主 API、巨型 Store 或业务组合根。
 
 ## 不可改变的语义
 
@@ -32,7 +34,7 @@ Forest 是一个正在重构中的重型多 Bot 微内核框架。它以不可�
 
 平台 Adapter、Conversation Scheduler、Agent、Memory、Shell、Delivery、Job 和路由器是平级模块。模块只经版本化 Contract、稳定引用和受管 `PayloadRef` 通信；需要原子提交时由内核主持各模块 participant，模块仍只能写自己的 namespace。
 
-`BotRuntimeSupervisor` 只监督冻结的 RuntimeGraph、宿主 lease、资源和健康。它不得构造或保存具体业务模块。`BindingRuntime`、巨型 `BotStore`/`MessageStore`、Adapter 内嵌 Shell/Delivery、Agent 直接发送消息和固定业务后台都是需要删除的旧设计。
+`BotRuntimeSupervisor` 只监督冻结的 RuntimeGraph、宿主 lease、资源和健康。它不得构造或保存具体业务模块。`BindingRuntime`、巨型 `BotStore`/`MessageStore`、Adapter 内嵌 Shell/Delivery、Agent 直接发送消息和固定业务后台都是禁止恢复的旧设计。
 
 每个实现切片必须先在设计中写清：
 
