@@ -543,7 +543,14 @@ async def test_shell_admission_preserves_rejections_and_priority_capacity(clean_
 async def test_shell_proof_requires_the_transports_original_frame_root():
     raw_body = b'{"post_type":"message","self_id":10000}'
     parts = [{"type": "text", "text": "#forest core status"}]
-    normalized_body = json.dumps({"parts": parts}).encode()
+    normalized_body = json.dumps({
+        "parts": [{"type": "text", "text": "[CQ:at,qq=10000] #forest core status"}],
+        "receiving_account": {"self_id": "10000"},
+        "output_format": {"syntax": "cq-code"},
+    }).encode()
+    control_body = json.dumps({
+        "protocol": "forest.shell-input/1", "self_id": "10000", "segments": parts,
+    }).encode()
     event_ref = "onebot-event:sample"
     conversation_ref = "onebot:group:933179609"
     event = {
@@ -579,6 +586,11 @@ async def test_shell_proof_requires_the_transports_original_frame_root():
     gate = {
         "self_id": "10000",
         "inspection": await _gate({"self_id": "10000", "segments": parts}),
+        "input": {
+            "payload_id": "control/1", "digest": "sha256:" + "c" * 64,
+            "owner_component_id": "adapter.onebot", "owner_kind": "onebot.shell-input",
+            "owner_id": event_ref,
+        },
     }
     envelope = {
         "protocol": "forest.uow-step/1",
@@ -599,7 +611,8 @@ async def test_shell_proof_requires_the_transports_original_frame_root():
             return None
 
         async def read_bytes_in(self, _conn, payload_id):
-            return raw_body if payload_id == "raw/1" else normalized_body
+            return {"raw/1": raw_body, "normalized/1": normalized_body,
+                    "control/1": control_body}[payload_id]
 
     participant = KernelShellGateUnitOfWorkParticipant(
         SimpleNamespace(
@@ -618,6 +631,14 @@ async def test_shell_proof_requires_the_transports_original_frame_root():
     assert proof["protocol"] == "forest.shell-ingress-proof/1"
     assert proof["self_id"] == "10000"
     assert proof["principal_ref"] == "qq:42"
+    forged_control = deepcopy(envelope)
+    forged_control["input"]["gate"]["inspection"]["command_text"] = "core reload"
+    with pytest.raises(ForestError) as error:
+        await participant.invoke_in(
+            None, "shell.gate-prove-ingress", forged_control,
+            causal_root_kind="adapter.platform-frame", causal_root_id=frame_ref,
+        )
+    assert error.value.code == "SHELL_GATE_PROOF_INVALID"
     forged_origin = deepcopy(envelope)
     forged_origin["input"]["shell_origin"]["raw_frame"]["self_id"] = 99999
     with pytest.raises(ForestError) as error:

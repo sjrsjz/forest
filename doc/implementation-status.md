@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-19 群聊 Shell 的 CQ 上下文证明断裂已修复并更新实例：两条 `module list` 原帧发送者均已获得 Shell 管理员授权，但旧 Kernel 仍要求上下文仅有 `parts`，导致 `SHELL_GATE_PROOF_INVALID` 并回滚入站。Adapter 3.4.0 新增独立 `onebot.shell-input` 与严格的计划/写入权限声明，Kernel 从准确控制 Payload 重算前缀，继续验证原始 transport 因果、原帧与作者身份；CQ Context/RAG 不变。16 项本地、3 项 PostgreSQL 检查和完整普通/@ Shell 到模拟发送链通过。正式包替换与 Supervisor 镜像更新后 Graph 51、25/25 ACTIVE，六份配置逐字段保留，唯一观察器首样本零违约。真实新命令等待用户重发核对，见[Shell 修正记录](shell-control-acceptance-2026-10-19.md)。
+
 2026-10-19 输出额度与 Context 水位修正已热替换到运行实例：Agent 5.5.0 删除独立 `output_tokens`，报价与新请求统一读取绑定的 Provider `max_output_tokens`（当前 16384）；Conversation 5.1.0 不再以归档水位拒绝快照，必要集合是否容纳由联合选择器判断。历史水位 / 归档保留 / 总模型视图预算为 65536 / 49152 / 98304，设置 UI 已暴露并完成真实计划核验。49 项模型与配置检查、3 项隔离 PostgreSQL 包检查、2 项完整模型/工具链均通过；实际 wire 断言 16384。两次正式包替换后 Graph 43、25/25 ACTIVE，人格与业务记录保留；原唯一观察器已恢复且首样本零违约。见[修正与验收记录](context-output-acceptance-2026-10-19.md)。
 
 2026-10-19 Agent 工具网关与外部包已更新运行实例：DeepSeek 搜索/抓取、HTTP 读写与 13 项 OneBot 查询/发送/管理工具共 17 项，使用显式组件/代际绑定、独立只读查询、原 attempt 恢复及 Effect 不确定性证据。完整 PostgreSQL/真实 Worker 模拟实例通过全部工具、普通成员管理拒绝、CQ wire 与 1.0.0→1.0.1 热替换，1 passed in 610.59s；真实 Search/Fetch 各一次 HTTP 200。现役为 Graph 41、25/25 ACTIVE、25/25 bundle READY；三个独立设置 UI 与配置计划在真实控制台验收，发现 24 个已加入群。原人格、Provider、Adapter、触发策略、Shell 配置及 925 条记忆来源保留；只重建 Delivery 与 Worker Host 开发记录。新版唯一观察器首样本无违约，真实群管理未执行、24 小时稳定性未验收。设计见 [24](24-agent-tool-gateway-and-external-plugins.md)，证据见[外部工具验收](external-tools-acceptance-2026-10-19.md)。

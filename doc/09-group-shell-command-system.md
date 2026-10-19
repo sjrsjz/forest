@@ -12,6 +12,10 @@ Shell 不是任意系统终端。默认保留前缀为 `#forest`；内核只实�
 
 ## 2. 接入顺序
 
+控制输入与模型上下文使用独立的不可变 Payload。Adapter 将收到的控制分段保存为 `onebot.shell-input`，内容契约为 `forest.shell-input/1`，包含接收账号和原始规范化分段，并以准确平台原始帧为父来源；该 Payload 只为命中保留前缀的消息建立。群聊 Context 与 RAG 仍使用整条 CQ 编码及受管媒体引用，不为 Shell 改回旧格式。
+
+入站计划 `gate.input` 必须携带准确 owner、kind、event ID 和 digest 的 PayloadRef。内核在原始 transport 因果根、原帧、群事件和作者 fence 核验后，只从这份控制 Payload 重算前缀与文本检查；不解析模型上下文的 CQ、人格元数据或输出格式声明。OneBot 包继续通过同事务原始帧证明账号、群与作者。不得通过放宽上下文 JSON 字段校验或解析模型可见 CQ 来产生控制权限。
+
 ```text
 可信 Adapter 帧与有界平台解析
   -> Core ShellGate 前缀与接入容量判断

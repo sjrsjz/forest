@@ -567,7 +567,23 @@ class AdapterOneBot(Plugin):
                 else "adapter.ingress-data-media"
             )
         else:
-            plan["gate"] = {"self_id": binding["self_id"], "inspection": gate}
+            control = await self._write_payload(
+                ctx,
+                owner_kind="onebot.shell-input",
+                owner_id=event_id,
+                media_type="application/json",
+                content=_canonical({
+                    "protocol": "forest.shell-input/1",
+                    "self_id": binding["self_id"],
+                    "segments": context_parts,
+                }),
+                source=source,
+                parents=(raw["payload"]["payload_id"],),
+            )
+            plan["gate"] = {
+                "self_id": binding["self_id"], "inspection": gate,
+                "input": control["payload"],
+            }
             plan["shell_origin"] = {"raw_frame": json.loads(raw_body.decode("utf-8"))}
             if core_rescue["claimed"]:
                 plan["rescue"] = {

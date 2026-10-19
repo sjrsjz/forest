@@ -4733,7 +4733,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("preset-update", "text", "visual", "cq-image", "cq-missing", "cross-group", "success", "core-run-cancel", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real", "vector-web-recover")
+    "scenario", ("shell-list", "preset-update", "text", "visual", "cq-image", "cq-missing", "cross-group", "success", "core-run-cancel", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real", "vector-web-recover")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -4866,6 +4866,31 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
     host = create_host("recall-packages")
     try:
         await host.start()
+        if scenario == "shell-list":
+            for index, mention in enumerate((False, True)):
+                segments = ([{"type": "at", "data": {"qq": settings.onebot_self_id}}]
+                            if mention else [])
+                segments.append({"type": "text", "data": {"text": " #forest module list"}})
+                await clients[-1].handler(json.dumps({
+                    "self_id": int(settings.onebot_self_id), "post_type": "message",
+                    "message_type": "group", "sub_type": "normal",
+                    "time": int(datetime.now(timezone.utc).timestamp()),
+                    "message_id": 91001+index, "user_id": 42, "group_id": 933179609,
+                    "sender": {"user_id": 42, "nickname": "Shell operator", "role": "member"},
+                    "message": segments,
+                }).encode())
+                async with asyncio.timeout(45):
+                    while len(clients[-1].sent) <= index:
+                        await asyncio.sleep(0.1)
+                assert b"Forest RuntimeGraph components" in clients[-1].sent[index].wire_body
+            shell_schema = module_schema_namespace("forest.shell.command")
+            async with host.store.pool.connection() as conn:
+                rows = await (await conn.execute(sql.SQL(
+                    "SELECT command_id,state FROM {}.shell_requests ORDER BY created_at"
+                ).format(sql.Identifier(shell_schema)))).fetchall()
+            assert rows == [{"command_id": "module.list", "state": "SUCCEEDED"}]*2
+            assert RecordingModelClient.requests == []
+            return
         memory_schema = next(
             item.storage.spec.namespace for item in host.registry.descriptors
             if item.component_id == "memory.graph"

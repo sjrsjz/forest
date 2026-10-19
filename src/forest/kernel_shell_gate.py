@@ -271,13 +271,36 @@ class KernelShellGateUnitOfWorkParticipant:
         body = await self.payloads.read_bytes_in(conn, normalized_ref["payload_id"])
         if len(body) > 262144 or conversation.get("content_byte_length") != len(body):
             invalid()
+        control_ref = gate.get("input")
+        if (not isinstance(control_ref, dict)
+                or set(control_ref) != {
+                    "payload_id", "digest", "owner_component_id", "owner_kind", "owner_id",
+                }
+                or control_ref.get("owner_component_id") != "adapter.onebot"
+                or control_ref.get("owner_kind") != "onebot.shell-input"
+                or control_ref.get("owner_id") != event_ref):
+            invalid()
+        await self.payloads.verify_in(
+            conn,
+            payload_id=control_ref.get("payload_id"),
+            digest=control_ref.get("digest"),
+            owner_component_id="adapter.onebot",
+            owner_kind="onebot.shell-input",
+            owner_id=event_ref,
+        )
+        control_body = await self.payloads.read_bytes_in(conn, control_ref["payload_id"])
+        if len(control_body) > 262144:
+            invalid()
         try:
-            normalized = json.loads(body)
+            control = json.loads(control_body)
         except (UnicodeDecodeError, json.JSONDecodeError):
             invalid()
-        if not isinstance(normalized, dict) or set(normalized) != {"parts"}:
+        if (not isinstance(control, dict)
+                or set(control) != {"protocol", "self_id", "segments"}
+                or control.get("protocol") != "forest.shell-input/1"
+                or control.get("self_id") != gate["self_id"]):
             invalid()
-        inspection = _inspect({"self_id": gate["self_id"], "segments": normalized["parts"]})
+        inspection = _inspect(control)
         if inspection.get("claimed") is not True or inspection != gate.get("inspection"):
             invalid()
         core_inspection = None

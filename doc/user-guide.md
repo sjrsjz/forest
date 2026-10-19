@@ -115,6 +115,14 @@ OneBot 消息正文按整条 CQ 文本保存和召回，@、回复和表情会�
 
 输出额度只在 `provider.chat-completions` 的 `capabilities.max_output_tokens` 设置，当前实例为 16384；Agent 每次请求读取绑定的 Provider 配置，没有另一份输出额度。启用 thinking 时，供应商计入输出的推理 token 也占用这份额度。已冻结的请求保留原参数，设置用于后续新请求。
 
+## 群聊 Shell 管理员
+
+打开 Bot 工作区 → `shell.command` 的配置页，在 `administrator_principals` 数组中填写 `qq:<QQ_ID>`，将占位符替换为自己的数字 QQ 号；多人分别填写。保留现有 `protocol` 和 `binding_ref`，生成并应用配置计划，等待期望配置与生效配置一致。群聊中的群主或管理员身份不会自动成为框架 Shell 管理员。
+
+在群中发送 `#forest module list` 查看组件，或发送 `#forest jobs list --limit 5` 查看任务；可选在命令前 @ Bot。命令直接进入管理通道，不调用 LLM。正文与记忆仍保存完整 CQ，Shell 控制输入独立保存并证明来源。
+
+`core` 救援权限在 `kernel.runtime` 的 **群聊 Core 救援授权** 单独设置，按 Bot 绑定、群、QQ 主体与动作授权，不继承普通 Shell 管理员名单。
+
 ## Agent 的联网与 OneBot 工具
 
 这组工具是独立安装的 `tools.deepseek-web`、`tools.http`、`tools.onebot`，不属于 Agent 本体。安装后在 Bot 工作区选中对应组件，即可打开各包自己的设置页；配置仍使用“生成配置计划 → 应用计划”。发行安装步骤见 [外部插件说明](../plugins/README.md)。
@@ -132,7 +140,7 @@ DeepSeek 设置 API 根地址、Secret 引用和结果上限。HTTP 设置允许
 ## 当前界面尚不完善的地方
 
 - 左侧模块 ID 仍是技术名称；同名默认页签常常只是配置编辑器，具体功能在旁边的中文页签。
-- Provider、触发策略、Embedding 等设置还没有专用运行期表单，目前确实需要在 WebUI 编辑 JSON。
+- Provider、Shell 管理员、Embedding 等设置还没有专用运行期表单，目前需要在 WebUI 编辑 JSON；触发群已有专用选择页。
 - Delivery 的界面目前只处理 UNKNOWN 核对，尚不是可按群检索全部成功/失败发送的日志页面。
 
 这些是当前操作界面的缺口，不能靠阅读架构文档解决。设计和实际验证分别见[设计索引](README.md)、[实现状态](implementation-status.md)；部署启动和故障恢复见[运行手册](operations-clean-production-launch.md)。

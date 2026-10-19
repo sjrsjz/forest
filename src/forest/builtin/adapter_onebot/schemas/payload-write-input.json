@@ -3,7 +3,7 @@
   "required":["protocol","owner_kind","owner_id","media_type","content_base64","parents","sources"],
   "properties":{
     "protocol":{"const":"forest.payload-bytes-write/1"},
-    "owner_kind":{"enum":["onebot.raw-event","onebot.normalized-event","onebot.author-snapshot","onebot.memory-text"]},
+    "owner_kind":{"enum":["onebot.raw-event","onebot.normalized-event","onebot.author-snapshot","onebot.memory-text","onebot.shell-input"]},
     "owner_id":{"type":"string","minLength":1,"maxLength":512},
     "media_type":{"type":"string","minLength":1,"maxLength":128},
     "content_base64":{"type":"string","maxLength":524288},
