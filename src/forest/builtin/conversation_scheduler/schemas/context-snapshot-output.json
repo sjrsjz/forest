@@ -6,7 +6,7 @@
     "context_view_revision", "media_cost_revision", "context_view_media_bytes", "context_view_decoded_bytes", "unit_count", "snapshot"
   ],
   "properties": {
-    "protocol": {"const": "forest.conversation-context-snapshot/7"},
+    "protocol": {"const": "forest.conversation-context-snapshot/8"},
     "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "run_ref": {"type": ["string", "null"]},
     "view_profile_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},

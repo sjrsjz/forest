@@ -23,7 +23,6 @@ _MANIFEST_FIELDS = {
     "required_trigger_unit_ids",
     "token_estimator",
     "context_applied_seq",
-    "classified_through_seq",
     "context_revision",
     "context_view_revision",
     "source_component_id",
@@ -297,7 +296,7 @@ class ContextSnapshotReader:
     async def load(self, envelope: dict, *, expected: dict) -> dict:
         if (
             not isinstance(envelope, dict)
-            or envelope.get("protocol") != "forest.conversation-context-snapshot/7"
+            or envelope.get("protocol") != "forest.conversation-context-snapshot/8"
             or set(expected)
             != {
                 "conversation_id",
@@ -374,7 +373,6 @@ class ContextSnapshotReader:
             or not _integer(token_estimator["unit_overhead_estimated_tokens"], maximum=256)
             or not _integer(token_estimator["history_budget_tokens"], minimum=1024, maximum=1_048_576)
             or not _integer(token_estimator["estimated_history_tokens"], maximum=200_000_000)
-            or token_estimator["estimated_history_tokens"] > token_estimator["history_budget_tokens"]
         ):
             raise ForestError(
                 "AGENT_CONTEXT_TOKEN_ESTIMATE_INVALID",

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "5.3.0"
+version = "5.4.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -81,7 +81,7 @@ output_schema = "schemas/media-cost-output.json"
 
 [[components.provides]]
 name = "conversation.context.snapshot"
-contract = "7.0"
+contract = "8.0"
 semantics = "idempotent"
 input_schema = "schemas/context-snapshot-input.json"
 output_schema = "schemas/context-snapshot-output.json"

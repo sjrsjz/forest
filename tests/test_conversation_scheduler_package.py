@@ -509,6 +509,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "session_ref": "session/1",
             "conversation_ref": actor["conversation_id"],
             "principal_ref": "qq:42",
+            "delivery_route": {
+                "binding_ref": "binding/main", "channel_kind": "SYSTEM", "channel_ref": "933179609",
+            },
         }
         assert rejected["result"]["error"]["code"] == "AGENT_TOOL_AUTHORITY_INVALID"
 
@@ -1642,10 +1645,10 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     ),
                 )
             ).fetchone()
-        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 7)]
+        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 8)]
         route = FrozenServiceRoute(
             service_id="conversation.context.snapshot",
-            version=7,
+            version=8,
             caller_component_id="kernel.runtime",
             provider_component_id="conversation.scheduler",
             provider_generation_id=instance.generation_identity.generation_id,
@@ -1673,7 +1676,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ),
             {},
         )
-        assert snapshot["protocol"] == "forest.conversation-context-snapshot/7"
+        assert snapshot["protocol"] == "forest.conversation-context-snapshot/8"
         assert snapshot["run_ref"] is None
         assert snapshot["view_profile_digest"] is None
         assert snapshot["claimed_trigger_count"] == 0
@@ -2846,5 +2849,41 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         )
         assert (over_budget_snapshot["token_estimator"]["estimated_history_tokens"]
                 > over_budget_snapshot["token_estimator"]["history_budget_tokens"])
+        from forest.builtin.agent_runtime.python.context_projection import ContextSnapshotReader
+
+        async def read_snapshot_payload(reference):
+            return await kernel.payload.read_bytes(reference["payload_id"])
+
+        reader = ContextSnapshotReader(
+            SimpleNamespace(payloads=SimpleNamespace(read_bytes=read_snapshot_payload)),
+            bot_id=store.bot_id,
+        )
+        loaded = await reader.load(over_budget_snapshot, expected={
+            key: over_budget_snapshot[key] for key in (
+                "conversation_id", "run_ref", "context_applied_seq",
+                "context_revision", "context_view_revision",
+            )
+        })
+        assert loaded["token_estimator"] == over_budget_snapshot["token_estimator"]
+        # New arrivals advance classification without changing committed Context.
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(sql.SQL(
+                "UPDATE {}.conversation_lanes SET "
+                "classified_through_seq=classified_through_seq+1,"
+                "next_ingress_seq=next_ingress_seq+1 WHERE bot_id=%s AND conversation_id=%s"
+            ).format(sql.Identifier(namespace)),
+                (store.bot_id, "conversation/onebot/group/silent"))
+        repeated = await endpoint.invoke_routed(
+            route,
+            RuntimeServiceInvocation(
+                "conversation:snapshot:over-budget", 10,
+                "test.conversation", "conversation/onebot/group/silent",
+            ),
+            ({"actor": {
+                "conversation_id": actor_after["conversation_id"],
+                "owner_id": actor_after["actor_owner_id"], "epoch": actor_after["actor_epoch"],
+            }},), {},
+        )
+        assert repeated == over_budget_snapshot
     finally:
         assert await registry.close() == []

@@ -1,6 +1,6 @@
 # 单 Agent 生产执行与会话协调
 
-Agent 5.7.0 / Conversation 5.3.0：输出额度只有一个配置来源，即每次模型请求绑定的 Provider profile `max_output_tokens`，Agent 不复制保存第二份。Context 的归档水位用于调度历史维护，联合选择器依据估算目标选择可选历史与召回；必要输入及既有因果历史超过估算目标时仍继续调用，不产生预算失败终态。恢复已冻结的请求仍使用其原 wire 与输出预留，不能因配置更新重发或改写原请求。
+Agent 5.8.0 / Conversation 5.4.0：输出额度只有一个配置来源，即每次模型请求绑定的 Provider profile `max_output_tokens`，Agent 不复制保存第二份。Context 的归档水位用于调度历史维护，联合选择器依据估算目标选择可选历史与召回；必要输入及既有因果历史超过估算目标时仍继续调用，不产生预算失败终态。快照读取同样不以历史估算量拒绝输入；快照 v8 排除持续变化的入站分类游标，按规范正文摘要确定不可变身份。恢复已冻结的请求仍使用其原 wire 与输出预留，不能因配置更新重发或改写原请求。
 
 原生 assistant/tool_calls、thinking 保存与回放采用 [21 原生模型协议](21-native-assistant-and-thinking.md)，取代旧输出 XML 协议。
 

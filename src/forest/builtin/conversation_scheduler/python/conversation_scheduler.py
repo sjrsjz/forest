@@ -243,31 +243,36 @@ class ConversationScheduler(Plugin):
             "media_parts": [],
         }
 
+    async def _put_snapshot(self, ctx, kind, document, parents):
+        encoded = json.dumps(document, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=False, allow_nan=False).encode("utf-8")
+        return await ctx.payloads.put_json(
+            document, owner_kind=kind,
+            owner_id=f"{kind}:{hashlib.sha256(encoded).hexdigest()}", parents=parents,
+        )
+
     async def _snapshot_tree(self, pages, ctx):
         nodes = list(pages)
         level = 0
         while len(nodes) > 128:
             next_level = []
-            for group_index, start in enumerate(range(0, len(nodes), 128)):
+            for start in range(0, len(nodes), 128):
                 children = nodes[start : start + 128]
-                saved = await ctx.payloads.put_json(
+                saved = await self._put_snapshot(
+                    ctx, "context.snapshot.index",
                     {
                         "protocol": "forest.conversation-context-index/1",
                         "level": level,
                         "children": children,
                     },
-                    owner_kind="context.snapshot.index",
-                    owner_id=ctx.operations.stable(
-                        f"context-snapshot-index:{level}:{group_index}"
-                    ),
-                    parents=children,
+                    children,
                 )
                 next_level.append(self._exact(saved))
             nodes = next_level
             level += 1
         return nodes, level
 
-    @service("conversation.context.snapshot", semantics="idempotent", contract="7.0")
+    @service("conversation.context.snapshot", semantics="idempotent", contract="8.0")
     async def context_snapshot(self, payload, ctx):
         actor = payload["actor"]
         run_ref = payload.get("run_ref")
@@ -298,7 +303,6 @@ class ConversationScheduler(Plugin):
                     "run_ref",
                     "claimed_trigger_count",
                     "context_applied_seq",
-                    "classified_through_seq",
                     "context_revision",
                     "context_view_revision",
                     "source_component_id",
@@ -420,7 +424,8 @@ class ConversationScheduler(Plugin):
             )
         pages = []
         for offset, units in raw_pages:
-            saved = await ctx.payloads.put_json(
+            saved = await self._put_snapshot(
+                ctx, "context.snapshot.page",
                 {
                     "protocol": "forest.conversation-context-page/1",
                     "conversation_id": metadata["conversation_id"],
@@ -429,15 +434,12 @@ class ConversationScheduler(Plugin):
                     "offset": offset,
                     "units": units,
                 },
-                owner_kind="context.snapshot.page",
-                owner_id=ctx.operations.stable(f"context-snapshot-page:{offset}"),
-                parents=self._unit_parents(units),
+                self._unit_parents(units),
             )
             pages.append(self._exact(saved))
         roots, tree_depth = await self._snapshot_tree(pages, ctx)
-        owner_id = ctx.operations.stable("context-snapshot-manifest:v7")
         document = {
-            "protocol": "forest.conversation-context-snapshot/7",
+            "protocol": "forest.conversation-context-snapshot/8",
             **metadata,
             "view_profile_digest": view_profile_digest,
             "token_estimator": token_estimator,
@@ -446,14 +448,9 @@ class ConversationScheduler(Plugin):
             "tree_depth": tree_depth,
             "roots": roots,
         }
-        saved = await ctx.payloads.put_json(
-            document,
-            owner_kind="context.snapshot",
-            owner_id=owner_id,
-            parents=roots,
-        )
+        saved = await self._put_snapshot(ctx, "context.snapshot", document, roots)
         return {
-            "protocol": "forest.conversation-context-snapshot/7",
+            "protocol": "forest.conversation-context-snapshot/8",
             "conversation_id": metadata["conversation_id"],
             "view_profile_digest": view_profile_digest,
             "token_estimator": token_estimator,

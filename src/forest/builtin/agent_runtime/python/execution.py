@@ -689,7 +689,7 @@ class AgentExecution:
                 "context-snapshot", run["run_id"],
                 run["progress"]["input_revision"], step_seq,
             ),
-            contract_major=7,
+            contract_major=8,
             timeout=120,
         )
         reader = ContextSnapshotReader(self.ctx, bot_id=self.ctx.identity["bot_id"])

@@ -513,6 +513,8 @@ Conversation 在当前 Actor/Session/Run 围栏内读取完整活动 Context 与
 
 ### 8.2 确定性视图发布与合流
 
+`conversation.context.snapshot/8` 只物化已经提交的 Context 视图，不包含仍在推进的入站 `classified_through_seq`。页、索引和根快照的 Payload owner 由各自规范正文摘要确定；相同视图重复读取得到相同身份，视图确实改变时生成新身份，不覆盖旧 Payload。Agent 读取快照时验证引用、围栏、来源和计量事实一致性，不比较历史估算量与裁剪参考值的大小。这样新入站消息不会污染尚未接入当前 Run 的视图，也不会在重试时造成不可变 Payload 冲突。
+
 先可靠写 Archive 及来源映射，再以 `context_compactions` 发布裁剪视图。持久裁剪器只计算确定性的保留/移出计划：归档引用、token 计数和来源覆盖，不能输出自然语言摘要；它与每次模型调用的 `model.view.plan` 是不同的事实。Context 发布经Actor/会话协调事务；后台任务不能修改正在使用的共享消息数组。可靠归档已完成但Embedding/图邻接仍滞后时，裁剪可以完成，召回显式报告索引水位。
 
 当前模型计划冻结有序 Context 源集摘要、Context/媒体修订、Run 策略摘要、预算、必留触发、父计划及 Context/Memory 成员；发布时由包命令核验围栏，晚到输入或媒体使旧候选失效。持久裁剪另以连续旧前缀归档，不能覆盖当前完整后缀。Agent 的模型投影只消费发布成员，不生成第二套历史选择清单。跨包删除屏障遵守[06](06-concurrent-convergence.md)：模型计划无需独立保存删除 epoch，发布命令的受管引用校验与 CAS 共用事务和删除时钟锁；计划提交后的使用还必须在后续安全点重新校验。
