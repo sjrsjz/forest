@@ -1,6 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object",
-  "required": ["disposition", "memory_published"],
-  "properties": {"disposition": {"enum": ["RETRY", "READY", "PARTIAL", "FAILED"]}, "memory_published": {"type": "boolean"}},
-  "additionalProperties": false
-}

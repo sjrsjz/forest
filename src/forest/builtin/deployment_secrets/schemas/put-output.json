@@ -1,1 +1,0 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"secret_ref":{"type":"string"},"purpose":{"type":"string"},"version":{"type":"integer","minimum":1},"revision":{"type":"integer","minimum":1},"key_id":{"type":"string"}},"required":["secret_ref","purpose","version","revision","key_id"],"additionalProperties":false}

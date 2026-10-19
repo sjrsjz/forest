@@ -1,1 +1,0 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"event_id":{"type":"string","minLength":1,"maxLength":256},"delivery_count":{"type":"integer","minimum":0},"replayed":{"type":"boolean"}},"required":["event_id","delivery_count","replayed"],"additionalProperties":false}

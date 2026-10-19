@@ -1,1 +1,0 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["protocol","frame_id","status","event_id"],"properties":{"protocol":{"const":"forest.onebot-frame-result/2"},"frame_id":{"type":"string"},"status":{"enum":["IGNORED","ADMITTED"]},"event_id":{"type":["string","null"]}},"additionalProperties":false}

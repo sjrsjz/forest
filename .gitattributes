@@ -1,17 +1,1 @@
-src/forest/builtin/**/*.toml text eol=lf
-src/forest/builtin/**/*.py text eol=lf
-src/forest/builtin/**/*.json text eol=lf
-# Storage baselines are hashed byte-for-byte; Git must preserve their bytes.
-src/forest/builtin/**/*.sql -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
-src/forest/storage/**/*.sql -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
-src/forest/builtin/**/*.html text eol=lf
-src/forest/builtin/**/*.css text eol=lf
-src/forest/builtin/**/*.js text eol=lf
-scripts/*.sh text eol=lf
-plugins/**/*.toml text eol=lf
-plugins/**/*.py text eol=lf
-plugins/**/*.json text eol=lf
-plugins/**/*.sql -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
-plugins/**/*.html text eol=lf
-plugins/**/*.css text eol=lf
-plugins/**/*.js text eol=lf
+* text=auto eol=lf

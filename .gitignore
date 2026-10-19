@@ -1,23 +1,5 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
-# Local runtime, private test database, browser captures and dependency caches
-.forest/
-.local/
-.cache/
-.pytest_cache/
-.ruff_cache/
-test-results/
-.coverage
-htmlcov/
+/target/
+/.local/
 .env
 .env.*
 !.env.example

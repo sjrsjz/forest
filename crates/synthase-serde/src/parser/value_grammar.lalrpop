@@ -1,0 +1,88 @@
+use std::collections::BTreeMap;
+use crate::adt::{Value, VariantPayloadValue};
+use crate::parser::build_payload;
+
+grammar;
+
+extern {
+    type Location = usize;
+    type Error = usize;
+
+    enum crate::parser::lexer::ValueToken {
+        "::"     => crate::parser::lexer::ValueToken::DoubleColon,
+        ":"      => crate::parser::lexer::ValueToken::Colon,
+        ","      => crate::parser::lexer::ValueToken::Comma,
+        "("      => crate::parser::lexer::ValueToken::LParen,
+        ")"      => crate::parser::lexer::ValueToken::RParen,
+        "["      => crate::parser::lexer::ValueToken::LBracket,
+        "]"      => crate::parser::lexer::ValueToken::RBracket,
+        "{"      => crate::parser::lexer::ValueToken::LBrace,
+        "}"      => crate::parser::lexer::ValueToken::RBrace,
+
+        "true"   => crate::parser::lexer::ValueToken::True,
+        "false"  => crate::parser::lexer::ValueToken::False,
+        "null"   => crate::parser::lexer::ValueToken::Null,
+        "some"   => crate::parser::lexer::ValueToken::Some,
+        "map"    => crate::parser::lexer::ValueToken::Map,
+
+        "ident"  => crate::parser::lexer::ValueToken::Ident(<String>),
+        "str"    => crate::parser::lexer::ValueToken::String(<String>),
+        "int32"  => crate::parser::lexer::ValueToken::Int32(<i32>),
+        "int64"  => crate::parser::lexer::ValueToken::Int64(<i64>),
+        "bytes"  => crate::parser::lexer::ValueToken::Bytes(<Vec<u8>>),
+    }
+}
+
+Comma<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <last:T?> => match last {
+        None => v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    }
+};
+
+pub Expr: Value = {
+    Value
+};
+
+Value: Value = {
+    "null"  => Value::None,  // 映射为 None
+    "true"  => Value::Bool(true),
+    "false" => Value::Bool(false),
+
+    "int32"   => Value::I32(<>),
+    "int64"   => Value::I64(<>),
+    "str"   => Value::String(<>),
+    "bytes" => Value::Bytes(<>),
+
+    <tag:"ident"> => Value::Variant(tag, VariantPayloadValue::Unnamed(vec![])),
+
+    "[" <items:Comma<Value>> "]" => Value::Array(items),
+    "(" <items:Comma<Value>> ")" => Value::Tuple(items),
+
+    "some" <v:Value> => Value::Some(Box::new(v)),
+
+    <tag:IdentOrStr> "::" <v:Value> => Value::Variant(tag, build_payload(v)),
+
+    "map" "{" <fields:Comma<MapField>> "}" => {
+        Value::Map(fields.into_iter().collect::<BTreeMap<Value, Value>>())
+    },
+    "{" <fields:Comma<RecordField>> "}" => {
+        Value::Record(fields.into_iter().collect::<BTreeMap<String, Value>>())
+    },
+};
+
+IdentOrStr: String = {
+    "ident" => <>,
+    "str"   => <>,
+};
+
+RecordField: (String, Value) = {
+    <k:IdentOrStr> ":" <v:Value> => (k, v),
+};
+
+MapField: (Value, Value) = {
+    <k:Value> ":" <v:Value> => (k, v),
+};

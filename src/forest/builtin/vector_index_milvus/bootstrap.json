@@ -1,9 +1,0 @@
-{
-  "protocol": "forest.vector-index.milvus/1",
-  "endpoint": "http://milvus:19530",
-  "credential_ref": "",
-  "timeout_seconds": 10,
-  "space_id": "sha256:2550e6030b01208b29177c5d6bd0cf1e5dc3d8f041c1b0291197ed4512ff8624",
-  "dimensions": 4096,
-  "metric": "COSINE"
-}

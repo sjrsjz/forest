@@ -1,1 +1,0 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["protocol","owner_kind","owner_id","value"],"properties":{"protocol":{"const":"forest.effect-json-materialize/1"},"owner_kind":{"enum":["effect.wire","effect.evidence"]},"owner_id":{"type":"string","minLength":1,"maxLength":256},"value":{}},"additionalProperties":false}

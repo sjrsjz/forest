@@ -1,0 +1,91 @@
+use std::collections::BTreeMap;
+use crate::parser::schema_parser::{AstSchema, AstVariantPayload, AstDocument};
+
+grammar;
+
+extern {
+    type Location = usize;
+    type Error = usize;
+
+    enum crate::parser::lexer::SchemaToken {
+        "export"  => crate::parser::lexer::SchemaToken::Export,
+        "schema"  => crate::parser::lexer::SchemaToken::SchemaDecl,
+        "i32"     => crate::parser::lexer::SchemaToken::I32,
+        "i64"     => crate::parser::lexer::SchemaToken::I64,
+        "bool"    => crate::parser::lexer::SchemaToken::Bool,
+        "string"  => crate::parser::lexer::SchemaToken::String,
+        "bytes"   => crate::parser::lexer::SchemaToken::Bytes,
+        "optional"  => crate::parser::lexer::SchemaToken::Optional,
+        "map"     => crate::parser::lexer::SchemaToken::Map,
+        "variant" => crate::parser::lexer::SchemaToken::Variant,
+
+        "=" => crate::parser::lexer::SchemaToken::Eq,
+        ";" => crate::parser::lexer::SchemaToken::SemiColon,
+        "," => crate::parser::lexer::SchemaToken::Comma,
+        ":" => crate::parser::lexer::SchemaToken::Colon,
+        "(" => crate::parser::lexer::SchemaToken::LParen,
+        ")" => crate::parser::lexer::SchemaToken::RParen,
+        "[" => crate::parser::lexer::SchemaToken::LBracket,
+        "]" => crate::parser::lexer::SchemaToken::RBracket,
+        "{" => crate::parser::lexer::SchemaToken::LBrace,
+        "}" => crate::parser::lexer::SchemaToken::RBrace,
+        "=>" => crate::parser::lexer::SchemaToken::FatArrow,
+
+        "ident" => crate::parser::lexer::SchemaToken::Ident(<String>),
+        "size"  => crate::parser::lexer::SchemaToken::Size(<usize>),
+    }
+}
+
+Comma<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <last:T?> => match last {
+        None => v,
+        Some(e) => { v.push(e); v }
+    }
+};
+
+pub Document: AstDocument = {
+    <decls:Decl*> => AstDocument { declarations: decls, export: None },
+    <decls:Decl*> "export" <name:"ident"> ";" => AstDocument { declarations: decls, export: Some(name) },
+};
+
+Decl: (String, AstSchema) = {
+    "schema" <name:"ident"> "=" <typ:TypeExpr> ";" => (name, typ)
+};
+
+TypeExpr: AstSchema = {
+    "i32"    => AstSchema::I32,
+    "i64"    => AstSchema::I64,
+    "bool"   => AstSchema::Bool,
+    "string" => AstSchema::String,
+
+    "bytes" <s:"size"> => AstSchema::Bytes(s),
+
+    "optional" <t:TypeExpr> => AstSchema::Option(Box::new(t)),
+    "map" <k:TypeExpr> "=>" <v:TypeExpr> => AstSchema::Map(Box::new(k), Box::new(v)),
+
+    "[" <t:TypeExpr> "]" => AstSchema::Array(Box::new(t)),
+
+    "(" <items:Comma<TypeExpr>> ")" => AstSchema::Tuple(items),
+
+    "ident" => AstSchema::Ident(<>),
+
+    "{" <fields:Comma<RecordField>> "}" => {
+        AstSchema::Record(fields.into_iter().collect::<BTreeMap<_, _>>())
+    },
+
+    "variant" "{" <arms:Comma<VariantArm>> "}" => {
+        AstSchema::Variant(arms.into_iter().collect::<BTreeMap<_, _>>())
+    }
+};
+
+RecordField: (String, AstSchema) = {
+    <k:"ident"> ":" <v:TypeExpr> => (k, v),
+};
+
+VariantArm: (String, AstVariantPayload) = {
+    <name:"ident"> => (name, AstVariantPayload::Unnamed(vec![])),
+    <name:"ident"> "(" <items:Comma<TypeExpr>> ")" => (name, AstVariantPayload::Unnamed(items)),
+    <name:"ident"> "{" <fields:Comma<RecordField>> "}" => {
+        (name, AstVariantPayload::Named(fields.into_iter().collect::<BTreeMap<_, _>>()))
+    }
+};

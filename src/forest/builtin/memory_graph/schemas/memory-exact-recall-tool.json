@@ -1,6 +1,0 @@
-{
-  "name": "memory_recall_exact",
-  "description": "Read one to eight archived memory units by exact source_unit_id. Every result preserves its group trunk, source and author provenance.",
-  "parameters": {"type": "object", "properties": {"source_unit_ids": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 256}, "minItems": 1, "maxItems": 8, "uniqueItems": true}}, "required": ["source_unit_ids"], "additionalProperties": false},
-  "strict": true
-}

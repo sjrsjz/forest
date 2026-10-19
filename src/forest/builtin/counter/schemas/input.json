@@ -1,1 +1,0 @@
-{"type":"object","additionalProperties":false,"required":["increment"],"properties":{"increment":{"type":"integer","minimum":1,"maximum":1000}}}

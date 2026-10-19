@@ -1,6 +1,0 @@
-{
-  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",
-  "properties":{"protocol":{"const":"forest.uow-step/1"},"caller":{"type":"object"},"prior":{"type":"object"},
-    "input":{"type":"object","properties":{"protocol":{"const":"forest.shell-authorize-claim/1"},"request_id":{"type":"string"},"claim_token":{"type":"string"},"ticket_id":{"type":"string"},"authorization_operation_id":{"type":"string"}},"required":["protocol","request_id","claim_token","ticket_id","authorization_operation_id"],"additionalProperties":false}
-  },"required":["protocol","caller","input","prior"],"additionalProperties":false
-}

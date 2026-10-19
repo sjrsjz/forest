@@ -1,1 +1,0 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"resource_id":{"type":"string","pattern":"^resource/[a-f0-9-]{36}$"},"credential_ref":{"type":"string","minLength":10,"maxLength":512}},"required":["resource_id","credential_ref"],"additionalProperties":false}

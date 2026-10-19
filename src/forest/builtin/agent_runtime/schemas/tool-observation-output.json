@@ -1,9 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object",
-  "required": ["observation_operation_id", "tool_call_id", "observed_state", "evidence_kind", "accepted", "previous_state", "resulting_state", "conflict_code"],
-  "properties": {
-    "observation_operation_id": {"type": "string", "minLength": 1, "maxLength": 256}, "tool_call_id": {"type": "string", "minLength": 1, "maxLength": 256},
-    "observed_state": {"enum": ["WAIT_APPROVAL", "DISPATCHING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]}, "evidence_kind": {"enum": ["EXECUTOR", "RECONCILIATION", "AUTHORIZATION"]},
-    "accepted": {"type": "boolean"}, "previous_state": {"enum": ["PROPOSED", "WAIT_APPROVAL", "DISPATCHING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]}, "resulting_state": {"enum": ["WAIT_APPROVAL", "DISPATCHING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]}, "conflict_code": {"type": ["string", "null"]}
-  }, "additionalProperties": false
-}

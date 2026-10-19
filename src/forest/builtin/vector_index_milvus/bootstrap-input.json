@@ -1,7 +1,0 @@
-{
-  "protocol": "forest.vector-index.milvus/1",
-  "endpoint": "http://milvus:19530",
-  "credential_ref": "",
-  "timeout_seconds": 10,
-  "metric": "COSINE"
-}
