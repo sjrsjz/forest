@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/forest-serde", "crates/forest-serde-macros", "crates/forest-util", "crates/forest-onebot"]
+members = ["crates/forest-serde", "crates/forest-serde-macros", "crates/forest-util", "crates/forest-onebot", "crates/forest-config"]
 resolver = "3"
 
 [workspace.package]
