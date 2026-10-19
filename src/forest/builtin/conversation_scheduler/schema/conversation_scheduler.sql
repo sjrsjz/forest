@@ -1621,13 +1621,17 @@ BEGIN
             'value',jsonb_build_object(
                 'protocol','forest.conversation-run-trigger-authority/1',
                 'run_ref',requested_run,'trigger_ref',NULL,
-                'session_ref',NULL,'conversation_ref',NULL,'principal_ref',NULL
+                'session_ref',NULL,'conversation_ref',NULL,'principal_ref',NULL,
+                'delivery_route',NULL
             )
         );
     END IF;
-    SELECT t.conversation_id,t.claimed_session_ref,t.principal_ref
+    SELECT t.conversation_id,t.claimed_session_ref,t.principal_ref,
+           l.binding_ref,l.channel_kind,l.channel_ref
     INTO match_row
     FROM __forest_module_schema__.conversation_triggers t
+    JOIN __forest_module_schema__.conversation_lanes l
+      ON l.bot_id=t.bot_id AND l.conversation_id=t.conversation_id
     JOIN __forest_module_schema__.input_batch_triggers m
       ON m.bot_id=t.bot_id AND m.input_batch_id=t.input_batch_id
      AND m.trigger_id=t.trigger_id
@@ -1656,7 +1660,11 @@ BEGIN
             'run_ref',requested_run,'trigger_ref',requested_trigger,
             'session_ref',match_row.claimed_session_ref,
             'conversation_ref',match_row.conversation_id,
-            'principal_ref',match_row.principal_ref
+            'principal_ref',match_row.principal_ref,
+            'delivery_route',jsonb_build_object(
+                'binding_ref',match_row.binding_ref,'channel_kind',match_row.channel_kind,
+                'channel_ref',match_row.channel_ref
+            )
         )
     );
 END;

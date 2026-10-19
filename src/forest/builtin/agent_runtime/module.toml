@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "5.5.0"
+version = "5.6.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -107,6 +107,7 @@ requests = [
   "uow.execute:agent.observe-tool-effect",
   "uow.execute:agent.record-protocol-failure",
   "uow.execute:agent.record-model-turn",
+  "uow.execute:agent.record-speaking-turn",
   "uow.execute:agent.request-tool-approval",
   "uow.execute:agent.inspect-tool-approval",
   "uow.execute:agent.finalize-candidate",
@@ -1114,3 +1115,15 @@ contract = "1.0"
 function = "agent_reply_continuations"
 input_schema = "schemas/reply-continuations-input.json"
 output_schema = "schemas/reply-continuations-output.json"
+
+[[components.unit_of_work_plans]]
+name = "agent.record-speaking-turn"
+contract = "1.0"
+input_schema = "schemas/record-speaking-turn-input.json"
+output_schema = "schemas/model-turn-output.json"
+timeout_s = 10
+steps = [
+  { id = "authority", component_id = "conversation.scheduler", participant = "conversation.authorize-run-trigger", input_path = "/authority" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.record-model-turn-record", input_path = "/agent" },
+  { id = "delivery", component_id = "delivery", participant = "delivery.create-agent-turn-intent-uow", input_path = "/delivery", participant_generation_field = "delivery_generation_id" }
+]

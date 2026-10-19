@@ -26,6 +26,7 @@ def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
     assert {item["name"] for item in snapshot.component["unit_of_work_participants"]} == {
         "delivery.create-chat-intent",
         "delivery.create-chat-intent-uow",
+        "delivery.create-agent-turn-intent-uow",
         "delivery.create-control-intent",
         "delivery.create-control-intent-uow",
         "delivery.create-core-rescue-intent-uow",

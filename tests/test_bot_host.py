@@ -212,6 +212,7 @@ class FakeEmbeddingClient(FakeModelClient):
 class RecordingModelClient(FakeModelClient):
     requests = []
     first_gate = None
+    continuation_gate = None
     reply_text = None
     reply_factory = None
     not_sent_attempts = 0
@@ -222,6 +223,8 @@ class RecordingModelClient(FakeModelClient):
         type(self).requests.append(prepared)
         if first and type(self).first_gate is not None:
             await type(self).first_gate.wait()
+        if not first and type(self).continuation_gate is not None:
+            await type(self).continuation_gate.wait()
         if len(type(self).requests) <= type(self).not_sent_attempts:
             return ModelResult(
                 "NOT_SENT", prepared.request_id, prepared.transport_attempt_id,
@@ -4810,6 +4813,9 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         if scenario in {"success", "preset-update", "core-run-cancel", "result-ledger-recovery", "result-payload-recovery", "cross-group", "prepared-crash"} else None
     )
     RecordingModelClient.reply_factory = None
+    RecordingModelClient.continuation_gate = (
+        asyncio.Event() if scenario == "tool-continuation" else None
+    )
     if scenario == "success":
         RecordingModelClient.reply_text = {
             "role": "assistant", "content": "Forest success fixture",
@@ -5397,7 +5403,8 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 await observer.commit()
             finally:
                 await observer.close()
-            host = create_host("recall-prepared-tool-crash-restarted")
+            # Restart retains the artifact catalog referenced by published generations.
+            host = create_host("recall-packages")
             await host.start()
             async with asyncio.timeout(90):
                 while True:
@@ -5425,7 +5432,21 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 "attempt_state": "ABANDONED", "handoff_operation_id": None,
             }
             assert len(RecordingModelClient.requests) == 1
-            assert clients[-1].sent == []
+            async with asyncio.timeout(35):
+                while not any(client.sent for client in clients):
+                    await asyncio.sleep(0.1)
+            sent = [message for client in clients for message in client.sent]
+            assert len(sent) == 1
+            assert b"I will check memory." in sent[0].wire_body
+            delivery_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "delivery"
+            )
+            async with host.store.pool.connection() as conn:
+                intents = await (await conn.execute(sql.SQL(
+                    "SELECT cause_kind,state FROM {}.send_intents WHERE bot_id=%s"
+                ).format(sql.Identifier(delivery_schema)), (settings.bot_id,))).fetchall()
+            assert intents == [{"cause_kind": "agent.model-turn", "state": "SENT"}]
             return
         if scenario == "prepared-crash":
             async with asyncio.timeout(90):
@@ -5922,6 +5943,13 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             }
             assert any(item["source"]["source_kind"] == "agent.model-turn" for item in sources)
             assert any(item["source"]["source_kind"] == "agent.tool-result" for item in sources)
+            # A slow follow-up model must not hide already committed public text.
+            async with asyncio.timeout(35):
+                while not clients[-1].sent:
+                    await asyncio.sleep(0.1)
+            assert len(clients[-1].sent) == 1
+            assert b"I will check memory." in clients[-1].sent[0].wire_body
+            RecordingModelClient.continuation_gate.set()
             async with host.store.pool.connection() as conn:
                 plans = await (await conn.execute(
                     sql.SQL("SELECT step_seq,selected_bitmap FROM {}.context_model_view_plans "
@@ -5936,11 +5964,13 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                                     plans[1]["selected_bitmap"], strict=False)
             )
             async with asyncio.timeout(35):
-                while not clients[-1].sent:
+                while len(clients[-1].sent) < 2:
                     await asyncio.sleep(0.1)
-            assert len(clients[-1].sent) == 1
-            assert b"Forest tool continuation fixture" in clients[-1].sent[0].wire_body
-            assert b"Private continuation state" not in clients[-1].sent[0].wire_body
+            assert len(clients[-1].sent) == 2
+            assert b"I will check memory." in clients[-1].sent[0].wire_body
+            assert b"Forest tool continuation fixture" in clients[-1].sent[1].wire_body
+            assert all(b"Private continuation state" not in item.wire_body
+                       for item in clients[-1].sent)
             async with asyncio.timeout(35):
                 while True:
                     async with host.store.pool.connection() as conn:
@@ -6810,6 +6840,9 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         if RecordingModelClient.first_gate is not None:
             RecordingModelClient.first_gate.set()
         RecordingModelClient.first_gate = None
+        if RecordingModelClient.continuation_gate is not None:
+            RecordingModelClient.continuation_gate.set()
+        RecordingModelClient.continuation_gate = None
         RecordingModelClient.reply_text = None
         RecordingModelClient.reply_factory = None
         RecordingModelClient.not_sent_attempts = 0

@@ -463,8 +463,13 @@ BEGIN
         input->>'conversation_ref' IS NULL
         OR input->>'reply_ref' IS NULL
         OR input->>'ordering_key' IS DISTINCT FROM input->>'conversation_ref'
-        OR input->>'cause_component_id' IS DISTINCT FROM 'conversation.scheduler'
-        OR input->>'cause_kind' IS DISTINCT FROM 'context.reply'
+        OR NOT (
+            (input->>'cause_component_id'='conversation.scheduler'
+             AND input->>'cause_kind'='context.reply')
+            OR (context->>'port_name'='delivery.create-agent-turn-intent-uow'
+                AND input->>'cause_component_id'='agent.runtime'
+                AND input->>'cause_kind'='agent.model-turn')
+        )
         OR input->>'cause_id' IS DISTINCT FROM input->>'reply_ref'
     ) THEN
         RETURN jsonb_build_object(
@@ -1203,3 +1208,52 @@ AS $$ SELECT jsonb_build_object('protocol','forest.domain-result/1','ok',true,'v
              'channel_kind',channel_kind,'channel_ref',channel_ref,'state',state,'error_code',error_code)
        FROM __forest_module_schema__.send_intents
       WHERE bot_id=context->>'bot_id' AND intent_id=input->>'intent_id')) $$;
+
+CREATE FUNCTION delivery_create_agent_turn_intent_uow(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    turn_value jsonb := envelope#>'{prior,agent}';
+    authority_value jsonb := envelope#>'{prior,authority}';
+    route_value jsonb := authority_value->'delivery_route';
+    payload_value jsonb := envelope#>'{input,payload}';
+    turn_id_value text := turn_value->>'turn_id';
+    intent_id_value text := 'agent-turn-intent:' || turn_id_value;
+    result_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR turn_value->>'terminal' IS DISTINCT FROM 'false'
+       OR turn_value->>'next_state' IS DISTINCT FROM 'WAIT_TOOL'
+       OR turn_value->>'tool_call_id' IS NULL
+       OR authority_value->>'protocol' IS DISTINCT FROM 'forest.conversation-run-trigger-authority/1'
+       OR authority_value->>'trigger_ref' IS NULL
+       OR authority_value->>'conversation_ref' IS NULL
+       OR jsonb_typeof(route_value) IS DISTINCT FROM 'object'
+       OR payload_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR payload_value->>'owner_kind' IS DISTINCT FROM 'assistant.message'
+       OR payload_value->>'owner_id' IS DISTINCT FROM turn_id_value THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','DELIVERY_AGENT_TURN_INVALID',
+                'message','Intermediate assistant message requires a committed tool turn and its trigger route','status',422));
+    END IF;
+    result_value := __forest_module_schema__.delivery_create_intent(context,
+        jsonb_build_object(
+            'protocol','forest.delivery-intent/1','intent_id',intent_id_value,
+            'binding_ref',route_value->>'binding_ref','lane_kind','CHAT',
+            'ordering_key',authority_value->>'conversation_ref',
+            'conversation_ref',authority_value->>'conversation_ref',
+            'channel_kind',route_value->>'channel_kind','channel_ref',route_value->>'channel_ref',
+            'cause_component_id','agent.runtime','cause_kind','agent.model-turn',
+            'cause_id',turn_id_value,'reply_ref',turn_id_value,
+            'delivery_generation_id',envelope#>>'{input,delivery_generation_id}',
+            'parts',jsonb_build_array(jsonb_build_object(
+                'part_operation_id',intent_id_value || '/part',
+                'effect_operation_ref',intent_id_value || '/effect','payload',payload_value
+            ))
+        ));
+    IF result_value->>'ok' IS DISTINCT FROM 'true' THEN
+        RETURN result_value;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',turn_value);
+END;
+$$;

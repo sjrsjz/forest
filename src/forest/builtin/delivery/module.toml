@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.delivery"
-version = "0.8.0"
+version = "0.9.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "delivery:Delivery"
@@ -95,9 +95,9 @@ order = 20
 
 [components.storage]
 schema_id = "forest.delivery"
-schema_version = "3.5.0"
+schema_version = "3.6.0"
 baseline = "schema/delivery.sql"
-baseline_sha256 = "0995ac3f48af08dfd6f282f17bc0ce898fe73425105f62ca918bee899fc954ae"
+baseline_sha256 = "3a5e23bc22f5ad2dad84b52b3de4a0fb3307e0c62a0a3844efee935e59ff8051"
 scope = "bot"
 repository_contract = "forest.delivery.repository/3"
 execution_profile = "official"
@@ -378,3 +378,16 @@ timeout_s = 10
 steps = [
   { id = "delivery", component_id = "delivery", participant = "delivery.create-outbound-intent", input_path = "/delivery" }
 ]
+
+[[components.unit_of_work_participants]]
+name = "delivery.create-agent-turn-intent-uow"
+contract = "1.0"
+function = "delivery_create_agent_turn_intent_uow"
+input_schema = "schemas/agent-turn-intent-uow-envelope.json"
+output_schema = "schemas/model-turn-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/payload"
+owner_component = "agent.runtime"
+owner_kind = "assistant.message"
+owner_id_path = "/input/payload/owner_id"

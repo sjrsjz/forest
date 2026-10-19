@@ -1,6 +1,6 @@
 # 单 Agent 生产执行与会话协调
 
-Agent 5.5.0 / Conversation 5.1.0：输出额度只有一个配置来源，即每次模型请求绑定的 Provider profile `max_output_tokens`，Agent 不复制保存第二份。Context 的归档水位用于调度历史维护，快照在超过水位时仍提供来源事实，由联合选择器判断必要集合能否装入请求。恢复已冻结的请求仍使用其原 wire 与输出预留，不能因配置更新重发或改写原请求。
+Agent 5.6.0 / Conversation 5.2.0：输出额度只有一个配置来源，即每次模型请求绑定的 Provider profile `max_output_tokens`，Agent 不复制保存第二份。Context 的归档水位用于调度历史维护，快照在超过水位时仍提供来源事实，由联合选择器判断必要集合能否装入请求。恢复已冻结的请求仍使用其原 wire 与输出预留，不能因配置更新重发或改写原请求。
 
 原生 assistant/tool_calls、thinking 保存与回放采用 [21 原生模型协议](21-native-assistant-and-thinking.md)，取代旧输出 XML 协议。
 
@@ -204,3 +204,11 @@ Agent 包的 `agent.effects.page` 已提供按 Run 分页的只读待核对清�
 - 用 `conversation_id` 字符串推导 Binding、群类型或发送目标；
 - 把下一次模型调用、工具调用、恢复任务或并行群执行称为或实现成子 Agent；
 - 在回复、Session 交接、工具 handoff 中绕过 Generation、actor/run owner 或 UnitOfWork guard。
+
+## 工具调用同轮的公开正文
+
+原生 assistant 消息通过协议及工具参数校验后，其中非空的公开正文应当发送到当前会话，即使同轮包含 tool_calls。reasoning_content 只用于模型续接，不能进入发送 Payload；校验失败的候选先修正，不向群聊发布。
+
+带工具调用的正文由 Agent 生成独立的 `assistant.message` 投影，和 ModelTurn 在同一个 UnitOfWork 中提交 Delivery 意图。Conversation 从已领取的触发提供权威会话路由，Delivery 只写自己的发送记录。以 turn_id 固定发送身份，恢复或热替换重放同轮不会产生第二份意图；后续模型继续使用原生 assistant/tool 历史，不把已公开正文再作为用户输入灌回。
+
+中途正文与最终回答共用该会话的 CHAT 发送通道，保持提交顺序。中途发言不表示工具已经完成，也不结算触发为 ANSWERED；最终回答仍由 Conversation 原有终态事务提交，且不拼接或重复发送之前的正文。只有工具调用而没有正文时不生成占位发言。

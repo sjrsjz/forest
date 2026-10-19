@@ -326,25 +326,36 @@ class TurnRecorder:
                 "authority_trigger_ref": wrapper["authority_trigger_id"],
                 "effect_operation_ref": "tool-effect:" + call_digest,
             }
-        saved = await self.ctx.uow.call(
-            "agent.record-model-turn",
-            {
-                "authority": {
-                    "run_ref": owner["run_id"],
-                    "trigger_ref": (
-                        proposal["authority_trigger_ref"] if proposal is not None else None
-                    ),
-                },
-                "agent": {
-                    "owner": owner,
-                    "turn_id": turn_id,
-                    "request_id": request_id,
-                    "turn": turn.as_dict(),
-                    "artifacts": artifacts,
-                    "tool": proposal,
-                    "repair_of_request_id": repair_of_request_id,
-                },
+        plan = {
+            "authority": {
+                "run_ref": owner["run_id"],
+                "trigger_ref": (
+                    proposal["authority_trigger_ref"] if proposal is not None else None
+                ),
             },
+            "agent": {
+                "owner": owner,
+                "turn_id": turn_id,
+                "request_id": request_id,
+                "turn": turn.as_dict(),
+                "artifacts": artifacts,
+                "tool": proposal,
+                "repair_of_request_id": repair_of_request_id,
+            },
+        }
+        plan_name = "agent.record-model-turn"
+        if turn.function_call is not None and turn.assistant_text:
+            message = await self.ctx.payloads.put_json(
+                {"parts": [{"type": "text", "format": "platform-markup", "text": turn.assistant_text}]},
+                owner_kind="assistant.message",
+                owner_id=turn_id,
+                parents=(assistant_ref,),
+            )
+            plan_name = "agent.record-speaking-turn"
+            plan["delivery"] = {"payload": message}
+        saved = await self.ctx.uow.call(
+            plan_name,
+            plan,
             operation_id=self.ctx.operations.stable(f"model-turn:{request_id}"),
             timeout=15,
         )
