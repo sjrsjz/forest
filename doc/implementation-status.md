@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-19 已删除上下文估算硬阻断并更新实例：Agent 5.7.0、Conversation 5.3.0 不再以本地预算估算终结 Run；固定/必要因果输入超过选择目标仍发布计划并调用模型，可选历史与召回继续按 Context 策略选择。旧异常、Agent 转换分支及 SQL/schema 预算终态契约均已移除，设置页改为选择目标。58 项本地检查和 2 项隔离 PostgreSQL 检查通过，包含 1024 token 目标下实际到达 Provider 且保持 16384 输出额度的整链验证。Graph 55、25/25 ACTIVE、Bot ONLINE，两份配置与历史保留，原唯一观察器恢复。见[修正记录](context-estimate-acceptance-2026-10-19.md)。
+
 2026-10-19 工具调用同轮的公开正文发送已接入并更新实例：Agent 5.6.0 将有效正文与 ModelTurn 原子提交，Conversation 5.2.0 提供触发所属路由，Delivery 0.9.0 使用同群 CHAT 通道保持正文与最终回复的发送顺序。thinking 不公开，工具准备后崩溃恢复不重复发布，最终回复不拼接此前正文。Graph 53、25/25 ACTIVE，三份配置摘要一致，旧记录保留；隔离链已验证慢后续模型期间出声及 Worker 崩溃恢复。见[验收记录](assistant-turn-delivery-acceptance-2026-10-19.md)。
 
 2026-10-19 群聊 Shell 的 CQ 上下文证明断裂已修复并更新实例：两条 `module list` 原帧发送者均已获得 Shell 管理员授权，但旧 Kernel 仍要求上下文仅有 `parts`，导致 `SHELL_GATE_PROOF_INVALID` 并回滚入站。Adapter 3.4.0 新增独立 `onebot.shell-input` 与严格的计划/写入权限声明，Kernel 从准确控制 Payload 重算前缀，继续验证原始 transport 因果、原帧与作者身份；CQ Context/RAG 不变。16 项本地、3 项 PostgreSQL 检查和完整普通/@ Shell 到模拟发送链通过。正式包替换与 Supervisor 镜像更新后 Graph 51、25/25 ACTIVE，六份配置逐字段保留，唯一观察器首样本零违约。14:50 CST 用户重发的真实 `module list` 已核对 SUCCEEDED、执行一次、Delivery SENT，均无错误，见[Shell 修正记录](shell-control-acceptance-2026-10-19.md)。

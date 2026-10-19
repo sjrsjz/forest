@@ -2629,13 +2629,7 @@ BEGIN
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
        OR context->>'participant_input_digest' !~ '^sha256:[a-f0-9]{64}$'
        OR requested_checkpoint IS NULL
-       OR source_code IS NULL OR source_code NOT IN (
-           'CONTEXT_VIEW_HARD_LIMIT',
-           'CONTEXT_VIEW_MEDIA_OVER_BUDGET',
-           'CONTEXT_VIEW_DECODED_OVER_BUDGET',
-           'CONTEXT_MODEL_VIEW_BUDGET_EXCEEDED',
-           'MODEL_INPUT_BYTES_EXCEEDED'
-       )
+       OR source_code IS DISTINCT FROM 'MODEL_INPUT_BYTES_EXCEEDED'
        OR checkpoint_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
        OR checkpoint_value->>'owner_kind' IS DISTINCT FROM 'checkpoint.state'
        OR checkpoint_value->>'owner_id' IS DISTINCT FROM requested_checkpoint THEN
@@ -2657,8 +2651,6 @@ BEGIN
     SELECT * INTO session_row FROM __forest_module_schema__.agent_sessions
     WHERE bot_id=requested_bot AND session_id=run_row.session_id FOR UPDATE;
     IF run_row.state NOT IN ('PREPARING_MODEL','REPAIR_READY')
-       OR (source_code <> 'MODEL_INPUT_BYTES_EXCEEDED'
-           AND run_row.state <> 'PREPARING_MODEL')
        OR run_row.input_revision IS DISTINCT FROM (body->>'input_revision')::bigint
        OR run_row.next_step_seq IS DISTINCT FROM (body->>'step_seq')::integer
        OR run_row.current_model_request_id IS NOT NULL
@@ -2669,9 +2661,7 @@ BEGIN
             'error',jsonb_build_object('code','AGENT_UNSENDABLE_INPUT_BOUNDARY_CLOSED',
                 'message','Agent input or model boundary changed','status',409));
     END IF;
-    terminal_code := CASE WHEN source_code='MODEL_INPUT_BYTES_EXCEEDED'
-        THEN 'AGENT_MODEL_INPUT_BYTES_EXCEEDED'
-        ELSE 'AGENT_CONTEXT_REQUIRED_OVER_BUDGET' END;
+    terminal_code := 'AGENT_MODEL_INPUT_BYTES_EXCEEDED';
     sequence_value := run_row.checkpoint_seq+1;
     checkpoint_digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
         'run_id',requested_run,'source_error_code',source_code,

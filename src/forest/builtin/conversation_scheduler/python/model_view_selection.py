@@ -251,12 +251,8 @@ def select_context_units(
         if unit_id in selected:
             selected_cost += costs[unit_id]
     total = fixed_cost + selected_cost
-    if (
-        total.tokens > budget.tokens
-        or total.media_bytes > budget.media_bytes
-        or total.decoded_bytes > budget.decoded_bytes
-    ):
-        raise ViewSelectionError("Fixed and required Context exceed the model-view budget")
+    # The estimate guides optional selection. It cannot reject committed causal
+    # input, required triggers, or an already frozen model-view prefix.
     for unit_id in reversed(ids):
         if unit_id in selected or unit_id in considered:
             continue

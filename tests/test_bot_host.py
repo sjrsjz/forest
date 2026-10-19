@@ -4929,6 +4929,22 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             assert saved_preset["documents"]["preset"]["desired"] == saved_preset["documents"]["preset"]["effective"]
             assert saved_preset["documents"]["preset"]["effective"] == {"system": ["Updated Bot-only personality."]}
             assert saved_preset["desired"]["revision"] == saved_preset["effective"]["revision"] == initial["desired"]["revision"] + 1
+        if scenario == "text":
+            conversation = host.registry.get("conversation.scheduler")
+            configuration = conversation.module_configuration
+            desired = await configuration.desired(include_value=True)
+            soft_target = deepcopy(desired.value)
+            soft_target["context_view"]["model_view_budget_tokens"] = 1024
+            plan = await configuration.plan(
+                operation_id="soft-target-plan", expected_desired_revision=desired.revision,
+                value=soft_target,
+                validation_digest=digest_json(conversation.snapshot.schema("schemas/config.json")),
+            )
+            await configuration.apply(
+                operation_id="soft-target-apply", plan_id=plan["plan_id"],
+                expected_desired_revision=desired.revision,
+            )
+            await host.replace_runtime_graph()
         if scenario == "prepared-tool-crash":
             agent = host.registry.get("agent.runtime")
             configuration = agent.module_configuration
@@ -6761,6 +6777,11 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                                      "reasoning_content": "Private cross-run state."}]
                 assert all(b"Private cross-run state" not in sent.wire_body for sent in clients[-1].sent)
             if scenario == "text":
+                view_plan = json.loads(await host._kernel.payload.read_bytes(
+                    prepared.manifest["model_view_plan_ref"]["payload_id"]
+                ))
+                assert view_plan["budget"]["tokens"] == 1024
+                assert view_plan["total_cost"]["tokens"] > 1024
                 assert prepared.max_output_tokens == 16384
                 assert json.loads(prepared.body)["max_tokens"] == 16384
                 vector_driver = host.registry.get("vector.index")._effect_drivers[

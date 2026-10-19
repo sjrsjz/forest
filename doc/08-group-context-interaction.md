@@ -501,11 +501,11 @@ Conversation 为活动 Run 建立不可变的 context_run_view_profiles 账本�
 
 #### 模型视图报价、所有权与发布顺序（当前契约）
 
-`context_view_profile` 区分两种预算：持续维护的活动 Context 高低水位只决定何时归档；`model_view_budget` 是一次模型调用的本地估算总界，输入和输出预留共同占用它。模型视图的估算版本、总预算、输出预留、文本/图片计量和选择规则都由 Conversation 包配置并在 Run 首次绑定时冻结；Provider 的容量声明和用量计费均不参与历史选择。模型输入真实 JSON 字节传输硬界仍由 Agent 的序列化投影核对。
+`context_view_profile` 区分两种目标：持续维护的活动 Context 高低水位只决定何时归档；`model_view_budget` 是选择可选内容的本地估算参考值，输入和输出预留共同计入成本。它不限制必要输入或已冻结因果历史，也不产生超限拒绝。模型视图的估算版本、参考值、输出预留、文本/图片计量和选择规则都由 Conversation 包配置并在 Run 首次绑定时冻结；Provider 的容量声明和用量计费均不参与历史选择。模型输入真实 JSON 字节传输硬界仍由 Agent 的序列化投影核对。
 
 Agent 在每次模型安全点提交不可变 `ModelViewQuote`：精确的 Run/步骤与 `input_revision`、CorePrompt 文本、PresetContext 内容、工具声明、已提交的 Run 因果单元、Memory 证据引用及内容、输出 token 预留和 Context 快照围栏。Agent 不在报价中给出“可用历史额度”、要移除的 Context 单元或超限裁决；Memory 仍负责本次召回证据的成员和来源归因。引用对应不可变受管 Payload，Conversation 读取受限引用并按自己冻结的算法核算正文、来源标题、工具 call/result 配对、媒体文件及解码资源；不能只相信调用者提交的一个 token 整数。引用无效、来源不符或事实已被删除屏障禁止时拒绝报价。
 
-Conversation 在当前 Actor/Session/Run 围栏内读取完整活动 Context 与已归档来源范围，核对所有待答触发的必要原文，再先计 CorePrompt、Preset、工具、Run 因果组、Memory 证据、来源标题和输出预留；这些是本次报价的固定/必要成本。首次调用选择必留 Context 单元后，按 Context 提交顺序从近到远纳入能完整放下的可选单元，并冻结所选 ID 与省略范围。同一 Run 的下一次模型调用仅扩展新接入的 Context 因果后缀及新完成的工具/模型因果组；先前已选历史成员不得因预算或热重载而重新选择。必要集合加固定成本越界时，Context 返回确定性失败，不删除触发、截断工具配对或把超额估算交给 Provider 拒绝。
+Conversation 在当前 Actor/Session/Run 围栏内读取完整活动 Context 与已归档来源范围，核对所有待答触发的必要原文，再先计 CorePrompt、Preset、工具、Run 因果组、Memory 证据、来源标题和输出预留；这些是本次报价的固定/必要成本。首次调用选择必留 Context 单元后，按 Context 提交顺序从近到远纳入能完整放下的可选单元，并冻结所选 ID 与省略范围。同一 Run 的下一次模型调用仅扩展新接入的 Context 因果后缀及新完成的工具/模型因果组；先前已选历史成员不得因预算或热重载而重新选择。必要集合加固定成本超过参考值时仍保留它们并继续调用，只停止增加可选内容；不删除触发、截断工具配对或生成预算失败。
 
 当前实现先写不可变 `model.view.quote` Payload；Conversation 逐页读取 Context，在 Actor/Session/Run 围栏下复核 Context 与媒体修订、冻结策略、活动源集和 CLAIMED 触发，再计算 Context/Memory 联合选择，写不可变 `model.view.plan` Payload，并以稳定 operation ID 调用 `conversation.model-view.publish`。发布命令按计划和父计划执行 CAS；同一步重放读取已发布结果，报价变化则冲突。CAS 失败的候选 Payload 不得供 Agent 使用。Agent 只按已发布计划的成员投影历史和证据，并在模型调用前再次核对报价与计划。发布命令在同一数据库事务内先由内核按包声明验证 quote 与 plan 的精确 Payload 身份和 ACTIVE 状态，并持有删除时钟共享锁，再执行 Conversation CAS；遗忘使用同一时钟的排他锁。隔离 PostgreSQL 竞争验证覆盖了发布先行与遗忘先行：前者提交的计划会随其来源后代撤销，后者在引用校验处拒绝发布。Agent 的后续读取和 Effect 外发仍分别受自己的活动引用围栏约束。
 
@@ -523,13 +523,13 @@ Conversation 在当前 Actor/Session/Run 围栏内读取完整活动 Context 与
 
 Conversation 的 Context 快照 v7 现在固定 `media_cost_revision`、活动媒体文件与解码估算字节数，以及每个活动单元已物化图片的片序号、媒体修订、尺寸、文件字节数、逐帧像素数和受管 Payload 引用。Agent 核对这些事实与原始图片 part 一致，只读取快照中 READY 的资产；PENDING 片保持显式状态。Context 历史图片不再由 Agent 按最近 32 张或 12 MiB 静默截断；解析端口的单次 256 项上限由分批调用满足，超出快照可发布界时明确失败。相同 Run 的下一次模型调用重新取得安全点快照，迟到图片可在那时进入，但不得修改已冻结的请求。模型不支持图片时，能力投影仍按原规则去图，不改变 Context 快照。
 
-媒体成本仍是序列化 Payload、受管文件字节和 RGBA 缓冲区的本地估算，不是解码器实际内存峰值或供应商 tokenizer 计量。快照发布前复核活动单元的 Payload、媒体与解码成本和 Conversation 账本一致；快照只提供来源事实，不使用归档高水位拒绝历史。4096 个活动单元仍是快照自身的结构上限，不能与模型容量混为一谈。Conversation 联合选择器在快照之后先保留必要触发与因果链，再选择历史和召回；只有固定内容及必要集合超过模型视图预算时，才以 `CONTEXT_MODEL_VIEW_BUDGET_EXCEEDED` 终结为 `AGENT_CONTEXT_REQUIRED_OVER_BUDGET`。不能因为整个待选历史超过归档水位而断言必要集合装不下。Memory 自身的媒体上限在召回物化时裁掉超额图片，随后 Conversation 对剩余证据与 Context 联合计量和选择；省略保留来源片及明确原因。`decoded_pixels × 4` 仍是 RGBA 缓冲区估算，联合选择器拒绝小于 `width × height` 的错误成本，Agent 同样校验证据图片。
+媒体成本仍是序列化 Payload、受管文件字节和 RGBA 缓冲区的本地估算，不是解码器实际内存峰值或供应商 tokenizer 计量。快照发布前复核活动单元的 Payload、媒体与解码成本和 Conversation 账本一致；快照只提供来源事实，不使用归档高水位拒绝历史。4096 个活动单元仍是快照自身的结构上限，不能与模型容量混为一谈。Conversation 联合选择器在快照之后先保留必要触发与因果链，再选择历史和召回；模型视图预算仅指导可选内容的选择，固定内容、必要集合或已冻结历史超过估算目标时仍发布计划并继续模型调用，不产生上下文预算失败终态。上下文归档与裁剪仍由 Conversation 管理，Agent 与 Provider 均不依据估算容量硬阻断。Memory 自身的媒体上限在召回物化时裁掉超额图片，随后 Conversation 对剩余证据与 Context 联合计量和选择；省略保留来源片及明确原因。`decoded_pixels × 4` 仍是 RGBA 缓冲区估算，联合选择器拒绝小于 `width × height` 的错误成本，Agent 同样校验证据图片。
 
-Agent 在 Context、Memory 证据、核心提示词、预设和工具声明完成能力投影后，使用模型请求序列化器的真实 JSON 字节数核对传输硬界。若输入片超过自身有限字节界，或最终请求 JSON 超过 24 MiB，Agent 投影返回独立的 `MODEL_INPUT_BYTES_EXCEEDED`；Agent 在准备任何模型 Effect 之前，以 `agent.fail-unsendable-input` 的运行所有权、输入修订与步骤围栏提交 FAILED checkpoint，并将 Run/Session 原子终结为 `AGENT_MODEL_INPUT_BYTES_EXCEEDED`。这一边界核对不选择或裁掉历史、证据和图片，也不引用 Provider 的估算容量；非法 JSON 保持独立的 `MODEL_INPUT_INVALID`。Context 自己判定的必要历史超界仍通过同一终态事务保留 `AGENT_CONTEXT_REQUIRED_OVER_BUDGET` 原因。该传输硬界与 Conversation 已发布的联合模型计划并行生效，二者都不由 Provider 决定。
+Agent 在 Context、Memory 证据、核心提示词、预设和工具声明完成能力投影后，使用模型请求序列化器的真实 JSON 字节数核对传输硬界。若输入片超过自身有限字节界，或最终请求 JSON 超过 24 MiB，Agent 投影返回独立的 `MODEL_INPUT_BYTES_EXCEEDED`；Agent 在准备任何模型 Effect 之前，以 `agent.fail-unsendable-input` 的运行所有权、输入修订与步骤围栏提交 FAILED checkpoint，并将 Run/Session 原子终结为 `AGENT_MODEL_INPUT_BYTES_EXCEEDED`。这一边界核对不选择或裁掉历史、证据和图片，也不引用 Provider 的估算容量；非法 JSON 保持独立的 `MODEL_INPUT_INVALID`。此事务仅处理真实传输字节限制，不接受上下文估算预算错误。实际模型容量错误由上游 API 返回并如实记录。
 
 新 Session 的首个 Run 在 `agent.execute` 选择触发 InputBatch 之前，由 `conversation.scheduler` 持有 Actor 围栏执行 `conversation.compact-before-run`。这个独立 UnitOfWork 使用 Conversation 包自身的视图策略，按“确定性计划 → 归档 Payload → 视图提交 → Memory 归档资格”顺序原子提交；它不虚构 InputBatch，也不把裁剪策略交给 Agent 或 Provider。已提交的归档按操作身份重放；若重试时 Session 已启动且本操作未归档，则跳过新裁剪，由 Agent 读取已经存在的 Run。随后 Agent 在同一 Actor 围栏下选择输入，`context_view_revision` 因而是裁剪后的版本。Run 中途的模型安全点只接入新输入，不重新选择历史窗口。当前 Run 完成且正式回复已经提交后，`conversation.compact-before-handoff` 先由 Agent participant 证明该 Run 是活动 Session 中已完成的 Run，再在同一事务中按 Actor/Session/Run 围栏归档连续旧前缀；此安全边界允许移出该已完成 Run 的单元，但仍保留未决触发。后继 Run 随后的 `SESSION_END` 选择冻结新视图版本，活动 Run 工作期间的普通维护仍保护整个 Session，不能改动它已冻结的视图。
 
-边界归档每笔至多移出 64 个完整单元，调度器在一次 Actor 领取内可连续提交至多 8 笔；开始下一笔前还要检查时间预算，为同一工作处理器内最长 540 秒的 Agent 调用留出余量。每笔操作身份包含 Run、Actor epoch 和分段序号，重放同笔不重复归档，新领取也不被旧回执卡住。达到分段或时间界后仍需归档时，调度器结算为 `WAIT_CONTEXT` 并短暂延期，释放 Actor 供同群后续领取继续；归档返回 `SKIPPED` 才进入 Agent 或后继选择。未决触发使归档停在高水位以上时，快照仍将来源交给联合选择器；只有必要集合本身无法容纳时才失败。
+边界归档每笔至多移出 64 个完整单元，调度器在一次 Actor 领取内可连续提交至多 8 笔；开始下一笔前还要检查时间预算，为同一工作处理器内最长 540 秒的 Agent 调用留出余量。每笔操作身份包含 Run、Actor epoch 和分段序号，重放同笔不重复归档，新领取也不被旧回执卡住。达到分段或时间界后仍需归档时，调度器结算为 `WAIT_CONTEXT` 并短暂延期，释放 Actor 供同群后续领取继续；归档返回 `SKIPPED` 才进入 Agent 或后继选择。未决触发使归档停在高水位以上时，快照仍将来源交给联合选择器，不把未达到归档目标转换成预算失败。
 
 默认历史归档水位为 65536 估算 token，归档后保留 49152，整次模型请求预算为 98304，包含提示词、工具声明、必要因果历史、召回及输出预留。这三项都由 `conversation.scheduler` 的设置 UI 配置，不从 Provider 推导、不作为 API 真实容量声明。每次请求的输出预留来自该请求绑定的 Provider profile `max_output_tokens`；Agent 不复制保存第二份输出配置。供应商的真实 token 和模型硬上限由供应商执行，Provider 不选择或裁剪上下文。
 

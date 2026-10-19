@@ -177,7 +177,7 @@ async def publish_model_view(scheduler, payload: dict, ctx) -> dict:
             include_images="image" in quote["input_modalities"],
         )
     except ViewSelectionError as exc:
-        raise ForestError("CONTEXT_MODEL_VIEW_BUDGET_EXCEEDED", str(exc), 413) from exc
+        raise ForestError("CONTEXT_MODEL_VIEW_INVALID", str(exc), 422) from exc
     selection = joint.context
     document = {
         "protocol": "forest.model-view-plan/1", **expected,

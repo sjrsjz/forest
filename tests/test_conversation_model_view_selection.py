@@ -6,8 +6,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
 _SOURCE = (
     Path(__file__).parents[1]
     / "src/forest/builtin/conversation_scheduler/python/model_view_selection.py"
@@ -18,7 +16,6 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 ViewCost = _MODULE.ViewCost
-ViewSelectionError = _MODULE.ViewSelectionError
 select_context_units = _MODULE.select_context_units
 select_joint_view = _MODULE.select_joint_view
 
@@ -72,15 +69,13 @@ def test_next_step_never_reselects_old_omissions_or_drops_frozen_members():
     )
     assert next_plan.selected_unit_ids == ("input:4", "input:5", "input:6")
     assert next_plan.omitted_unit_ids == ("input:1", "input:2", "input:3")
-    with pytest.raises(ViewSelectionError, match="Fixed and required"):
-        _select(
-            [*units, _unit(6)],
-            required=("input:5", "input:6"),
-            selected=first.selected_unit_ids,
-            considered=first.considered_unit_ids,
-            fixed=30,
-            budget=50,
-        )
+    larger_causal_history = _select(
+        [*units, _unit(6)], required=("input:5", "input:6"),
+        selected=first.selected_unit_ids, considered=first.considered_unit_ids,
+        fixed=30, budget=50,
+    )
+    assert larger_causal_history.selected_unit_ids == ("input:4", "input:5", "input:6")
+    assert larger_causal_history.total_cost.tokens == 60
 
 
 def test_media_charge_can_stop_optional_selection_without_dropping_required_image():
@@ -97,17 +92,14 @@ def test_media_charge_can_stop_optional_selection_without_dropping_required_imag
     )
     assert plan.selected_unit_ids == ("input:2", "input:3")
     assert plan.total_cost.media_bytes == 90
-    with pytest.raises(ViewSelectionError, match="Fixed and required"):
-        select_context_units(
-            units,
-            required_unit_ids=("input:2",),
-            previous_selected_unit_ids=(),
-            previous_considered_unit_ids=(),
-            fixed_cost=ViewCost(),
-            budget=ViewCost(tokens=100, media_bytes=69, decoded_bytes=360),
-            bytes_per_token=2,
-            unit_overhead=0, include_images=True,
-        )
+    required_image = select_context_units(
+        units, required_unit_ids=("input:2",),
+        previous_selected_unit_ids=(), previous_considered_unit_ids=(),
+        fixed_cost=ViewCost(), budget=ViewCost(tokens=100, media_bytes=69, decoded_bytes=360),
+        bytes_per_token=2, unit_overhead=0, include_images=True,
+    )
+    assert required_image.selected_unit_ids == ("input:2",)
+    assert required_image.total_cost.media_bytes == 70
 
 
 def test_joint_view_keeps_causal_and_recent_context_before_ranked_memory():
@@ -214,8 +206,9 @@ def test_text_only_model_does_not_charge_unsent_image_media():
     text_only = select_joint_view(units, [], include_images=False, **kwargs)
     assert text_only.context.selected_unit_ids == ("input:1",)
     assert text_only.context.total_cost.media_bytes == 0
-    with pytest.raises(ViewSelectionError, match="Fixed and required"):
-        select_joint_view(units, [], include_images=True, **kwargs)
+    visual_context = select_joint_view(units, [], include_images=True, **kwargs)
+    assert visual_context.context.selected_unit_ids == ("input:1",)
+    assert visual_context.context.total_cost.media_bytes == 500
     image_evidence = [{
         "source_unit_id": "recalled-image",
         "parts": [{"kind": "image", "projection_state": "READY",

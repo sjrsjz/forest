@@ -265,15 +265,12 @@ class AgentExecution:
             request, "FAILED", run, error_code="AGENT_MODEL_TRANSPORT_FAILED"
         )
 
-    async def _fail_unsendable_input(self, request, owner, run, source_code):
+    async def _fail_unsendable_input(self, request, owner, run):
         """Settle a frozen input that cannot be sent before preparing an effect."""
         revision = run["progress"]["input_revision"]
         step_seq = run["progress"]["next_step_seq"]
-        terminal_code = (
-            "AGENT_MODEL_INPUT_BYTES_EXCEEDED"
-            if source_code == "MODEL_INPUT_BYTES_EXCEEDED"
-            else "AGENT_CONTEXT_REQUIRED_OVER_BUDGET"
-        )
+        source_code = "MODEL_INPUT_BYTES_EXCEEDED"
+        terminal_code = "AGENT_MODEL_INPUT_BYTES_EXCEEDED"
         checkpoint_id = stable(
             "checkpoint-unsendable-input", run["run_id"], revision, step_seq,
             source_code,
@@ -1312,23 +1309,11 @@ class AgentExecution:
                         if selected["status"] == "BATCH":
                             await self._cancel_superseded_recall(run, step_seq)
                             continue
-                    try:
-                        snapshot = await self._model_snapshot(
-                            request, run, step_seq, request_id=request_id,
-                            preset_context=preset_context,
-                            tools=declarations, evidence_ref=evidence_ref,
-                        )
-                    except ForestError as exc:
-                        if exc.code not in {
-                            "CONTEXT_VIEW_HARD_LIMIT",
-                            "CONTEXT_VIEW_MEDIA_OVER_BUDGET",
-                            "CONTEXT_VIEW_DECODED_OVER_BUDGET",
-                            "CONTEXT_MODEL_VIEW_BUDGET_EXCEEDED",
-                        }:
-                            raise
-                        return await self._fail_unsendable_input(
-                            request, owner, run, exc.code
-                        )
+                    snapshot = await self._model_snapshot(
+                        request, run, step_seq, request_id=request_id,
+                        preset_context=preset_context,
+                        tools=declarations, evidence_ref=evidence_ref,
+                    )
                     source_refs = [self._preset_ref(), snapshot["model_view_plan_ref"]]
                 # Recall and Context projection can take time. Recheck just
                 # before dispatch so a replacement signalled during either
@@ -1397,7 +1382,7 @@ class AgentExecution:
                     except ForestError as exc:
                         if exc.code == "MODEL_INPUT_BYTES_EXCEEDED":
                             return await self._fail_unsendable_input(
-                                request, owner, run, exc.code
+                                request, owner, run
                             )
                         if exc.code != "AGENT_CANCEL_REQUESTED":
                             raise
