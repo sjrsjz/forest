@@ -251,7 +251,6 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             },
             "run_timeout_seconds": 300,
             "max_steps": 32,
-            "output_tokens": 4096,
             "stream": True,
         },
         resolved_contracts={},

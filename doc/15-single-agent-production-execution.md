@@ -1,5 +1,7 @@
 # 单 Agent 生产执行与会话协调
 
+Agent 5.5.0 / Conversation 5.1.0：输出额度只有一个配置来源，即每次模型请求绑定的 Provider profile `max_output_tokens`，Agent 不复制保存第二份。Context 的归档水位用于调度历史维护，快照在超过水位时仍提供来源事实，由联合选择器判断必要集合能否装入请求。恢复已冻结的请求仍使用其原 wire 与输出预留，不能因配置更新重发或改写原请求。
+
 原生 assistant/tool_calls、thinking 保存与回放采用 [21 原生模型协议](21-native-assistant-and-thinking.md)，取代旧输出 XML 协议。
 
 > **权威性：生产执行边界详细设计。** 本文展开 [00 架构总契约](00-architecture-contract.md)、[08 群聊上下文](08-group-context-interaction.md)与[13 微内核运行时](13-microkernel-control-plane-redesign.md)。Agent 始终是一条 QiYu Agentlib 风格的 Session/Run 状态机；“下一轮”是同一 Run 中的下一次模型调用，不创建产品子 Agent。

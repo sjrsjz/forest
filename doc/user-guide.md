@@ -111,6 +111,10 @@ OneBot 消息正文按整条 CQ 文本保存和召回，@、回复和表情会�
 
 上下文裁剪阈值在 `conversation.scheduler` 的 **上下文预算** 页；Provider 不负责裁剪。裁剪不调用摘要模型，Bot 静默时也会进行上下文维护。
 
+“历史归档水位”默认 65536 估算 token，“归档后保留”默认 49152；“模型调用总估算 token”默认 98304，包含提示词、工具、召回与输出预留。这些是本地成本策略，供应商的真实上下文容量是另一个限制。超过归档水位会进行归档和视图选择，不会仅因水位超出就拒绝响应。
+
+输出额度只在 `provider.chat-completions` 的 `capabilities.max_output_tokens` 设置，当前实例为 16384；Agent 每次请求读取绑定的 Provider 配置，没有另一份输出额度。启用 thinking 时，供应商计入输出的推理 token 也占用这份额度。已冻结的请求保留原参数，设置用于后续新请求。
+
 ## Agent 的联网与 OneBot 工具
 
 这组工具是独立安装的 `tools.deepseek-web`、`tools.http`、`tools.onebot`，不属于 Agent 本体。安装后在 Bot 工作区选中对应组件，即可打开各包自己的设置页；配置仍使用“生成配置计划 → 应用计划”。发行安装步骤见 [外部插件说明](../plugins/README.md)。

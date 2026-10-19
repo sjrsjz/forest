@@ -29,7 +29,6 @@ class _Configuration:
             },
             "run_timeout_seconds": 300,
             "max_steps": 32,
-            "output_tokens": 4096,
             "stream": True,
         }
         return SimpleNamespace(
@@ -123,7 +122,6 @@ async def test_agent_protocol_is_owned_by_an_isolated_builtin_generation(tmp_pat
                 },
                 "run_timeout_seconds": 300,
                 "max_steps": 32,
-                "output_tokens": 4096,
                 "stream": True,
             }
         )

@@ -4750,7 +4750,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         bot_id="bot-agent-recall-test-" + uuid4().hex[:12], dsn=uri,
         model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
         model="test-model", model_deployment_id="provider.chat-completions/test",
-        model_max_output_tokens=1024,
+        model_max_output_tokens=16384 if scenario == "text" else 1024,
         model_input_modalities=("text", "image") if scenario in {"visual", "cq-image", "cq-missing"} else ("text",),
         embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",
         embedding_api_key="test-embedding-key",
@@ -6706,6 +6706,8 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                                      "reasoning_content": "Private cross-run state."}]
                 assert all(b"Private cross-run state" not in sent.wire_body for sent in clients[-1].sent)
             if scenario == "text":
+                assert prepared.max_output_tokens == 16384
+                assert json.loads(prepared.body)["max_tokens"] == 16384
                 vector_driver = host.registry.get("vector.index")._effect_drivers[
                     "vector.transport.search"
                 ]

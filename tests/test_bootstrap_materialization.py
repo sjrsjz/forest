@@ -68,7 +68,7 @@ async def test_package_templates_materialize_profile_links_and_agent_payload(tmp
     assert vector["space_id"] == projections["embedding.multimodal"]["space_id"]
     assert vector["dimensions"] == profile["embedding.multimodal"]["profile"]["dimensions"]
     assert "space_id" not in profile["vector.index"]
-    assert agent["output_tokens"] == 2048
+    assert "output_tokens" not in agent
     assert agent["preset"]["payload_id"] == "payload:test-preset"
     assert json.loads(payloads.writes[0]["content"]) == {"system": ["You are Forest."]}
     assert payloads.writes[0]["owner_component_id"] == "agent.runtime"

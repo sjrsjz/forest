@@ -26,7 +26,8 @@
     <div class="toolbar" style="margin-top:12px"><input id="check-conversation" placeholder="请求的 Conversation ID"><input id="check-run" class="flex" placeholder="请求的 Run ID"><button id="check">查询请求结果</button><span id="request-result" class="muted"></span></div>
   </section>
   <section id="settings" class="hidden">
-    <p class="hint muted">窗口阈值由 Conversation Context 自行执行；更改草稿后通过宿主计划检查并应用。</p>
+    <p class="hint muted">历史高水位用于触发归档，归档后保留量用于降低窗口成本；整次模型请求预算包含提示词、工具、召回和输出预留。它们都是 Context 的本地估算策略，不代表 API 的真实容量。更改后检查并应用配置计划。</p>
+    <div class="field-row"><label>历史归档水位（估算 token）<input id="high-tokens" type="number" min="1024" max="1048576"></label><label>归档后保留（估算 token）<input id="retain-tokens" type="number" min="1" max="1048575"></label></div>
     <div class="field-row"><label>高水位单元数<input id="high" type="number" min="2" max="4096"></label><label>裁剪后保留单元数<input id="retain" type="number" min="1" max="4095"></label><label>高水位内容字节数<input id="high-bytes" type="number" min="1024" max="134217728"></label><label>裁剪后内容字节数<input id="retain-bytes" type="number" min="1" max="134217727"></label><button id="plan" disabled>检查配置计划</button></div>
     <div class="field-row"><label>模型调用总估算 token<input id="model-tokens" type="number" min="1024" max="1048576"></label><label>模型视图媒体字节<input id="model-media" type="number" min="1024" max="268435456"></label><label>模型视图解码估算字节<input id="model-decoded" type="number" min="1024" max="1073741824"></label></div>
   </section>
@@ -43,12 +44,14 @@
   const status=value=>{$('status').textContent=value||'';};
   const cell=(row,value)=>{const node=row.insertCell();node.textContent=value??'—';return node;};
   function show(tab){for(const id of ['runs','settings'])$(id).classList.toggle('hidden',id!==tab);document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));}
-  function renderSettings(){if(!draft)return;const view=draft.context_view;$('high').value=view.high_watermark_units;$('retain').value=view.retain_units;$('high-bytes').value=view.high_watermark_payload_bytes;$('retain-bytes').value=view.retain_payload_bytes;$('model-tokens').value=view.model_view_budget_tokens;$('model-media').value=view.model_view_media_bytes;$('model-decoded').value=view.model_view_decoded_bytes;}
+  function renderSettings(){if(!draft)return;const view=draft.context_view;$('high-tokens').value=view.high_watermark_estimated_tokens;$('retain-tokens').value=view.retain_estimated_tokens;$('high').value=view.high_watermark_units;$('retain').value=view.retain_units;$('high-bytes').value=view.high_watermark_payload_bytes;$('retain-bytes').value=view.retain_payload_bytes;$('model-tokens').value=view.model_view_budget_tokens;$('model-media').value=view.model_view_media_bytes;$('model-decoded').value=view.model_view_decoded_bytes;}
   function updateDraft(){
     const high=Number($('high').value),retain=Number($('retain').value),highBytes=Number($('high-bytes').value),retainBytes=Number($('retain-bytes').value);
+    const highTokens=Number($('high-tokens').value),retainTokens=Number($('retain-tokens').value);
+    if(!Number.isSafeInteger(highTokens)||highTokens<1024||highTokens>1048576||!Number.isSafeInteger(retainTokens)||retainTokens<1||retainTokens>=highTokens)throw Error('Token watermarks must satisfy 1 <= retain < high <= 1048576');
     const modelTokens=Number($('model-tokens').value),modelMedia=Number($('model-media').value),modelDecoded=Number($('model-decoded').value);
     if(!Number.isSafeInteger(high)||!Number.isSafeInteger(retain)||high<2||high>4096||retain<1||retain>=high||!Number.isSafeInteger(highBytes)||!Number.isSafeInteger(retainBytes)||highBytes<1024||highBytes>134217728||retainBytes<1||retainBytes>=highBytes||!Number.isSafeInteger(modelTokens)||modelTokens<1024||modelTokens>1048576||!Number.isSafeInteger(modelMedia)||modelMedia<1024||modelMedia>268435456||!Number.isSafeInteger(modelDecoded)||modelDecoded<1024||modelDecoded>1073741824)throw Error('上下文预算无效');
-    Object.assign(draft.context_view,{high_watermark_units:high,retain_units:retain,high_watermark_payload_bytes:highBytes,retain_payload_bytes:retainBytes,model_view_budget_tokens:modelTokens,model_view_media_bytes:modelMedia,model_view_decoded_bytes:modelDecoded});send('set-draft',{value:draft});
+    Object.assign(draft.context_view,{high_watermark_estimated_tokens:highTokens,retain_estimated_tokens:retainTokens,high_watermark_units:high,retain_units:retain,high_watermark_payload_bytes:highBytes,retain_payload_bytes:retainBytes,model_view_budget_tokens:modelTokens,model_view_media_bytes:modelMedia,model_view_decoded_bytes:modelDecoded});send('set-draft',{value:draft});
   }
   async function load(next=false){
     const anomalyMode=$('anomalies').checked,input={limit:20};

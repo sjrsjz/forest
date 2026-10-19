@@ -215,12 +215,12 @@ class ModelExecution:
         evidence_ref: dict | None,
         memory_query_id: str | None,
         repair: dict | None,
-        output_tokens: int,
         stream: bool,
         request_kind: str,
     ) -> dict:
         graph_id, graph_revision, bot_id = self._identity()
         profile, target = await self._profile(request_id)
+        output_tokens = target.max_output_tokens
         if repair is None:
             await verify_model_view(
                 self.ctx, snapshot=snapshot, preset_context=preset_context,

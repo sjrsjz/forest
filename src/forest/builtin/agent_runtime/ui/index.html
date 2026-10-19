@@ -40,6 +40,7 @@
     <section id="preset-panel">
       <h2>Bot 人格与行为提示词</h2>
       <p>仅用于当前 Bot。按顺序填写人格、语气和行为要求；留空表示不添加人格预设。</p>
+      <p>每次模型请求的输出额度统一使用 Provider 的 max_output_tokens 设置，包含模型的推理与正文；Agent 不另存一份额度。</p>
       <p id="preset-revision"></p>
       <div id="preset-list"></div>
       <div class="actions"><button id="add-preset" type="button" disabled>添加一段</button><button id="plan-preset" type="button" disabled>检查提示词计划</button><span id="preset-size"></span></div>

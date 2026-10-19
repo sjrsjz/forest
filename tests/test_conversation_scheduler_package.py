@@ -2831,20 +2831,20 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     ),
                 )
             ).fetchone()
-        with pytest.raises(ForestError) as over_budget:
-            await endpoint.invoke_routed(
-                route,
-                RuntimeServiceInvocation(
-                    "conversation:snapshot:over-budget", 10,
-                    "test.conversation", "conversation/onebot/group/silent",
-                ),
-                ({"actor": {
-                    "conversation_id": actor_after["conversation_id"],
-                    "owner_id": actor_after["actor_owner_id"],
-                    "epoch": actor_after["actor_epoch"],
-                }},),
-                {},
-            )
-        assert over_budget.value.code == "CONTEXT_VIEW_HARD_LIMIT"
+        over_budget_snapshot = await endpoint.invoke_routed(
+            route,
+            RuntimeServiceInvocation(
+                "conversation:snapshot:over-budget", 10,
+                "test.conversation", "conversation/onebot/group/silent",
+            ),
+            ({"actor": {
+                "conversation_id": actor_after["conversation_id"],
+                "owner_id": actor_after["actor_owner_id"],
+                "epoch": actor_after["actor_epoch"],
+            }},),
+            {},
+        )
+        assert (over_budget_snapshot["token_estimator"]["estimated_history_tokens"]
+                > over_budget_snapshot["token_estimator"]["history_budget_tokens"])
     finally:
         assert await registry.close() == []

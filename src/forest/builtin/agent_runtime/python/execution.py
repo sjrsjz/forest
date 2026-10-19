@@ -722,7 +722,7 @@ class AgentExecution:
             raw_snapshot=snapshot, fixed_view=fixed_view,
             preset_ref=self._preset_ref(), preset_context=preset_context,
             tools=tools, evidence_ref=evidence_ref,
-            output_tokens=self.config["output_tokens"],
+            output_tokens=target.max_output_tokens,
             input_modalities=target.input_modalities,
             model_capability_digest=profile["capability_digest"],
         )
@@ -1385,7 +1385,6 @@ class AgentExecution:
                             evidence_ref=evidence_ref,
                             memory_query_id=memory_query_id,
                             repair=repair,
-                            output_tokens=self.config["output_tokens"],
                             stream=self.config["stream"],
                             request_kind=(
                                 "REPAIR"

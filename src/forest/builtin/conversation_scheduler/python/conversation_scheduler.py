@@ -396,16 +396,8 @@ class ConversationScheduler(Plugin):
                 * view["unit_overhead_estimated_tokens"]
             ),
         }
-        if token_estimator["estimated_history_tokens"] > token_estimator["history_budget_tokens"]:
-            raise ForestError(
-                "CONTEXT_VIEW_HARD_LIMIT",
-                "Required Context exceeds the local history token estimate", 413,
-            )
-        if payload_bytes > view["high_watermark_payload_bytes"]:
-            raise ForestError(
-                "CONTEXT_VIEW_HARD_LIMIT",
-                "Required Context Payload exceeds the configured model-view bound", 413,
-            )
+        # Watermarks schedule archival; this snapshot supplies source facts to
+        # the joint selector, which alone decides what fits a model request.
         media_bytes = sum(
             part["byte_length"] for _, units in raw_pages
             for unit in units for part in unit["media_parts"]
@@ -414,11 +406,6 @@ class ConversationScheduler(Plugin):
             raise ForestError(
                 "CONTEXT_SNAPSHOT_MEDIA_COST_CONFLICT",
                 "Conversation media facts differ from the active window", 409,
-            )
-        if media_bytes > view["high_watermark_media_bytes"]:
-            raise ForestError(
-                "CONTEXT_VIEW_MEDIA_OVER_BUDGET",
-                "Required Context media exceeds the configured model-view bound", 413,
             )
         decoded_bytes = sum(
             part["decoded_pixels"] * 4
@@ -430,11 +417,6 @@ class ConversationScheduler(Plugin):
             raise ForestError(
                 "CONTEXT_SNAPSHOT_DECODED_COST_CONFLICT",
                 "Conversation decoded media facts differ from the active window", 409,
-            )
-        if decoded_bytes > view["high_watermark_decoded_bytes"]:
-            raise ForestError(
-                "CONTEXT_VIEW_DECODED_OVER_BUDGET",
-                "Required Context decoded media exceeds the model-view bound", 413,
             )
         pages = []
         for offset, units in raw_pages:

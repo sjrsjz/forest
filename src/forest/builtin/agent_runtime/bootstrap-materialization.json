@@ -10,9 +10,6 @@
           "system": {"$bootstrap": "agent.runtime#/preset_system"}
         }
       }
-    },
-    "output_tokens": {
-      "$bootstrap": "provider.chat-completions#/capabilities/max_output_tokens"
     }
   }
 }
