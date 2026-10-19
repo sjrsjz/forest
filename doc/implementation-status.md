@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-2026-10-19 群聊 Shell 的 CQ 上下文证明断裂已修复并更新实例：两条 `module list` 原帧发送者均已获得 Shell 管理员授权，但旧 Kernel 仍要求上下文仅有 `parts`，导致 `SHELL_GATE_PROOF_INVALID` 并回滚入站。Adapter 3.4.0 新增独立 `onebot.shell-input` 与严格的计划/写入权限声明，Kernel 从准确控制 Payload 重算前缀，继续验证原始 transport 因果、原帧与作者身份；CQ Context/RAG 不变。16 项本地、3 项 PostgreSQL 检查和完整普通/@ Shell 到模拟发送链通过。正式包替换与 Supervisor 镜像更新后 Graph 51、25/25 ACTIVE，六份配置逐字段保留，唯一观察器首样本零违约。真实新命令等待用户重发核对，见[Shell 修正记录](shell-control-acceptance-2026-10-19.md)。
+2026-10-19 群聊 Shell 的 CQ 上下文证明断裂已修复并更新实例：两条 `module list` 原帧发送者均已获得 Shell 管理员授权，但旧 Kernel 仍要求上下文仅有 `parts`，导致 `SHELL_GATE_PROOF_INVALID` 并回滚入站。Adapter 3.4.0 新增独立 `onebot.shell-input` 与严格的计划/写入权限声明，Kernel 从准确控制 Payload 重算前缀，继续验证原始 transport 因果、原帧与作者身份；CQ Context/RAG 不变。16 项本地、3 项 PostgreSQL 检查和完整普通/@ Shell 到模拟发送链通过。正式包替换与 Supervisor 镜像更新后 Graph 51、25/25 ACTIVE，六份配置逐字段保留，唯一观察器首样本零违约。14:50 CST 用户重发的真实 `module list` 已核对 SUCCEEDED、执行一次、Delivery SENT，均无错误，见[Shell 修正记录](shell-control-acceptance-2026-10-19.md)。
 
 2026-10-19 输出额度与 Context 水位修正已热替换到运行实例：Agent 5.5.0 删除独立 `output_tokens`，报价与新请求统一读取绑定的 Provider `max_output_tokens`（当前 16384）；Conversation 5.1.0 不再以归档水位拒绝快照，必要集合是否容纳由联合选择器判断。历史水位 / 归档保留 / 总模型视图预算为 65536 / 49152 / 98304，设置 UI 已暴露并完成真实计划核验。49 项模型与配置检查、3 项隔离 PostgreSQL 包检查、2 项完整模型/工具链均通过；实际 wire 断言 16384。两次正式包替换后 Graph 43、25/25 ACTIVE，人格与业务记录保留；原唯一观察器已恢复且首样本零违约。见[修正与验收记录](context-output-acceptance-2026-10-19.md)。
 

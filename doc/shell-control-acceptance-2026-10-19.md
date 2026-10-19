@@ -16,4 +16,6 @@ Shell 语法、原帧与伪造拒绝检查 16 项通过；隔离 PostgreSQL 的�
 
 内核证明实现需要随 Supervisor 更新，Adapter 工件通过正式 Worker Host 预览与选择安装；保留数据库、连接配置和管理员名单。历史失败事务没有 Shell 执行记录，不自动补发旧命令。
 
-运行实例已完成 Adapter 正式包替换及 Supervisor 正常 OFFLINE → 镜像更新 → ONLINE。最终 Graph 51、25/25 ACTIVE，活动 Adapter 摘要与发布工件完全一致；人格、Provider、Conversation、Shell、Adapter、触发策略六份生效配置逐字段比对不变。切换前 15 条 SENT 与 1692 条记忆来源保留，恢复后记忆正常增长到 1693、未结算 Run 为 0。原唯一观察器已恢复，首样本零违约。真实新命令的发送回执需用户再次发送后核对，不以模拟回归代替该结论。
+运行实例已完成 Adapter 正式包替换及 Supervisor 正常 OFFLINE → 镜像更新 → ONLINE。最终 Graph 51、25/25 ACTIVE，活动 Adapter 摘要与发布工件完全一致；人格、Provider、Conversation、Shell、Adapter、触发策略六份生效配置逐字段比对不变。切换前 15 条 SENT 与 1692 条记忆来源保留，恢复后记忆正常增长到 1693、未结算 Run 为 0。原唯一观察器已恢复，首样本零违约。
+
+真实群聊核对已完成：用户重新发送 `#forest module list`，2026-10-19 14:50:08 CST 入站，Shell 在约 0.42 秒后结算为 SUCCEEDED，执行次数 1，拒绝码和错误码均为空；对应 Delivery 为 SENT，发送错误码为空。此证据对应更新后的新命令，不是旧失败事务重放。
