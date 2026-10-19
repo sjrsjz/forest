@@ -1,4 +1,4 @@
-//! Synthase Schema & Value Core Library
+//! Forest Schema & Value Core Library
 //!
 //! This library provides a lightweight yet powerful runtime type system in Rust, supporting:
 //! - **Algebraic Data Types (ADTs)**: Includes primitives, `Option`, `Tuple`, `Array`, `Variant` (enums), and `Record` (structs).
@@ -10,8 +10,8 @@
 //!
 //! # Example: Structural Subtyping
 //! ```rust
-//! use synthase_serde::{DeriveSchema};
-//! use synthase_serde::adt::AsSchema;
+//! use forest_serde::{DeriveSchema};
+//! use forest_serde::adt::AsSchema;
 //!
 //! fn test_derive_subtype() {
 //!     #[derive(DeriveSchema)]
@@ -913,7 +913,7 @@ impl VariantPayloadValue {
 // User-Facing Traits
 // ============================================================================
 
-/// Trait implemented by types that can provide a structural Synthase [`Schema`].
+/// Trait implemented by types that can provide a structural Forest [`Schema`].
 pub trait AsSchema: Sized + 'static {
     /// Generates and returns the complete [`Schema`] for this type, including all dependencies.
     fn as_schema() -> Schema {
@@ -930,7 +930,7 @@ pub trait AsSchema: Sized + 'static {
     ) -> GlobalSchemaEnum;
 }
 
-/// Trait for types that can be serialized into and deserialized from a Synthase [`Value`].
+/// Trait for types that can be serialized into and deserialized from a Forest [`Value`].
 pub trait AsValue: Sized + 'static {
     /// Serializes the instance into a dynamic [`Value`] tree.
     fn as_value(&self) -> Value;

@@ -10,7 +10,7 @@ pub(crate) fn derive_schema(input: TokenStream) -> TokenStream {
     for param in generics.type_params_mut() {
         param
             .bounds
-            .push(syn::parse_quote!(::synthase_serde::adt::AsSchema));
+            .push(syn::parse_quote!(::forest_serde::adt::AsSchema));
     }
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
@@ -28,18 +28,18 @@ pub(crate) fn derive_schema(input: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
-        impl #impl_generics ::synthase_serde::adt::AsSchema for #name #ty_generics #where_clause {
+        impl #impl_generics ::forest_serde::adt::AsSchema for #name #ty_generics #where_clause {
             fn register_dependencies_and_self(
-                cache: &mut ::std::collections::HashMap<::std::any::TypeId, ::synthase_serde::adt::GlobalSchemaEnum>,
+                cache: &mut ::std::collections::HashMap<::std::any::TypeId, ::forest_serde::adt::GlobalSchemaEnum>,
                 rec_detector: &mut Vec<::std::any::TypeId>
-            ) -> ::synthase_serde::adt::GlobalSchemaEnum {
+            ) -> ::forest_serde::adt::GlobalSchemaEnum {
                 if rec_detector.contains(&::std::any::TypeId::of::<Self>()) {
-                    return ::synthase_serde::adt::GlobalSchemaEnum::Ref(::std::any::TypeId::of::<Self>());
+                    return ::forest_serde::adt::GlobalSchemaEnum::Ref(::std::any::TypeId::of::<Self>());
                 }
                 rec_detector.push(::std::any::TypeId::of::<Self>());
                 let schema_definition = #schema_body;
                 rec_detector.pop();
-                ::synthase_serde::adt::GlobalSchemaEnum::alloc::<Self>(schema_definition.clone(), cache);
+                ::forest_serde::adt::GlobalSchemaEnum::alloc::<Self>(schema_definition.clone(), cache);
                 schema_definition
             }
         }
@@ -57,12 +57,12 @@ fn generate_struct_body_schema(fields: &Fields) -> TokenStream2 {
                 quote! {
                     (
                         #field_name.to_string(),
-                        <#field_ty as ::synthase_serde::adt::AsSchema>::register_dependencies_and_self(cache, rec_detector)
+                        <#field_ty as ::forest_serde::adt::AsSchema>::register_dependencies_and_self(cache, rec_detector)
                     )
                 }
             });
             quote! {
-                ::synthase_serde::adt::GlobalSchemaEnum::Record(
+                ::forest_serde::adt::GlobalSchemaEnum::Record(
                     [#(#field_initializers),*].into_iter().collect()
                 )
             }
@@ -71,16 +71,16 @@ fn generate_struct_body_schema(fields: &Fields) -> TokenStream2 {
             let inner_schemas = fields.unnamed.iter().map(|f| {
                 let ty = &f.ty;
                 quote! {
-                    <#ty as ::synthase_serde::adt::AsSchema>::register_dependencies_and_self(cache, rec_detector)
+                    <#ty as ::forest_serde::adt::AsSchema>::register_dependencies_and_self(cache, rec_detector)
                 }
             });
             quote! {
-                ::synthase_serde::adt::GlobalSchemaEnum::Tuple(vec![#(#inner_schemas),*])
+                ::forest_serde::adt::GlobalSchemaEnum::Tuple(vec![#(#inner_schemas),*])
             }
         }
         Fields::Unit => {
             quote! {
-                ::synthase_serde::adt::GlobalSchemaEnum::Record(::std::collections::BTreeMap::new())
+                ::forest_serde::adt::GlobalSchemaEnum::Record(::std::collections::BTreeMap::new())
             }
         }
     }
@@ -91,15 +91,15 @@ fn generate_enum_body_schema(e: &syn::DataEnum) -> TokenStream2 {
         let variant_name = v.ident.to_string();
         let payload_schema = match &v.fields {
             Fields::Unit => {
-                quote! { ::synthase_serde::adt::VariantPayloadGlobal::Unnamed(vec![]) }
+                quote! { ::forest_serde::adt::VariantPayloadGlobal::Unnamed(vec![]) }
             }
             Fields::Unnamed(fields) => {
                 let inner_schemas = fields.unnamed.iter().map(|f| {
                     let ty = &f.ty;
-                    quote! { <#ty as ::synthase_serde::adt::AsSchema>::register_dependencies_and_self(cache, rec_detector) }
+                    quote! { <#ty as ::forest_serde::adt::AsSchema>::register_dependencies_and_self(cache, rec_detector) }
                 });
                 quote! {
-                    ::synthase_serde::adt::VariantPayloadGlobal::Unnamed(vec![#(#inner_schemas),*])
+                    ::forest_serde::adt::VariantPayloadGlobal::Unnamed(vec![#(#inner_schemas),*])
                 }
             }
             Fields::Named(fields) => {
@@ -109,12 +109,12 @@ fn generate_enum_body_schema(e: &syn::DataEnum) -> TokenStream2 {
                     quote! {
                         (
                             #field_name.to_string(),
-                            <#field_ty as ::synthase_serde::adt::AsSchema>::register_dependencies_and_self(cache, rec_detector)
+                            <#field_ty as ::forest_serde::adt::AsSchema>::register_dependencies_and_self(cache, rec_detector)
                         )
                     }
                 });
                 quote! {
-                    ::synthase_serde::adt::VariantPayloadGlobal::Named(
+                    ::forest_serde::adt::VariantPayloadGlobal::Named(
                         [#(#field_initializers),*].into_iter().collect()
                     )
                 }
@@ -124,7 +124,7 @@ fn generate_enum_body_schema(e: &syn::DataEnum) -> TokenStream2 {
     });
 
     quote! {
-        ::synthase_serde::adt::GlobalSchemaEnum::Variant(
+        ::forest_serde::adt::GlobalSchemaEnum::Variant(
             [#(#variant_initializers),*].into_iter().collect()
         )
     }

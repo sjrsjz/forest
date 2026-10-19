@@ -1,5 +1,5 @@
 [package]
-name = "synthase-serde-macros"
+name = "forest-serde-macros"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true

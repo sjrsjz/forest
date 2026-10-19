@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
-use synthase_serde::adt::{
+use forest_serde::adt::{
     AsSchema, AsValue, DecodeError, Schema, SchemaEnum, Value, ValueKind, VariantPayloadValue,
 };
-use synthase_serde::parser::{parse_schema, parse_value};
-use synthase_serde::{DeriveSchema, DeriveValue};
+use forest_serde::parser::{parse_schema, parse_value};
+use forest_serde::{DeriveSchema, DeriveValue};
 
 #[derive(Debug, PartialEq, DeriveSchema, DeriveValue)]
 struct Node<T> {

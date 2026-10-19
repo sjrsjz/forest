@@ -59,9 +59,9 @@ fn test_collections() {
 fn test_record() {
     let mut expected_map = BTreeMap::new();
     expected_map.insert("id".to_string(), Value::I32(100));
-    expected_map.insert("name".to_string(), Value::String("synthase".to_string()));
+    expected_map.insert("name".to_string(), Value::String("forest".to_string()));
     assert_eq!(
-        parse_value(r#"{ id: 100, "name": "synthase", }"#).unwrap(),
+        parse_value(r#"{ id: 100, "name": "forest", }"#).unwrap(),
         Value::Record(expected_map)
     );
 }
@@ -705,7 +705,7 @@ fn test_extreme_complex_parse_and_check() {
     // Construct a deeply nested JSON value covering all variants.
     let json_value_str = r#"
         Object::map {
-            "name": Str::"synthase",
+            "name": Str::"forest",
             "version": Number::1,
             "active": Bool::true,
             "nothing": Null,

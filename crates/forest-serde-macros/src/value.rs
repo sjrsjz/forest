@@ -15,7 +15,7 @@ pub fn derive_value(input: TokenStream) -> TokenStream {
         let ident = &param.ident;
         where_clause
             .predicates
-            .push(syn::parse_quote! { #ident: ::synthase_serde::adt::AsValue });
+            .push(syn::parse_quote! { #ident: ::forest_serde::adt::AsValue });
     }
 
     let serialize_body = match &input.data {
@@ -38,12 +38,12 @@ pub fn derive_value(input: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
-        impl #impl_generics ::synthase_serde::adt::AsValue for #name #ty_generics #where_clause {
-            fn as_value(&self) -> ::synthase_serde::adt::Value {
+        impl #impl_generics ::forest_serde::adt::AsValue for #name #ty_generics #where_clause {
+            fn as_value(&self) -> ::forest_serde::adt::Value {
                 #serialize_body
             }
 
-            fn from_value(value: ::synthase_serde::adt::Value) -> Result<Self, ::synthase_serde::adt::DecodeError> {
+            fn from_value(value: ::forest_serde::adt::Value) -> Result<Self, ::forest_serde::adt::DecodeError> {
                 #deserialize_body
             }
         }
@@ -60,14 +60,14 @@ fn generate_struct_serialize_body(fields: &Fields) -> TokenStream2 {
                 let field_ident = f.ident.as_ref().unwrap();
                 let field_ty = &f.ty;
                 quote! {
-                    map.insert(#field_name.to_string(), <#field_ty as ::synthase_serde::adt::AsValue>::as_value(&self.#field_ident));
+                    map.insert(#field_name.to_string(), <#field_ty as ::forest_serde::adt::AsValue>::as_value(&self.#field_ident));
                 }
             });
             quote! {
                 {
                     let mut map = ::std::collections::BTreeMap::new();
                     #(#field_inserters)*
-                    ::synthase_serde::adt::Value::Record(map)
+                    ::forest_serde::adt::Value::Record(map)
                 }
             }
         }
@@ -75,14 +75,14 @@ fn generate_struct_serialize_body(fields: &Fields) -> TokenStream2 {
             let field_serializers = fields.unnamed.iter().enumerate().map(|(i, f)| {
                 let index = Index::from(i);
                 let field_ty = &f.ty;
-                quote! { <#field_ty as ::synthase_serde::adt::AsValue>::as_value(&self.#index) }
+                quote! { <#field_ty as ::forest_serde::adt::AsValue>::as_value(&self.#index) }
             });
             quote! {
-                ::synthase_serde::adt::Value::Tuple(vec![#(#field_serializers),*])
+                ::forest_serde::adt::Value::Tuple(vec![#(#field_serializers),*])
             }
         }
         Fields::Unit => {
-            quote! { ::synthase_serde::adt::Value::Record(::std::collections::BTreeMap::new()) }
+            quote! { ::forest_serde::adt::Value::Record(::std::collections::BTreeMap::new()) }
         }
     }
 }
@@ -101,16 +101,16 @@ fn generate_enum_serialize_body(e: &syn::DataEnum) -> TokenStream2 {
                     let ident_str = ident.to_string();
                     let field_ty = &f.ty;
                     quote! {
-                        map.insert(#ident_str.to_string(), <#field_ty as ::synthase_serde::adt::AsValue>::as_value(#ident));
+                        map.insert(#ident_str.to_string(), <#field_ty as ::forest_serde::adt::AsValue>::as_value(#ident));
                     }
                 });
                 quote! {
                     Self::#variant_ident { #(#field_idents),* } => {
                         let mut map = ::std::collections::BTreeMap::new();
                         #(#field_inserters)*
-                        ::synthase_serde::adt::Value::Variant(
+                        ::forest_serde::adt::Value::Variant(
                             #variant_name_str.to_string(),
-                            ::synthase_serde::adt::VariantPayloadValue::Named(map)
+                            ::forest_serde::adt::VariantPayloadValue::Named(map)
                         )
                     }
                 }
@@ -119,13 +119,13 @@ fn generate_enum_serialize_body(e: &syn::DataEnum) -> TokenStream2 {
                 let field_bindings: Vec<_> = (0..fields.unnamed.len()).map(|i| format_ident!("p{}", i)).collect();
                 let field_serializers = fields.unnamed.iter().zip(field_bindings.iter()).map(|(f, binding)| {
                     let field_ty = &f.ty;
-                    quote! { <#field_ty as ::synthase_serde::adt::AsValue>::as_value(#binding) }
+                    quote! { <#field_ty as ::forest_serde::adt::AsValue>::as_value(#binding) }
                 });
                 quote! {
                     Self::#variant_ident(#(#field_bindings),*) => {
-                        ::synthase_serde::adt::Value::Variant(
+                        ::forest_serde::adt::Value::Variant(
                             #variant_name_str.to_string(),
-                            ::synthase_serde::adt::VariantPayloadValue::Unnamed(vec![#(#field_serializers),*])
+                            ::forest_serde::adt::VariantPayloadValue::Unnamed(vec![#(#field_serializers),*])
                         )
                     }
                 }
@@ -133,9 +133,9 @@ fn generate_enum_serialize_body(e: &syn::DataEnum) -> TokenStream2 {
             Fields::Unit => {
                 quote! {
                     Self::#variant_ident => {
-                        ::synthase_serde::adt::Value::Variant(
+                        ::forest_serde::adt::Value::Variant(
                             #variant_name_str.to_string(),
-                            ::synthase_serde::adt::VariantPayloadValue::Unnamed(vec![])
+                            ::forest_serde::adt::VariantPayloadValue::Unnamed(vec![])
                         )
                     }
                 }
@@ -152,8 +152,8 @@ fn generate_struct_deserialize_body(fields: &Fields) -> TokenStream2 {
             if fields.named.is_empty() {
                 return quote! {
                     match value {
-                        ::synthase_serde::adt::Value::Record(_) | ::synthase_serde::adt::Value::Tuple(_) => Ok(Self {}),
-                        _ => Err(::synthase_serde::adt::DecodeError::expected(::synthase_serde::adt::ValueKind::Record, &value)),
+                        ::forest_serde::adt::Value::Record(_) | ::forest_serde::adt::Value::Tuple(_) => Ok(Self {}),
+                        _ => Err(::forest_serde::adt::DecodeError::expected(::forest_serde::adt::ValueKind::Record, &value)),
                     }
                 };
             }
@@ -164,8 +164,8 @@ fn generate_struct_deserialize_body(fields: &Fields) -> TokenStream2 {
                 quote! {
                     let #field_ident = {
                         let val = map.remove(#field_name_str)
-                            .ok_or_else(|| ::synthase_serde::adt::DecodeError::MissingField { field: #field_name_str.into() })?;
-                        <#field_ty as ::synthase_serde::adt::AsValue>::from_value(val)
+                            .ok_or_else(|| ::forest_serde::adt::DecodeError::MissingField { field: #field_name_str.into() })?;
+                        <#field_ty as ::forest_serde::adt::AsValue>::from_value(val)
                             .map_err(|error| error.at_field(#field_name_str))?
                     };
                 }
@@ -173,11 +173,11 @@ fn generate_struct_deserialize_body(fields: &Fields) -> TokenStream2 {
             let field_idents = fields.named.iter().map(|f| f.ident.as_ref().unwrap());
             quote! {
                 match value {
-                    ::synthase_serde::adt::Value::Record(mut map) => {
+                    ::forest_serde::adt::Value::Record(mut map) => {
                         #(#field_extractors)*
                         Ok(Self { #(#field_idents),* })
                     }
-                    _ => Err(::synthase_serde::adt::DecodeError::expected(::synthase_serde::adt::ValueKind::Record, &value)),
+                    _ => Err(::forest_serde::adt::DecodeError::expected(::forest_serde::adt::ValueKind::Record, &value)),
                 }
             }
         }
@@ -186,32 +186,32 @@ fn generate_struct_deserialize_body(fields: &Fields) -> TokenStream2 {
             if field_count == 0 {
                 return quote! {
                     match value {
-                        ::synthase_serde::adt::Value::Tuple(_) | ::synthase_serde::adt::Value::Record(_) => Ok(Self()),
-                        _ => Err(::synthase_serde::adt::DecodeError::expected(::synthase_serde::adt::ValueKind::Tuple, &value)),
+                        ::forest_serde::adt::Value::Tuple(_) | ::forest_serde::adt::Value::Record(_) => Ok(Self()),
+                        _ => Err(::forest_serde::adt::DecodeError::expected(::forest_serde::adt::ValueKind::Tuple, &value)),
                     }
                 };
             }
             let field_deserializers = fields.unnamed.iter().enumerate().map(|(index, f)| {
                 let field_ty = &f.ty;
-                quote! { <#field_ty as ::synthase_serde::adt::AsValue>::from_value(values.remove(0)).map_err(|error| error.at_index(#index))? }
+                quote! { <#field_ty as ::forest_serde::adt::AsValue>::from_value(values.remove(0)).map_err(|error| error.at_index(#index))? }
             });
             quote! {
                 match value {
-                    ::synthase_serde::adt::Value::Tuple(mut values) => {
+                    ::forest_serde::adt::Value::Tuple(mut values) => {
                         if values.len() < #field_count {
-                            return Err(::synthase_serde::adt::DecodeError::TooFewElements { minimum: #field_count, actual: values.len() });
+                            return Err(::forest_serde::adt::DecodeError::TooFewElements { minimum: #field_count, actual: values.len() });
                         }
                         Ok(Self(#(#field_deserializers,)*))
                     }
-                    _ => Err(::synthase_serde::adt::DecodeError::expected(::synthase_serde::adt::ValueKind::Tuple, &value)),
+                    _ => Err(::forest_serde::adt::DecodeError::expected(::forest_serde::adt::ValueKind::Tuple, &value)),
                 }
             }
         }
         Fields::Unit => {
             quote! {
                 match value {
-                    ::synthase_serde::adt::Value::Record(_) | ::synthase_serde::adt::Value::Tuple(_) => Ok(Self),
-                    _ => Err(::synthase_serde::adt::DecodeError::expected(::synthase_serde::adt::ValueKind::Record, &value)),
+                    ::forest_serde::adt::Value::Record(_) | ::forest_serde::adt::Value::Tuple(_) => Ok(Self),
+                    _ => Err(::forest_serde::adt::DecodeError::expected(::forest_serde::adt::ValueKind::Record, &value)),
                 }
             }
         }
@@ -239,8 +239,8 @@ fn generate_enum_deserialize_body(e: &syn::DataEnum) -> TokenStream2 {
                     quote! {
                         let #field_ident = {
                             let val = map.remove(#field_name_str)
-                                .ok_or_else(|| ::synthase_serde::adt::DecodeError::MissingField { field: #field_name_str.into() })?;
-                            <#field_ty as ::synthase_serde::adt::AsValue>::from_value(val)
+                                .ok_or_else(|| ::forest_serde::adt::DecodeError::MissingField { field: #field_name_str.into() })?;
+                            <#field_ty as ::forest_serde::adt::AsValue>::from_value(val)
                                 .map_err(|error| error.at_field(#field_name_str))?
                         };
                     }
@@ -248,12 +248,12 @@ fn generate_enum_deserialize_body(e: &syn::DataEnum) -> TokenStream2 {
                 let field_idents = fields.named.iter().map(|f| f.ident.as_ref().unwrap());
                 quote! {
                     match payload {
-                        ::synthase_serde::adt::VariantPayloadValue::Named(mut map) => {
+                        ::forest_serde::adt::VariantPayloadValue::Named(mut map) => {
                             #(#field_extractors)*
                             Ok(Self::#variant_ident { #(#field_idents),* })
                         }
-                        _ => Err(::synthase_serde::adt::DecodeError::PayloadMismatch {
-                            expected: ::synthase_serde::adt::PayloadKind::Named,
+                        _ => Err(::forest_serde::adt::DecodeError::PayloadMismatch {
+                            expected: ::forest_serde::adt::PayloadKind::Named,
                             actual: payload.kind(),
                         }),
                     }
@@ -266,18 +266,18 @@ fn generate_enum_deserialize_body(e: &syn::DataEnum) -> TokenStream2 {
                 }
                 let field_deserializers = fields.unnamed.iter().enumerate().map(|(index, f)| {
                     let field_ty = &f.ty;
-                    quote! { <#field_ty as ::synthase_serde::adt::AsValue>::from_value(values.remove(0)).map_err(|error| error.at_index(#index))? }
+                    quote! { <#field_ty as ::forest_serde::adt::AsValue>::from_value(values.remove(0)).map_err(|error| error.at_index(#index))? }
                 });
                 quote! {
                     match payload {
-                        ::synthase_serde::adt::VariantPayloadValue::Unnamed(mut values) => {
+                        ::forest_serde::adt::VariantPayloadValue::Unnamed(mut values) => {
                             if values.len() < #field_count {
-                                return Err(::synthase_serde::adt::DecodeError::TooFewElements { minimum: #field_count, actual: values.len() });
+                                return Err(::forest_serde::adt::DecodeError::TooFewElements { minimum: #field_count, actual: values.len() });
                             }
                             Ok(Self::#variant_ident(#(#field_deserializers,)*))
                         }
-                        _ => Err(::synthase_serde::adt::DecodeError::PayloadMismatch {
-                            expected: ::synthase_serde::adt::PayloadKind::Unnamed,
+                        _ => Err(::forest_serde::adt::DecodeError::PayloadMismatch {
+                            expected: ::forest_serde::adt::PayloadKind::Unnamed,
                             actual: payload.kind(),
                         }),
                     }
@@ -290,13 +290,13 @@ fn generate_enum_deserialize_body(e: &syn::DataEnum) -> TokenStream2 {
 
     quote! {
         match value {
-            ::synthase_serde::adt::Value::Variant(tag, payload) => {
+            ::forest_serde::adt::Value::Variant(tag, payload) => {
                 match tag.as_str() {
                     #(#tag_match_arms),*
-                    _ => Err(::synthase_serde::adt::DecodeError::UnknownVariant { tag }),
+                    _ => Err(::forest_serde::adt::DecodeError::UnknownVariant { tag }),
                 }
             }
-            _ => Err(::synthase_serde::adt::DecodeError::expected(::synthase_serde::adt::ValueKind::Variant, &value)),
+            _ => Err(::forest_serde::adt::DecodeError::expected(::forest_serde::adt::ValueKind::Variant, &value)),
         }
     }
 }

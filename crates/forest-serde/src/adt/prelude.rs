@@ -1,6 +1,6 @@
 //! This module provides default implementations of `AsSchema` and `AsValue` for common Rust types,
 //! including primitive types, `Option`, `Vec`, `Box`, `Rc`, `Arc`, tuples, `Result`, and maps like `HashMap` and `BTreeMap`.
-//! These implementations allow these types to be easily used within the Synthase serialization framework without requiring manual schema or value definitions.
+//! These implementations allow these types to be easily used within the Forest serialization framework without requiring manual schema or value definitions.
 
 use std::{
     any::TypeId,
@@ -8,7 +8,7 @@ use std::{
     hash::Hash,
 };
 
-use synthase_serde_macros::{__impl_as_schema_for_tuples, __impl_as_value_for_tuples};
+use forest_serde_macros::{__impl_as_schema_for_tuples, __impl_as_value_for_tuples};
 
 use crate::adt::{
     AsSchema, AsValue, DecodeError, GlobalSchemaEnum, PayloadKind, Value, ValueKind,

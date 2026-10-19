@@ -1,8 +1,8 @@
-# Synthase 序列化移植
+# Forest 序列化移植
 
-来源是相邻 Synthase 仓库的 `synthase-serde` 与 `synthase-serde-marco`，源码基线提交为 `0b19f77de23ab274dec21fd06c04d2db787a7a21`。本仓库保留库名 `synthase-serde`，将宏包拼写整理为 `synthase-serde-macros`，并将 `predule` 整理为 `prelude`。原仓库未作修改。
+由已有序列化实现移植并修正。本仓库使用 `forest-serde` 与 `forest-serde-macros`，公共模块拼写统一为 `prelude`。包名、宏生成路径、示例和依赖均使用 Forest 命名，不提供旧名称兼容层。
 
-本阶段只处理类型表达、转换和序列化，不定义模块 ABI、调度器、调用权限、数据库或框架生命周期。
+本文只说明类型表达、转换和序列化，不定义模块 ABI、调度器、调用权限、数据库或框架生命周期。运行时设计方向另见[模块运行时架构](01-module-runtime.md)和[状态与访问详细设计](02-state-access-and-reload.md)。
 
 ## 类型与值
 
@@ -11,8 +11,8 @@
 `DeriveSchema` 和 `DeriveValue` 从同一 Rust 类型生成对应契约与转换，包括泛型和递归类型。
 
 ```rust
-use synthase_serde::{DeriveSchema, DeriveValue};
-use synthase_serde::adt::{AsSchema, AsValue};
+use forest_serde::{DeriveSchema, DeriveValue};
+use forest_serde::adt::{AsSchema, AsValue};
 
 #[derive(DeriveSchema, DeriveValue)]
 struct State<T> {
@@ -28,7 +28,7 @@ let restored = State::<String>::from_value(value)?;
 
 ## 转换规则
 
-保留 Synthase 的结构子类型和前缀投影语义：
+保留原有的结构子类型和前缀投影语义：
 
 - `I32` 可以提升为 `i64`；不进行反向缩窄或其他猜测转换。
 - Record 按目标字段读取，额外字段忽略；缺少字段是错误。`Option<T>` 字段缺失不等于该字段的值是 `None`。
@@ -49,6 +49,6 @@ let restored = State::<String>::from_value(value)?;
 - Schema 的 Serde 编码统一为根类型在索引 0 的类型表，序列化与反序列化对称。拒绝空类型表和越界引用。
 - Value 与 Schema 都支持 Serde。Map 编码为有序键值对序列，支持 JSON 中的任意结构键并拒绝重复编码键。文本 DSL 的字符串遵循 JSON 转义，格式化保留 Variant 的外层载荷结构，避免单个 Tuple/Record 字段被展开。
 - 继承原来的纯 Ref 环与递归结构类型规则；本次没有重定义类型代数。
-- 原生目标保留 Synthase 的 `stacksafe` 调用栈增长；Wasm 目标不依赖原生栈切换，递归受其执行栈限制。当前不承诺任意深度的输入可成功处理。
+- 原生目标保留 `stacksafe` 调用栈增长；Wasm 目标不依赖原生栈切换，递归受其执行栈限制。当前不承诺任意深度的输入可成功处理。
 - 尚未扩展浮点数和无符号整数。
 - JSON 和 bincode 用于检查往返一致性；本阶段尚未冻结跨版本的持久化二进制协议，也没有加入状态迁移机制。模块身份、存档版本及持久状态格式在后续设计中确定。
