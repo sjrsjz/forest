@@ -43,6 +43,20 @@ HTTP 请求使用 JSON Content-Type 和可选 Bearer 认证；目标可带路径
 
 ## 与 Forest 接入
 
-该 crate 不持有 Forest 管理员身份，不决定哪个用户可以禁言或读取凭证。后续 OneBot 模块在调用 API 前按宿主来源和 Bot/群作用域授权。网络句柄按模块执行生命周期管理；热重载不迁移 Rust Future 或连接对象。
+该 crate 不持有 Forest 管理员身份，不决定哪个用户可以禁言或读取凭证。Forest 暴露的 OneBot 原生接口在静态声明上挂 AccessPolicy，通过 callers 检查可信调用主体；具体群目标等约束由接口处理。群消息等宿主事件由接入层解析后交给调度器 notifier，再按 Manifest 接收声明投递到处理模块，不要求插件产生事件。该协议库本身不创建 notifier 或定义事件监听入口。
+
+当前接入只考虑一个 Bot 账号，仍支持该账号参与的多个群聊。不加入账号池、Bot 实体目录、跨账号选择参数或每 Bot 配置挂载；事件里的 self_id 保留为平台账号信息。
+
+### 事件转发约定
+
+采用 OneBot v11 原始事件结构，保留字段名称、数据含义和消息内容，不另造统一聊天事件。接入层将协议 JSON 解码为共享的 OneBot 类型，经 Forest 序列化传给模块；notifier 只做投递。这里的“原始结构”指协议结构，不要求逐字节保留 JSON 空白和字段顺序，也不要求模块反复解析一段 JSON 字符串。
+
+群消息保留 time、self_id、post_type/message_type/sub_type、message_id、group_id、user_id、anonymous、message、raw_message 和 sender。message 的 CQ 字符串或消息段结构保持原意，不降级为裸文本，不主动下载或内联媒体。sender 的可选信息按标准缺省，不伪造昵称、角色等字段。字段含义与可选性依据 [v11 消息事件](https://github.com/botuniverse/onebot-11/blob/master/event/message.md)。
+
+无关字段可在共享事件类型中明确省略，首版可省略 font；消息来源、发送者、回复关系及媒体引用不作为无关信息删除。省略发生在接入协议的类型定义处，不能由调度器任意裁剪字段，也不改变接口 Schema 校验规则。
+
+HTTP 上报与反向 WebSocket 等协议监听由宿主接入能力负责，不把连接转交给接收插件。事件源身份由宿主绑定；平台用户信息和群角色属于事件上下文，不自动授予框架管理权限。首个可用传输随接入实现确定，无须为此先引入跨平台事件抽象。
+
+模块主动取得的网络句柄按其执行实例生命周期管理，不迁移 Rust Future 或连接对象；宿主事件接入自身的资源归该宿主能力，不归某个消息接收插件所有。具体通知契约见[notifier 设计](11-notifier-and-dependencies.md)。
 
 标准依据：[公开 API](https://github.com/botuniverse/onebot-11/blob/master/api/public.md)、[HTTP](https://github.com/botuniverse/onebot-11/blob/master/communication/http.md)、[鉴权](https://github.com/botuniverse/onebot-11/blob/master/communication/authorization.md)。
