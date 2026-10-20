@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 /// All three representations accepted by the standard. No CQ parsing is implicit.
+#[cfg_attr(
+    feature = "forest",
+    derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Message {
@@ -12,6 +16,10 @@ pub enum Message {
 }
 
 /// Segment data uses strings as specified by the v11 message wire format.
+#[cfg_attr(
+    feature = "forest",
+    derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Segment {
@@ -92,6 +100,10 @@ impl Segment {
     }
 }
 
+#[cfg_attr(
+    feature = "forest",
+    derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
+)]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,6 +116,10 @@ pub struct MediaOptions {
     pub timeout: Option<String>,
 }
 
+#[cfg_attr(
+    feature = "forest",
+    derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Media {
     pub file: String,
@@ -111,6 +127,10 @@ pub struct Media {
     pub options: MediaOptions,
 }
 
+#[cfg_attr(
+    feature = "forest",
+    derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
     pub file: String,
@@ -120,12 +140,20 @@ pub struct Image {
     pub options: MediaOptions,
 }
 
+#[cfg_attr(
+    feature = "forest",
+    derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageKind {
     Flash,
 }
 
+#[cfg_attr(
+    feature = "forest",
+    derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub file: String,
@@ -135,6 +163,10 @@ pub struct Record {
     pub options: MediaOptions,
 }
 
+#[cfg_attr(
+    feature = "forest",
+    derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Contact {
@@ -142,6 +174,10 @@ pub enum Contact {
     Group { id: String },
 }
 
+#[cfg_attr(
+    feature = "forest",
+    derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Music {
@@ -163,6 +199,10 @@ pub enum Music {
     },
 }
 
+#[cfg_attr(
+    feature = "forest",
+    derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
+)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Node {

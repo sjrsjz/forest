@@ -1,0 +1,17 @@
+[package]
+name = "forest-scheduler-probe"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+second = []
+
+[dependencies]
+forest-sdk = { path = "../../../../forest-sdk" }
+forest-protocol = { path = "../../../../forest-protocol" }
+forest-serde = { path = "../../../../forest-serde" }
+futures.workspace = true

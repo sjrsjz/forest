@@ -1,0 +1,15 @@
+[package]
+name = "forest-test"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+forest-sdk = { path = "../../crates/forest-sdk" }
+forest-protocol = { path = "../../crates/forest-protocol" }
+forest-serde = { path = "../../crates/forest-serde" }
+forest-onebot = { path = "../../crates/forest-onebot", features = ["forest"] }
+serde_json.workspace = true

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/forest-serde", "crates/forest-serde-macros", "crates/forest-util", "crates/forest-onebot", "crates/forest-config"]
+members = ["crates/forest-serde", "crates/forest-serde-macros", "crates/forest-util", "crates/forest-onebot", "crates/forest-config", "crates/forest-protocol", "crates/forest-sdk", "crates/forest-runtime", "crates/forest-cli", "plugins/forest-test", "crates/forest-runtime/tests/fixtures/probe"]
 resolver = "3"
 
 [workspace.package]
@@ -11,3 +11,16 @@ publish = false
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 forest-serde-macros = { path = "crates/forest-serde-macros" }
+bincode = "1.3.3"
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "signal"] }
+futures = "0.3.31"
+anyhow = "1.0.100"
+thiserror = "2.0.18"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

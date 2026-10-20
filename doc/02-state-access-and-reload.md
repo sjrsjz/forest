@@ -1,6 +1,6 @@
 # 状态表、访问控制与热重载
 
-本文记录宿主托管状态表、可信来源与 ACL 的设计方向。令牌、内存 ACL 查询表与 SQLite 配置存储已实现，配置声明的访问规则接入及宿主鉴权尚未实现。运行时总体边界见[模块运行时架构](01-module-runtime.md)，配置表接口见[配置表实现](05-config-table.md)，ACL 规则以[配置访问声明](06-config-access.md)为准。
+本文记录宿主托管状态表、可信来源与 ACL 的设计方向。令牌、ACL、SQLite 及宿主鉴权已实现，状态交接和限制见[运行说明](13-runtime-and-sdk.md)。运行时总体边界见[模块运行时架构](01-module-runtime.md)，配置表接口见[配置表实现](05-config-table.md)，ACL 规则以[配置访问声明](06-config-access.md)为准。
 
 ## 1. 宿主托管、模块定义的状态表
 

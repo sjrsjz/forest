@@ -1,4 +1,4 @@
-//! Immutable configuration ACL metadata and pure permission queries.
+//! Immutable resource ACL metadata and pure permission queries.
 //!
 //! The host constructs this table from owned declarations and supplies the real
 //! subject to [`AclTable::check`]. Tokens passed here are values, not credentials.
@@ -19,6 +19,7 @@
 //!     access: AccessPolicy {
 //!         readers: vec![SubjectPattern::SelfModule],
 //!         writers: vec![SubjectPattern::SelfModule],
+//!         callers: vec![],
 //!     },
 //! }])?;
 //! assert!(acl.check(&owner, &owner, &key, Access::Read));
@@ -34,24 +35,45 @@ use crate::token::{Segment, Token, TokenPattern};
 pub enum Access {
     Read,
     Write,
+    Call,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(
+        serialize = "TokenPattern<K>: serde::Serialize",
+        deserialize = "TokenPattern<K>: serde::Deserialize<'de>"
+    ))
+)]
 pub enum SubjectPattern<K = Segment> {
-    /// The declaration's owning module instance, never the current caller.
+    /// The declaration's owning logical module, never the current caller.
     SelfModule,
     Path(TokenPattern<K>),
 }
 
-/// Both lists must be provided explicitly; an empty list grants no access.
+/// Each list grants only its named operation; an empty list grants no access.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        deny_unknown_fields,
+        bound(
+            serialize = "SubjectPattern<K>: serde::Serialize",
+            deserialize = "SubjectPattern<K>: serde::Deserialize<'de>"
+        )
+    )
+)]
 pub struct AccessPolicy<K = Segment> {
     pub readers: Vec<SubjectPattern<K>>,
     pub writers: Vec<SubjectPattern<K>>,
+    pub callers: Vec<SubjectPattern<K>>,
 }
 
 /// Host-bound declaration metadata. Entity and owner are separate addresses:
-/// configuration on a Bot/user entity may belong to a module instance.
+/// a resource on a user entity may belong to a logical module.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AclEntry<K = Segment> {
     pub entity: Token<K>,
@@ -85,6 +107,9 @@ struct Rule<K> {
 }
 
 /// Exact (entity, key) lookup followed by subject matching. No live mutations.
+///
+/// The host uses separate tables for configuration and interface declarations,
+/// so equal paths in different resource categories do not alias.
 #[derive(Clone, Debug)]
 pub struct AclTable<K = Segment> {
     entries: HashMap<Token<K>, HashMap<Token<K>, Rule<K>>>,
@@ -144,6 +169,7 @@ impl<K: Eq + Hash> AclTable<K> {
         let patterns = match access {
             Access::Read => &rule.access.readers,
             Access::Write => &rule.access.writers,
+            Access::Call => &rule.access.callers,
         };
         patterns.iter().any(|pattern| match pattern {
             SubjectPattern::SelfModule => subject == &rule.owner,

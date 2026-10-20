@@ -2,11 +2,11 @@
 
 本文确认配置与接口的访问控制设计：**提供方在资源声明上挂静态 AccessPolicy，宿主绑定真实来源并执行声明。** 配置使用 readers/writers，接口使用 callers，均复用同一套内存 ACL 查询与主体匹配规则；不建立可动态编辑的 SQL ACL 表。
 
-当前 `forest-util::acl` 已实现读、写、调用三种许可的内存表及只读 `check` 查询，`forest-config` 已实现 SQLite 数据存储。配置 `Declaration` 尚未携带访问规则，Manifest 解析、宿主鉴权和 Wasm 入口也尚未实现；现有原生 Store 不能直接作为未经鉴权的模块接口。
+当前 `forest-util::acl` 已实现读、写、调用三种许可的内存表及只读 `check` 查询，`forest-config` 已实现 SQLite 数据存储。配置 Store 的 Declaration 不携带访问规则；Manifest 将规则编译为 ACL，宿主鉴权和 Wasm 入口已接入；现有原生 Store 不能直接作为未经鉴权的模块接口。
 
 ## 1. 规则属于目标配置
 
-每个配置项的完整声明包含路径、Schema、必填默认值和访问规则。概念类型如下，完整 SDK 接入尚未实现；包内文本表示见[Manifest 设计](07-module-manifest.md)：
+每个配置项的完整声明包含路径、Schema、必填默认值和访问规则。概念类型如下，实际 SDK 见[运行说明](13-runtime-and-sdk.md)；包内文本表示见[Manifest 设计](07-module-manifest.md)：
 
 ```rust
 struct ConfigDeclaration {
@@ -133,4 +133,4 @@ let allowed: bool = acl.check(
 | 配置存储 | 校验值并执行 SQLite 原子读写，不认证模块、不推测操作来源 |
 | UI | 展示宿主返回的可见配置并提交操作，不承担最终鉴权 |
 
-纯 ACL 类型及查询已在 `forest-util::acl` 实现，外部声明编码见[Manifest 设计](07-module-manifest.md)。完整声明的接入、部署相关主体、跨模块入口上下文与热重载排空顺序仍需分别确定。接口调用许可已经由 access.callers 表达；具体群管理目标等参数约束仍由相应接口处理，不从配置读写权推导。
+纯 ACL 类型及查询已在 `forest-util::acl` 实现，外部声明见[Manifest 设计](07-module-manifest.md)，来源上下文、宿主入口和排空交接已接入[运行时](13-runtime-and-sdk.md)。通用代用户认证仍待设计。具体群管理目标等参数约束由相应接口处理，不从配置读写权推导。

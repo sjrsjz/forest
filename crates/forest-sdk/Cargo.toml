@@ -1,0 +1,10 @@
+[package]
+name = "forest-sdk"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+forest-protocol = { path = "../forest-protocol" }
+forest-serde = { path = "../forest-serde" }
+serde.workspace = true

@@ -6,6 +6,8 @@
 
 pub mod action;
 mod client;
+#[cfg(feature = "forest")]
+pub mod forest;
 pub mod message;
 pub mod response;
 

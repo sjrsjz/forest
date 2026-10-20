@@ -2,7 +2,7 @@
 
 本文确定插件包的外部静态声明 `manifest.json`。宿主读取文件即可了解对象令牌、工件、配置及 ACL、提供和使用的接口、宿主事件接收声明，无需执行 Wasm 才能取得这些信息。
 
-本文是设计约定。Manifest 类型、解析器、包加载器、模块运行时和 SDK 尚未实现。现有代码提供 Schema、Value、Token、内存 ACL 查询和 SQLite 配置存储。本阶段不设计自动生成工具、UI 配置、ABI 版本、版本协商或迁移分支。
+本文规定外部 Manifest。类型、解析器、加载器、运行时及基础 SDK 已实现，实际 API 和限制见[运行说明](13-runtime-and-sdk.md)。本阶段不设计自动生成工具、UI 配置、ABI 版本、版本协商或迁移分支。
 
 ## 1. 单例模块、对象与工件
 
@@ -118,7 +118,7 @@ ObjectId、InterfacePath、EventSourceId 与 EventPath 分别表达对象、接�
 
 同一对象内接口路径唯一，不同对象可以声明相同路径并采用不同的契约。仅凭接口路径不能全局定位服务；需要连同对象 Token 查询。路径层级只组织名称，不产生父接口、继承或访问权。数组位置不构成接口身份。
 
-接口路径是逻辑名称，不是 Rust 函数名、Wasm 导出符号或函数指针。到实际执行入口的映射由后续统一 ABI 确定；宿主建立内部路由，调用方不缓存目标的 Wasm 执行实例、函数地址或工件标识。
+接口路径是逻辑名称，不是 Rust 函数名、Wasm 导出符号或函数指针。实际入口使用[固定 ABI](13-runtime-and-sdk.md)，由 SDK 的类型化处理器表分派；调用方不缓存目标实例、函数地址或工件标识。
 
 ### 3.3 工件路径和发布标记
 
@@ -180,7 +180,7 @@ uses 逐项声明目标对象路径、目标接口路径，以及调用方预期
 
 声明依赖不自动取得配置、接口调用或平台管理权限。Manifest 解析不隐式安装或启动模块；加载管理根据显式启用集合和 uses 的模块目标计算静态加载闭包与卸载影响范围，不自动安装缺失包。宿主原生接口目标与事件源只核对能力可用，不产生同名 Wasm 插件依赖，见[事件与依赖设计](11-notifier-and-dependencies.md)。依赖环的启动策略另行确定。
 
-生命周期 create/destroy 由宿主控制，不放进 provides；两阶段都禁止 send/call，包括宿主原生服务对象。接口对 Wasm 导出的映射、调用内存交接仍由 ABI 设计确定，本文件不写函数指针或底层符号规则。
+生命周期 create/destroy 由宿主控制，不放进 provides；两阶段都禁止 send/call，包括宿主原生服务对象。导出和内存交接见[固定 ABI](13-runtime-and-sdk.md)，本文件不将函数指针或底层符号作为接口声明。
 
 ### 5.1 subscriptions
 
@@ -300,6 +300,6 @@ JSON 在读取边界解析一次，内部用 ObjectId、InterfacePath、Token、
 
 ## 9. 实现分层与范围
 
-声明类型应位于宿主与 Wasm 都能使用的纯类型层，复用 forest-serde 和 forest-util。依赖 SQLite 的 forest-config 消费配置声明，不成为插件声明库。具体 crate、接口到 Wasm 的映射 ABI、包归档和生成工具另行设计。
+声明类型位于宿主与 Wasm 共用的 forest-protocol，复用 forest-serde 和 forest-util。依赖 SQLite 的 forest-config 不成为插件声明库。ABI 及示例包工具见[运行说明](13-runtime-and-sdk.md)，归档分发和通用生成工具尚未实现。
 
 本文件不放 UI 配置、ABI 版本、数据迁移函数、线程数或调度期限；也不引入多实例命名、多 Bot 配置挂载、依赖槽位或全局接口路径注册。配置默认值/Schema 替换、代用户访问的入口上下文及排空细节继续见[访问声明](06-config-access.md)和[状态与热重载设计](02-state-access-and-reload.md)。

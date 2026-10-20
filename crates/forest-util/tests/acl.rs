@@ -19,6 +19,7 @@ fn exact_targets_deny_unknown_pairs_even_with_public_subject_rules() {
         access: AccessPolicy {
             readers: vec![SubjectPattern::Path("/**".parse().unwrap())],
             writers: vec![],
+            callers: vec![SubjectPattern::Path("/**".parse().unwrap())],
         },
     }])
     .unwrap();
@@ -28,21 +29,23 @@ fn exact_targets_deny_unknown_pairs_even_with_public_subject_rules() {
         (entity.clone(), path("/settings")),
         (path("/module/example/child"), key.clone()),
     ] {
-        for access in [Access::Read, Access::Write] {
+        for access in [Access::Read, Access::Write, Access::Call] {
             assert!(!acl.check(&subject, &target, &item, access));
         }
     }
     assert!(acl.check(&subject, &entity, &key, Access::Read));
     assert!(!acl.check(&subject, &entity, &key, Access::Write));
+    assert!(acl.check(&subject, &entity, &key, Access::Call));
     let empty = AclTable::default();
     assert!(!empty.check(&subject, &entity, &key, Access::Read));
+    assert!(!empty.check(&subject, &entity, &key, Access::Call));
 }
 
 #[test]
 fn self_module_binds_the_owner_and_write_does_not_imply_read() {
-    let owner = path("/module/first-instance");
-    let other = path("/module/second-instance");
-    let entity = path("/bot/example");
+    let owner = path("/module/first");
+    let other = path("/module/second");
+    let entity = path("/user/example");
     let key = path("/secret");
     let closed = path("/closed");
     let acl = AclTable::new([
@@ -53,6 +56,7 @@ fn self_module_binds_the_owner_and_write_does_not_imply_read() {
             access: AccessPolicy {
                 readers: vec![],
                 writers: vec![SubjectPattern::SelfModule],
+                callers: vec![],
             },
         },
         AclEntry {
@@ -62,16 +66,18 @@ fn self_module_binds_the_owner_and_write_does_not_imply_read() {
             access: AccessPolicy {
                 readers: vec![],
                 writers: vec![],
+                callers: vec![],
             },
         },
     ])
     .unwrap();
     assert!(acl.check(&owner, &entity, &key, Access::Write));
     assert!(!acl.check(&owner, &entity, &key, Access::Read));
+    assert!(!acl.check(&owner, &entity, &key, Access::Call));
     for subject in [&other, &entity, &Token::root(), &path("/system/admin")] {
         assert!(!acl.check(subject, &entity, &key, Access::Write));
     }
-    for access in [Access::Read, Access::Write] {
+    for access in [Access::Read, Access::Write, Access::Call] {
         assert!(!acl.check(&owner, &entity, &closed, access));
     }
 }
@@ -87,6 +93,10 @@ fn subjects_match_whole_paths_and_duplicate_targets_are_errors() {
         access: AccessPolicy {
             readers: vec![SubjectPattern::Path("/user/web/*".parse().unwrap())],
             writers: vec![SubjectPattern::Path("/module/tools/**".parse().unwrap())],
+            callers: vec![
+                SubjectPattern::SelfModule,
+                SubjectPattern::Path("/module/clients/*".parse().unwrap()),
+            ],
         },
     };
     let acl = AclTable::new([entry.clone()]).unwrap();
@@ -98,6 +108,14 @@ fn subjects_match_whole_paths_and_duplicate_targets_are_errors() {
         ("/module/tools/first/second", Access::Write, true),
         ("/module/tools-extra", Access::Write, false),
         ("/module/example", Access::Write, false),
+        ("/module/example", Access::Call, true),
+        ("/module/clients/first", Access::Call, true),
+        ("/module/clients/first", Access::Read, false),
+        ("/module/clients/first", Access::Write, false),
+        ("/module/clients/first/child", Access::Call, false),
+        ("/module/clients-extra/first", Access::Call, false),
+        ("/module/tools", Access::Call, false),
+        ("/user/web/operator", Access::Call, false),
     ] {
         assert_eq!(acl.check(&path(subject), &entity, &key, access), expected);
     }
@@ -123,10 +141,13 @@ fn typed_segments_need_no_string_conversion_or_default() {
         access: AccessPolicy {
             readers: vec![SubjectPattern::Path(TokenPattern::exact(reader.clone()))],
             writers: vec![SubjectPattern::SelfModule],
+            callers: vec![SubjectPattern::SelfModule],
         },
     }])
     .unwrap();
     assert!(acl.check(&reader, &owner, &key, Access::Read));
     assert!(!acl.check(&reader, &owner, &key, Access::Write));
     assert!(acl.check(&owner, &owner, &key, Access::Write));
+    assert!(acl.check(&owner, &owner, &key, Access::Call));
+    assert!(!acl.check(&reader, &owner, &key, Access::Call));
 }

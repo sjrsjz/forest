@@ -1,22 +1,23 @@
 # Forest 设计文档
 
-本目录记录 Rust 新主线的设计与实现边界。当前已实现序列化库、令牌路径工具、内存 ACL 查询、SQLite 配置存储和独立 OneBot API 库；运行时文档记录讨论所得的设计方向，不代表相关功能已经存在。
+本目录记录 Rust 新主线设计与实现边界。当前已实现调度核心、基础 SDK、静态 ACL、配置及 OneBot 接入。实际启动、ABI 和未覆盖范围见[运行与 SDK](13-runtime-and-sdk.md)。
 
-| 文档 | 内容 | 状态 |
-|---|---|---|
-| [序列化说明](serialization.md) | Forest 序列化移植、转换语义与限制 | 已实现 |
-| [模块运行时架构](01-module-runtime.md) | 微内核职责、插件包、实例、接口与通信 | 设计记录 |
-| [状态与访问详细设计](02-state-access-and-reload.md) | 宿主状态表、来源路径、ACL、UI 与热重载交接 | 设计记录 |
-| [来源令牌与路径匹配](03-token.md) | 可信来源与群作用域、泛型路径、通配符、文本格式 | 路径与匹配已实现，宿主绑定及授权待实现 |
-| [OneBot v11 API 库](04-onebot-v11.md) | 现有库评估、38 个公开 API、异步传输、原始事件结构与单账号接入 | API 类型及原生 HTTP 已实现，宿主接入与事件传输未实现 |
-| [配置表实现](05-config-table.md) | 必填默认值、Token 寻址、异步事务、SQLite 与可读 JSON | SQLite 持久化已实现，宿主鉴权接入未实现 |
-| [配置与接口访问声明（ACL）](06-config-access.md) | readers/writers/callers、默认拒绝、静态元数据与热重载边界 | Read/Write/Call 查询已实现，声明接入及宿主鉴权待实现 |
-| [模块 Manifest 详细设计](07-module-manifest.md) | 单例对象、外部 JSON 声明、配置与 ACL、两端路径接口、稳定寻址与热重载 | 设计约定，类型和加载器待实现；本阶段不含 UI 和 ABI 版本 |
-| [模块宿主接口](08-host-interfaces.md) | send/call、单项配置、专用 I/O、日志与时间、错误及生命周期边界 | 接口设计，调度语义见下文；Wasm ABI 与生命周期待完善 |
-| [模块调度](09-scheduling.md) | 任务推进、被动与主动让出、实例执行权、接口重入限制、排队与唤醒 | 调度语义已明确，运行时与 SDK 待实现；不含死锁处理 |
-| [模块生命周期](10-module-lifecycle.md) | RAII、create 通信禁令、三种卸载方式、destroy 白名单、trap 与资源释放 | 设计约定，运行时待实现 |
-| [宿主事件 notifier 与静态依赖](11-notifier-and-dependencies.md) | 宿主事件、Manifest 接收声明、调度器投递、模块依赖与生命周期 | 设计约定，声明解析及 notifier 待实现 |
-| [调度器状态机与所有权](12-scheduler-state-machine.md) | 六个模块阶段、独占推进、接口许可、一次性结算、唤醒与交错审查 | 状态模型及不变量已整理，执行驱动器与 SDK 待实现 |
+| 文档 | 状态 |
+|---|---|
+| [序列化](serialization.md) | 已实现 |
+| [模块运行时架构](01-module-runtime.md) | 核心已实现 |
+| [状态、访问与重载](02-state-access-and-reload.md) | 已实现，声明变更策略仍受限 |
+| [Token 与通配符](03-token.md) | 路径及宿主来源绑定已实现 |
+| [OneBot API 与宿主接入](04-onebot-v11.md) | HTTP/WS 和群消息已接入 |
+| [配置表](05-config-table.md) | SQLite 与受限入口已实现 |
+| [静态 ACL](06-config-access.md) | 声明及宿主检查已接入 |
+| [外部 Manifest](07-module-manifest.md) | 类型及加载器已实现 |
+| [宿主接口](08-host-interfaces.md) | 基础 SDK 与导入已实现 |
+| [模块调度](09-scheduling.md) | 独占推进、两种让出及重入已实现 |
+| [生命周期](10-module-lifecycle.md) | 三种卸载与资源交接已实现 |
+| [notifier 与依赖](11-notifier-and-dependencies.md) | 静态转发及装卸计划已实现 |
+| [状态机与所有权](12-scheduler-state-machine.md) | 已实现，关键交错经真实 Wasm 验证 |
+| [运行与 SDK](13-runtime-and-sdk.md) | 实际命令、ABI、范围及验证 |
 
 文档中的“待定”表示尚未形成决定。编写对应实现前应继续讨论，不能把示例名称或先前提案直接固定为接口。
 

@@ -2,7 +2,7 @@
 
 本文明确正常卸载、热重载及 trap 后的处理。采用 RAII 风格：create 建立实例内部状态并取得资源，正常退出运行 destroy，宿主最终释放属于该执行实例的资源。不迁移 Wasm 内存、Future、调用栈或连接，不引入卸载超时或自动升级卸载方式。
 
-本文是设计，运行时尚未实现。调度与主动让出的精确定义见[调度设计](09-scheduling.md)，调用结果与接纳错误见[运行时架构](01-module-runtime.md)。
+本文规定生命周期语义，当前实现见[运行与 ABI](13-runtime-and-sdk.md)。调度与主动让出的精确定义见[调度设计](09-scheduling.md)，调用结果与接纳错误见[运行时架构](01-module-runtime.md)。
 
 阶段转换收敛为 Creating、Serving、Stopping、Destroying、Releasing、Failed，具体载荷、入口规则及所有权证明见[调度器状态机](12-scheduler-state-machine.md)。重载是停止后的明确去向，不另叠加 reloading 布尔值。
 

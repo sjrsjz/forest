@@ -82,6 +82,6 @@ WAL 运行期间可能存在 `-wal`、`-shm` 文件。查看器可正常读取�
 
 配置访问采用插件声明自身条目可读、可写主体的方式，访问规则属于装载元数据，不新增 SQL ACL 表，也不放进可普通写入的配置项。具体规则见[配置访问声明](06-config-access.md)。`forest-util::acl` 已提供独立内存表和 `check`；当前 `Declaration` 尚未包含这些访问规则，SQLite 中的 Schema 和默认值不是授权依据。
 
-宿主鉴权、ACL 检查、Wasm 导入、生命周期限制和配置生效通知尚未接入。后续运行时必须在授权边界调用 Store；只读入口不能通过间接调用获得写入能力。原生 Store 的整表访问、导出、导入与实体管理不能原样开放给模块或 UI。热重载保留 Store 和已有数据，不重新注册或覆盖实体；规则随所属声明交接，具体排空与声明变更流程另行设计。
+宿主鉴权、ACL、Wasm 导入和生命周期限制已接入；配置生效通知尚未实现。运行时在授权边界调用 Store；只读入口不能通过间接调用获得写入能力。原生 Store 的整表访问、导出、导入与实体管理不能原样开放给模块或 UI。热重载保留 Store 和已有数据，不重新注册或覆盖实体；规则随所属声明交接，具体排空与声明变更流程另行设计。
 
 异步驱动行为参见 [tokio-rusqlite](https://docs.rs/tokio-rusqlite/latest/tokio_rusqlite/)，读写并发和 WAL 说明参见 [SQLite WAL](https://www.sqlite.org/wal.html)。

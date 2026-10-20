@@ -17,6 +17,8 @@
 
 mod path;
 mod pattern;
+#[cfg(feature = "serde")]
+mod serde;
 mod text;
 
 pub use path::Token;
