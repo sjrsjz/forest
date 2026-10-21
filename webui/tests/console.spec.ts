@@ -1,0 +1,72 @@
+import { test, expect } from '@playwright/test'
+
+const password = process.env.FOREST_TEST_WEB_PASSWORD || 'admin'
+
+test('real console: authentication, runtime stream, dependency SVG and config inspection', async ({
+  page,
+}) => {
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  const unauthorized = await page.request.get('/api/inspect/snapshot')
+  expect(unauthorized.status()).toBe(401)
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: '进入调试台' })).toBeEnabled()
+  await page.getByLabel('管理口令').fill('incorrect-password')
+  await page.getByRole('button', { name: '进入调试台' }).click()
+  await expect(page.getByRole('alert')).toContainText('管理口令不正确')
+  await page.getByLabel('管理口令').fill(password)
+  await page.getByRole('button', { name: '进入调试台' }).click()
+  await expect(page.getByText('实时更新', { exact: true })).toBeVisible()
+  await expect(page.locator('.workspace-heading h1')).toHaveText('Forest Test')
+  await expect(page.locator('.stats-strip')).toContainText('占用请求名额')
+  const firstSample = await page.locator('.sample-time').textContent()
+  await expect.poll(() => page.locator('.sample-time').textContent()).not.toBe(firstSample)
+  await page.screenshot({ path: 'test-results/runtime.png' })
+
+  await page.getByRole('button', { name: '依赖关系', exact: true }).click()
+  await expect(page.locator('.graph-svg svg')).toBeVisible()
+  await expect(page.locator('.graph-svg')).toContainText('/module/forest-test')
+  await expect(page.locator('.graph-svg')).toContainText('/core/onebot')
+  await expect(page.locator('.graph-svg')).toContainText('/send_group_message')
+  await expect(page.locator('.graph-view [role=alert]')).toHaveCount(0)
+  await page.screenshot({ path: 'test-results/dependencies.png' })
+  const graphId = await page.locator('.graph-svg svg').getAttribute('id')
+  const secondSample = await page.locator('.sample-time').textContent()
+  await expect.poll(() => page.locator('.sample-time').textContent()).not.toBe(secondSample)
+  expect(await page.locator('.graph-svg svg').getAttribute('id')).toBe(graphId)
+
+  await page.getByRole('button', { name: '配置表', exact: true }).click()
+  await expect(page.locator('.config-key.active')).toContainText('/state/replies')
+  await expect(page.locator('.entry-value .value-scalar')).toContainText('i64')
+  const result = await page.request.get(
+    '/api/inspect/config-entry?object=/module/forest-test&key=/state/replies',
+  )
+  const entry = await result.json()
+  await expect(page.locator('.entry-value pre')).toHaveText(entry.data.current.text)
+  await page.getByRole('button', { name: '默认值', exact: true }).click()
+  await expect(page.locator('.entry-value pre')).toHaveText('0')
+  await page.getByRole('button', { name: 'Schema', exact: true }).click()
+  await expect(page.locator('.schema-text')).toContainText('i64')
+  await page.getByRole('button', { name: '当前值', exact: true }).click()
+  await page.screenshot({ path: 'test-results/configuration.png' })
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('link', { name: '下载完整值' }).click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toBe('forest-value.txt')
+  await page.getByLabel('自动刷新').check()
+  await expect.poll(() => page.request.get('/api/session').then((r) => r.status())).toBe(204)
+  await page.setViewportSize({ width: 1280, height: 720 })
+  const layout = await page.evaluate(() => ({
+    height: document.documentElement.scrollHeight,
+    width: document.documentElement.scrollWidth,
+    viewportHeight: innerHeight,
+    viewportWidth: innerWidth,
+  }))
+  expect(layout.height).toBeLessThanOrEqual(layout.viewportHeight)
+  expect(layout.width).toBeLessThanOrEqual(layout.viewportWidth)
+  await page.screenshot({ path: 'test-results/desktop-1280.png' })
+  await page.getByRole('button', { name: '退出', exact: true }).click()
+  await expect(page.getByRole('button', { name: '进入调试台' })).toBeVisible()
+  expect((await page.request.get('/api/inspect/snapshot')).status()).toBe(401)
+  expect(errors).toEqual([])
+})

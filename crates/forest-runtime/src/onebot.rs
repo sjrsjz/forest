@@ -86,6 +86,7 @@ impl OneBotIngress {
         struct Header {
             post_type: Option<String>,
             message_type: Option<String>,
+            group_id: Option<i64>,
         }
         let header: Header = serde_json::from_slice(bytes)?;
         if header.post_type.as_deref() != Some("message")
@@ -96,13 +97,16 @@ impl OneBotIngress {
                 rejected: vec![],
             });
         }
-        let event: GroupMessage = serde_json::from_slice(bytes)?;
-        if !self.groups.contains(&event.group_id) {
+        if !header
+            .group_id
+            .is_some_and(|group| self.groups.contains(&group))
+        {
             return Ok(IngressReport {
                 accepted: 0,
                 rejected: vec![],
             });
         }
+        let event: GroupMessage = serde_json::from_slice(bytes)?;
         let origin: Token = format!("/user/onebot/{}", event.user_id).parse()?;
         let results = self.scheduler.notify(
             &contract::OBJECT.parse()?,

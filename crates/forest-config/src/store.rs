@@ -38,6 +38,10 @@ impl ReadView<'_> {
     pub fn entries(&self, entity: &Token) -> Result<Vec<(Token, Entry)>, ConfigError> {
         sql::entries(self.connection, entity)
     }
+
+    pub fn headers(&self, entity: &Token) -> Result<Vec<crate::EntryHeader>, ConfigError> {
+        sql::headers(self.connection, entity)
+    }
 }
 
 impl ConfigStore {

@@ -1,0 +1,14 @@
+import { defineConfig } from '@playwright/test'
+
+export default defineConfig({
+  testDir: './tests',
+  workers: 1,
+  timeout: 30_000,
+  use: {
+    baseURL: process.env.FOREST_CONSOLE_URL || 'http://127.0.0.1:3210',
+    viewport: { width: 1440, height: 900 },
+    browserName: 'chromium',
+    channel: 'msedge',
+    headless: true,
+  },
+})

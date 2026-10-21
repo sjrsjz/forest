@@ -86,7 +86,7 @@ Drain 完成截止前的旧集合；AtYield 等当前推进交回后中断其他
 
 替换保留已发布接口及输入/输出契约。当前不支持更改配置 Schema、默认值或键集合；提交候选前拒绝此类变化，不做隐式转换。ACL 随新声明切换；create 使用自己的候选规则，外部仍看到旧规则，直到 Serving 时整体发布。已接纳请求不追溯重新鉴权。
 
-trap 后保留 Failed 槽位，回收实例，不自动重启；外部可 load 恢复或 unload 移除。CLI 只加载指定包；库已提供热重载 API，尚无文件监视和管理 UI。
+trap 后保留 Failed 槽位，回收实例，不自动重启；外部可 load 恢复或 unload 移除。CLI 只加载指定包；库已提供热重载 API。[只读调试台](14-inspection-webui.md)提供状态和配置观测，尚无装卸 UI 和文件监视。
 
 ## 4. 固定 ABI
 
@@ -143,4 +143,4 @@ cargo test --workspace --all-features --locked
 
 集成测试编译真实 Wasm，使用两个代码不同、契约相同的候选。覆盖类型化调用、ACL、非重入与重入交错、自唤醒和组合 Future、容量、三种卸载方式、代码替换、trap、单线程执行器下的抢占、配置恢复和延迟 SQLite 写入交接、文件隔离、HTTP/WS，以及实际 CLI 的群消息到 OneBot 回执。自动测试流量只进入本地模拟服务。
 
-宿主当前注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`；独立 API 库中的其他 action 尚未逐一映射为原生接口。Agent、记忆系统、WebUI、包分发、配置变更通知、默认值/Schema 更新策略也尚未实现，它们不参与当前 hello world 包与核心验证。
+宿主当前注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`；独立 API 库中的其他 action 尚未逐一映射为原生接口。可选 WebUI 已提供只读观测。Agent、记忆系统、包分发、配置变更通知、默认值/Schema 更新策略尚未实现，它们不参与当前 hello world 包与核心验证。

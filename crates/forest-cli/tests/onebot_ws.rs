@@ -50,6 +50,13 @@ async fn executable_receives_group_command_and_correlates_onebot_receipt() {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
         initialized.await.unwrap();
+        for group in [7, 42] {
+            let unsupported = serde_json::json!({"post_type":"message","message_type":"group","sub_type":"normal","group_id":group,"message":[{"type":"unrecognized_extension","data":{}}]});
+            socket
+                .send(Message::Text(unsupported.to_string().into()))
+                .await
+                .unwrap();
+        }
         let event = serde_json::json!({"time":1,"self_id":10,"post_type":"message","message_type":"group","sub_type":"normal","message_id":1,"group_id":42,"user_id":20,"anonymous":null,
             "message":[{"type":"text","data":{"text":"#forest-test"}}],"raw_message":"#forest-test","sender":{"user_id":20,"nickname":"test"}});
         socket

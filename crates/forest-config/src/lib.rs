@@ -32,7 +32,7 @@ mod snapshot;
 mod sql;
 mod store;
 
-pub use entry::{Change, Declaration, Entry, Key};
+pub use entry::{Change, Declaration, Entry, EntryHeader, Key};
 pub use snapshot::{EntitySnapshot, EntrySnapshot, Snapshot};
 pub use store::{ConfigStore, ReadView};
 

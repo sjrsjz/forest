@@ -17,6 +17,19 @@ mod websocket;
 #[derive(Parser)]
 #[command(name="forest",about="Forest Wasm microkernel and OneBot host",group(ArgGroup::new("ingress").required(true).args(["reverse_ws","events_ws"])))]
 struct Arguments {
+    #[cfg(feature = "webui")]
+    #[arg(long, help = "Enable the read-only host console on this address")]
+    webui: Option<SocketAddr>,
+    #[cfg(feature = "webui")]
+    #[arg(
+        long,
+        default_value = "FOREST_WEB_PASSWORD",
+        help = "Environment variable containing the console password"
+    )]
+    web_password_env: String,
+    #[cfg(feature = "webui")]
+    #[arg(long, default_value = "webui/dist", help = "Built Vue console assets")]
+    webui_assets: PathBuf,
     #[arg(long, default_value = "packages/forest-test")]
     package: PathBuf,
     #[arg(long, default_value = "data/forest.sqlite3")]
@@ -97,6 +110,24 @@ async fn main() -> Result<()> {
         },
     )
     .await?;
+    #[cfg(feature = "webui")]
+    let console = if let Some(address) = args.webui {
+        let password = std::env::var(&args.web_password_env)
+            .with_context(|| format!("missing environment variable {}", args.web_password_env))?;
+        let server = forest_webui::Console::bind(
+            scheduler.inspector(),
+            forest_webui::Options {
+                address,
+                password,
+                assets: args.webui_assets,
+            },
+        )
+        .await?;
+        eprintln!("Forest console at http://{}", server.address());
+        Some(server)
+    } else {
+        None
+    };
     let package = scheduler.package(&args.package).await?;
     let object = package.manifest().package.id.clone();
     let mut forward = if let Some(url) = args.events_ws {
@@ -152,8 +183,18 @@ async fn main() -> Result<()> {
             _ => unreachable!("CLI validates ingress selection"),
         }
     };
-    let result =
-        tokio::select! {result=connection=>result,signal=tokio::signal::ctrl_c()=>{signal?;Ok(())}};
+    let web = async {
+        #[cfg(feature = "webui")]
+        if let Some(console) = console {
+            return console.serve(std::future::pending()).await;
+        }
+        std::future::pending::<Result<()>>().await
+    };
+    let result = tokio::select! {
+        result=connection=>result,
+        result=web=>result,
+        signal=tokio::signal::ctrl_c()=>{signal?;Ok(())}
+    };
     scheduler.shutdown(args.shutdown_mode.into()).await?;
     result
 }
@@ -236,8 +277,8 @@ where
 {
     while let Some(message) = socket.next().await {
         match message? {
-            Message::Text(text) => report(ingress.receive(text.as_bytes())?),
-            Message::Binary(bytes) => report(ingress.receive(&bytes)?),
+            Message::Text(text) => dispatch_event(ingress, text.as_bytes()),
+            Message::Binary(bytes) => dispatch_event(ingress, &bytes),
             Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
             Message::Close(_) => break,
             Message::Pong(_) | Message::Frame(_) => {}
@@ -248,5 +289,11 @@ where
 fn report(report: onebot::IngressReport) {
     for (object, error) in report.rejected {
         eprintln!("host event rejected by {object}: {error}");
+    }
+}
+fn dispatch_event(ingress: &OneBotIngress, bytes: &[u8]) {
+    match ingress.receive(bytes) {
+        Ok(result) => report(result),
+        Err(error) => eprintln!("OneBot event rejected before admission: {error}"),
     }
 }

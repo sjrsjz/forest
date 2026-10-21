@@ -18,6 +18,7 @@
 | [notifier 与依赖](11-notifier-and-dependencies.md) | 静态转发及装卸计划已实现 |
 | [状态机与所有权](12-scheduler-state-machine.md) | 已实现，关键交错经真实 Wasm 验证 |
 | [运行与 SDK](13-runtime-and-sdk.md) | 实际命令、ABI、范围及验证 |
+| [宿主调试台与实时观测](14-inspection-webui.md) | Vue/TypeScript、只读 Inspector、SSE、声明依赖图及管理员完整配置查看已实现 |
 
 文档中的“待定”表示尚未形成决定。编写对应实现前应继续讨论，不能把示例名称或先前提案直接固定为接口。
 

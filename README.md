@@ -4,6 +4,8 @@ Rust + Wasm Bot 微内核。当前已实现调度器核心、基础 SDK、配置
 
 当前设计面向单个 Bot 账号，可处理多个群聊；不预设多 Bot 实体、账号路由或按 Bot 挂载配置。
 
+已提供 Vue + TypeScript [宿主调试台](doc/14-inspection-webui.md)：实时模块状态、声明依赖图及完整配置只读查看，供受信管理员使用。构建与启动方法见该文档。
+
 ```text
 crates/
   forest-serde/          Schema、Value、类型转换与文本语法
@@ -14,7 +16,9 @@ crates/
   forest-protocol/       Manifest、调度错误、ABI 和宿主操作数据
   forest-sdk/            类型化处理器、来宾 Future 与固定导出
   forest-runtime/        Wasmtime、调度、生命周期、ACL、I/O、notifier
+  forest-webui/          可选只读 Inspector HTTP/SSE 适配与管理员会话
   forest-cli/            可执行宿主与 OneBot HTTP/WebSocket 接入
+webui/                  Vue、TypeScript、Mermaid 前端，构建产物为 dist
 plugins/forest-test/     #forest-test 示例模块与打包程序
 packages/forest-test/    生成的外部 Manifest 与 module.wasm
 data/                   默认运行数据，不进入 Git

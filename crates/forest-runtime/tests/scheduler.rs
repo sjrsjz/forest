@@ -222,6 +222,14 @@ async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
         0,
         "create communication was rejected as data before native execution"
     );
+    let inspected = scheduler.inspector().snapshot().unwrap();
+    assert_eq!(inspected.modules.len(), 2);
+    assert_eq!(inspected.hosts.len(), 1);
+    assert_eq!(inspected.modules[0].published.version, "1");
+    assert!(matches!(
+        inspected.modules[0].lifecycle,
+        forest_runtime::LifecycleSnapshot::Serving { .. }
+    ));
     assert_eq!(
         call::<_, String>(&scheduler, "/module/probe-a", "/echo", &"typed".to_owned()).await,
         "typed"
@@ -290,6 +298,12 @@ async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
     assert!(matches!(full, Err(DispatchError::QueueFull)));
     assert!(active.await.unwrap().unwrap().is_ok());
     reload.await.unwrap().unwrap();
+    assert_eq!(
+        scheduler.inspector().snapshot().unwrap().modules[0]
+            .published
+            .version,
+        "2"
+    );
     assert_eq!(deferred.await.unwrap(), 2);
     assert_eq!(
         call::<_, i64>(&scheduler, "/module/probe-a", "/increment", &()).await,

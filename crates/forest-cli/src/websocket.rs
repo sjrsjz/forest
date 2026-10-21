@@ -79,7 +79,7 @@ where
                 let header:Envelope=serde_json::from_slice(&bytes)?;
                 if let Some(echo)=header.echo{
                     if let Some(reply)=pending.remove(&echo){let _=reply.send(bytes);}
-                }else{super::report(ingress.receive(&bytes)?);}
+                }else{super::dispatch_event(ingress,&bytes);}
             }
         }
     }

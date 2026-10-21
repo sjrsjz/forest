@@ -5,6 +5,13 @@ use forest_util::token::Token;
 
 use crate::ConfigError;
 
+/// Listing metadata deliberately excludes defaults and current values.
+#[derive(Clone, Debug)]
+pub struct EntryHeader {
+    pub key: Token,
+    pub schema: Schema,
+}
+
 /// A declaration always includes a checked default. Fields cannot be replaced
 /// through ordinary value writes.
 #[derive(Clone, Debug)]

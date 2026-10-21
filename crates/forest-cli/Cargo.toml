@@ -4,12 +4,17 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+default = ["webui"]
+webui = ["dep:forest-webui"]
+
 [[bin]]
 name = "forest"
 path = "src/main.rs"
 
 [dependencies]
 forest-runtime = { path = "../forest-runtime" }
+forest-webui = { path = "../forest-webui", optional = true }
 forest-protocol = { path = "../forest-protocol" }
 forest-onebot = { path = "../forest-onebot", features = ["http", "forest"] }
 tokio.workspace = true

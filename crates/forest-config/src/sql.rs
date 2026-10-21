@@ -197,6 +197,27 @@ pub(crate) fn entries(
     .collect()
 }
 
+pub(crate) fn headers(
+    connection: &Connection,
+    entity: &Token,
+) -> Result<Vec<crate::EntryHeader>, ConfigError> {
+    require_entity(connection, entity)?;
+    let mut statement = connection.prepare_cached(
+        "SELECT path, schema_json FROM config_entries WHERE entity = ?1 ORDER BY path",
+    )?;
+    let rows = statement.query_map([entity.to_string()], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.map(|row| {
+        let (key, schema) = row?;
+        Ok(crate::EntryHeader {
+            key: parse(key)?,
+            schema: serde_json::from_str(&schema)?,
+        })
+    })
+    .collect()
+}
+
 pub(crate) fn write(
     connection: &Connection,
     entity: &Token,

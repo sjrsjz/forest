@@ -10,6 +10,10 @@ mod ready;
 mod services;
 mod wasm;
 
+pub use core::inspection::{
+    BudgetView, HostSnapshot, InspectError, Inspector, InstanceView, InterfaceView,
+    LifecycleSnapshot, ModuleSnapshot, ReleaseView, RuntimeSnapshot, SubscriptionView, UseView,
+};
 pub use core::{
     EventDefinition, ModulePhase, NativeInterface, RuntimeOptions, Scheduler, StopMode,
 };
