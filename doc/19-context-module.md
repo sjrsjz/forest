@@ -40,6 +40,8 @@ Recall 只是给已有内容加上“这是召回资料”的标记。这里复�
 
 Context 不接收 RecallRegion、图、分数或种子标记。检索侧在自己的结果中保留这些信息，调用方选好单元后逐项包成 Recall，按希望发送的次序交付。召回标记属于格式化输入，不加入持久 MemoryContent 枚举，也不使召回结果变成新的记忆单元。
 
+Agent 对每条 @ 分别召回，把其 Recall 项放在对应 GroupMessage 前，例如 `Content(普通消息) → Recall(历史资料) → Content(@消息)`。同一输入批次可以包含多组这样的项。Context 仅按传入顺序格式化，不扫描 @、合并召回或把它们集中移动到上下文开头；触发与位置规则见[Agent 设计](20-agent-state-and-window.md#21-每条触发消息的召回位置)。
+
 返回值就是 messages，不附带裁剪方案、召回种子集合或 ContextView。调用方使用现有 Provider 请求类型：
 
 ```rust

@@ -24,6 +24,8 @@
 | [向量化 Wasm 模块](17-embedding-module.md) | 已实现；JSON 浮点载荷、热重载、真实图文批量调用已验证 |
 | [OpenAI 兼容 Provider](18-openai-provider.md) | 已实现；模块配置模型与连接、图片能力声明、原生 function 工具及完整响应 |
 | [上下文格式化模块](19-context-module.md) | 已实现；单一 format 入口，可配置 Agent 提示词，原生角色、CQ/图片及热重载经实际 Wasm 验证 |
+| [Agent 状态与窗口裁剪](20-agent-state-and-window.md) | 已制定设计；每群静默/工作两态、最新持续点、工作期只追加、高低水位整块裁剪 |
+| [Agent、Memory 与数据库边界](21-agent-storage-boundary.md) | 按模块令牌分配专用 SQLite 的设计；Wasm 持有数据模型，宿主执行通用存储操作，接口待实现 |
 
 文档中的“待定”表示尚未形成决定。编写对应实现前应继续讨论，不能把示例名称或先前提案直接固定为接口。
 
