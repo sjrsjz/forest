@@ -1,5 +1,6 @@
-//! Optional host adapter. Its only runtime handle is the read-only Inspector.
+//! Optional host console with separate inspection and lifecycle capabilities.
 mod auth;
+mod management;
 mod value;
 
 use anyhow::{Context, Result};
@@ -15,7 +16,7 @@ use axum::{
     routing::get,
 };
 use forest_protocol::Token;
-use forest_runtime::{InspectError, Inspector, RuntimeSnapshot};
+use forest_runtime::{InspectError, Inspector, ModuleManager, RuntimeSnapshot};
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -33,6 +34,7 @@ pub struct Options {
     pub address: SocketAddr,
     pub password: String,
     pub assets: PathBuf,
+    pub packages: PathBuf,
 }
 pub struct Console {
     listener: TcpListener,
@@ -44,12 +46,17 @@ pub struct Console {
 #[derive(Clone)]
 struct App {
     inspector: Inspector,
+    packages: management::Packages,
     snapshots: Arc<watch::Receiver<Arc<RuntimeSnapshot>>>,
     closing: watch::Receiver<()>,
 }
 
 impl Console {
-    pub async fn bind(inspector: Inspector, options: Options) -> Result<Self> {
+    pub async fn bind(
+        inspector: Inspector,
+        manager: ModuleManager,
+        options: Options,
+    ) -> Result<Self> {
         anyhow::ensure!(
             options.assets.join("index.html").is_file(),
             "WebUI assets missing; run pnpm --dir webui install && pnpm --dir webui build"
@@ -59,6 +66,7 @@ impl Console {
         let (closing, closed) = watch::channel(());
         let app = App {
             inspector: inspector.clone(),
+            packages: management::Packages::new(&options.packages, manager).await?,
             snapshots: Arc::new(receiver),
             closing: closed,
         };
@@ -70,7 +78,8 @@ impl Console {
             .route("/config-entry", get(entry))
             .route("/config-value", get(download))
             .route_layer(middleware::from_fn_with_state(auth.clone(), auth::protect))
-            .with_state(app);
+            .with_state(app.clone());
+        let modules = management::routes(auth.clone()).with_state(app);
         let session = Router::new()
             .route(
                 "/session",
@@ -79,6 +88,7 @@ impl Console {
             .with_state(auth);
         let router = Router::new()
             .nest("/api/inspect", api)
+            .nest("/api/modules", modules)
             .nest("/api", session)
             .fallback_service(ServeDir::new(options.assets))
             .layer(DefaultBodyLimit::max(4096))

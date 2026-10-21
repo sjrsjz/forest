@@ -4,7 +4,7 @@ Rust + Wasm Bot 微内核。当前已实现调度器核心、基础 SDK、配置
 
 当前设计面向单个 Bot 账号，可处理多个群聊；不预设多 Bot 实体、账号路由或按 Bot 挂载配置。
 
-已提供 Vue + TypeScript [宿主调试台](doc/14-inspection-webui.md)：实时模块状态、声明依赖图及完整配置只读查看，供受信管理员使用。构建与启动方法见该文档。
+已提供 Vue + TypeScript [宿主调试台](doc/14-inspection-webui.md)：实时模块状态、声明依赖图、完整配置只读查看，以及本地包加载、热重载和卸载。构建与启动方法见该文档。
 
 ```text
 crates/
@@ -16,7 +16,7 @@ crates/
   forest-protocol/       Manifest、调度错误、ABI 和宿主操作数据
   forest-sdk/            类型化处理器、来宾 Future 与固定导出
   forest-runtime/        Wasmtime、调度、生命周期、ACL、I/O、notifier
-  forest-webui/          可选只读 Inspector HTTP/SSE 适配与管理员会话
+  forest-webui/          可选 Inspector HTTP/SSE、受限模块管理与管理员会话
   forest-cli/            可执行宿主与 OneBot HTTP/WebSocket 接入
 webui/                  Vue、TypeScript、Mermaid 前端，构建产物为 dist
 plugins/forest-test/     #forest-test 示例模块与打包程序
@@ -51,6 +51,6 @@ OneBot 使用方式见 [API 库说明](crates/forest-onebot/README.md)，选型�
 
 [宿主事件 notifier 与静态依赖设计](doc/11-notifier-and-dependencies.md)明确宿主产生事件，Manifest 只用 subscriptions 声明接收入口，调度器按注册表投递；模块没有事件发布接口。模块加载依赖与宿主事件支持分开检查，不提供运行时订阅增删接口。
 
-[调度器状态机与所有权](doc/12-scheduler-state-machine.md)细化六个模块阶段、Idle/Advancing 执行权、接口许可、请求额度、一次性结果出口及唤醒规则。不变量依靠状态构造和所有权转移保持；集成测试使用真实 Wasm 验证并发、抢占、热重载与 SQLite 写入交接。Agent、记忆系统和 WebUI 尚未实现。
+[调度器状态机与所有权](doc/12-scheduler-state-machine.md)细化六个模块阶段、Idle/Advancing 执行权、接口许可、请求额度、一次性结果出口及唤醒规则。不变量依靠状态构造和所有权转移保持；集成测试使用真实 Wasm 验证并发、抢占、热重载与 SQLite 写入交接。Agent、记忆系统尚未实现。
 
 旧 Python 实现及旧设计文档位于 `archive/python-2026-10-19`，最后快照为 `2d560a69`。其他旧分支及 worktree 快照分别保存在 `archive/master-2026-10-19`、`archive/control-payloads-2026-10-19`、`archive/shell-contracts-2026-10-19`。旧文档不再指导新主线实现。

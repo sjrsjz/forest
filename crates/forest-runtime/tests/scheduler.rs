@@ -499,6 +499,255 @@ async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let scheduler = Scheduler::in_memory(RuntimeOptions {
+        data_directory: temp.path().join("data"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let observations = observe(&scheduler);
+    scheduler
+        .register_native(NativeInterface::new(
+            "/core/variance".parse().unwrap(),
+            "/variance".parse().unwrap(),
+            true,
+            callers(vec![SubjectPattern::Path("/module/**".parse().unwrap())]),
+            |_, input: i64| async move { if input < 0 { Err(9i32) } else { Ok(7i32) } },
+        ))
+        .unwrap();
+    scheduler
+        .register_event(forest_runtime::EventDefinition {
+            source: "/core/variance-events".parse().unwrap(),
+            event: "/number".parse().unwrap(),
+            input: i32::as_schema(),
+        })
+        .unwrap();
+    let object = "/module/variance-provider";
+    let mut candidates = Vec::new();
+    for (second, name) in [(false, "variance-old"), (true, "variance-new")] {
+        let path = package(temp.path(), name, object, second);
+        let mut declaration: Manifest =
+            serde_json::from_slice(&std::fs::read(path.join("manifest.json")).unwrap()).unwrap();
+        let interface = declaration
+            .provides
+            .iter_mut()
+            .find(|i| i.path.to_string() == "/variance")
+            .unwrap();
+        if !second {
+            interface.input = i32::as_schema();
+            interface.output = <Result<i64, i64>>::as_schema();
+        }
+        interface.access = callers(vec![
+            SubjectPattern::Path("/user/test".parse().unwrap()),
+            SubjectPattern::Path("/module/variance-consumer".parse().unwrap()),
+            SubjectPattern::Path("/core/variance-events".parse().unwrap()),
+        ]);
+        declaration.subscriptions.push(EventSubscription {
+            source: "/core/variance-events".parse().unwrap(),
+            event: "/number".parse().unwrap(),
+            interface: "/variance".parse().unwrap(),
+        });
+        std::fs::write(
+            path.join("manifest.json"),
+            serde_json::to_vec(&declaration).unwrap(),
+        )
+        .unwrap();
+        candidates.push(scheduler.package(&path).await.unwrap());
+    }
+    let first = candidates.remove(0);
+    let second = candidates.remove(0);
+    let caller = "/module/variance-consumer";
+    let path = package(temp.path(), "variance-caller", caller, false);
+    let mut declaration: Manifest =
+        serde_json::from_slice(&std::fs::read(path.join("manifest.json")).unwrap()).unwrap();
+    for target in [object, "/core/variance"] {
+        declaration.uses.push(InterfaceUse {
+            object: target.parse().unwrap(),
+            interface: "/variance".parse().unwrap(),
+            input: i32::as_schema(),
+            output: <Result<i64, i64>>::as_schema(),
+        });
+    }
+    std::fs::write(
+        path.join("manifest.json"),
+        serde_json::to_vec(&declaration).unwrap(),
+    )
+    .unwrap();
+    let consumer = scheduler.package(&path).await.unwrap();
+    scheduler.load(first.clone()).await.unwrap();
+    scheduler.load(consumer.clone()).await.unwrap();
+    assert_eq!(
+        call::<_, i64>(&scheduler, caller, "/use-native-variance", &1i32).await,
+        7
+    );
+    assert_eq!(
+        call::<_, i64>(&scheduler, caller, "/use-native-variance", &-1i32).await,
+        -9
+    );
+    assert_eq!(
+        call::<_, i64>(&scheduler, caller, "/use-variance", &1i32).await,
+        7
+    );
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/increment", &()).await,
+        1
+    );
+
+    // A request admitted under the old contract executes on the new instance.
+    let offset = observations.count();
+    let active_scheduler = scheduler.clone();
+    let active =
+        tokio::spawn(
+            async move { call::<_, i64>(&active_scheduler, object, "/serial", &200i64).await },
+        );
+    observations.until(offset + 1).await;
+    let reload_scheduler = scheduler.clone();
+    let reload =
+        tokio::spawn(async move { reload_scheduler.reload(second, StopMode::Drain).await });
+    phase(&scheduler, object, ModulePhase::Stopping).await;
+    let deferred_scheduler = scheduler.clone();
+    let deferred = tokio::spawn(async move {
+        call::<_, i64>(&deferred_scheduler, caller, "/use-variance", &-1i32).await
+    });
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while scheduler
+            .inspector()
+            .snapshot()
+            .unwrap()
+            .modules
+            .iter()
+            .find(|m| m.object.to_string() == object)
+            .unwrap()
+            .queued_next
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    active.await.unwrap();
+    reload.await.unwrap().unwrap();
+    assert_eq!(deferred.await.unwrap(), -9);
+    assert_eq!(
+        call::<_, i32>(&scheduler, object, "/variance", &i64::MAX).await,
+        7
+    );
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/increment", &()).await,
+        2
+    );
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/implementation", &()).await,
+        2
+    );
+    // Existing and newly loaded users can both keep the broader expected output.
+    scheduler
+        .unload(&caller.parse().unwrap(), StopMode::Drain)
+        .await
+        .unwrap();
+    scheduler.load(consumer).await.unwrap();
+    assert_eq!(
+        call::<_, i64>(&scheduler, caller, "/use-variance", &1i32).await,
+        7
+    );
+    let notifications = scheduler.notify(
+        &"/core/variance-events".parse().unwrap(),
+        &"/number".parse().unwrap(),
+        "/user/test".parse().unwrap(),
+        &1i32,
+    );
+    assert_eq!(notifications.len(), 1);
+    assert!(notifications[0].1.is_ok());
+
+    // Reverting would narrow inputs and widen outputs. No stop mode bypasses it.
+    let offset = observations.count();
+    let active_scheduler = scheduler.clone();
+    let active =
+        tokio::spawn(
+            async move { call::<_, i64>(&active_scheduler, object, "/serial", &200i64).await },
+        );
+    observations.until(offset + 1).await;
+    let before = scheduler
+        .inspector()
+        .snapshot()
+        .unwrap()
+        .modules
+        .into_iter()
+        .find(|m| m.object.to_string() == object)
+        .unwrap();
+    let forest_runtime::LifecycleSnapshot::Serving { instance: before } = before.lifecycle else {
+        panic!("serving instance")
+    };
+    for mode in [StopMode::Drain, StopMode::AtYield, StopMode::Force] {
+        let error = scheduler.reload(first.clone(), mode).await.unwrap_err();
+        assert!(error.to_string().contains("/variance"));
+        let after = scheduler
+            .inspector()
+            .snapshot()
+            .unwrap()
+            .modules
+            .into_iter()
+            .find(|m| m.object.to_string() == object)
+            .unwrap();
+        let forest_runtime::LifecycleSnapshot::Serving { instance: after } = after.lifecycle else {
+            panic!("rejected replacement changed phase")
+        };
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.release.version, "2");
+    }
+    active.await.unwrap();
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/destroyed", &()).await,
+        1
+    );
+
+    // A guest that lies about a narrowed output must fail even for a deferred
+    // request that was admitted while the old, broader contract was published.
+    let path = temp.path().join("variance-new");
+    let mut declaration: Manifest =
+        serde_json::from_slice(&std::fs::read(path.join("manifest.json")).unwrap()).unwrap();
+    declaration
+        .provides
+        .iter_mut()
+        .find(|i| i.path.to_string() == "/implementation")
+        .unwrap()
+        .output = <Result<i32, String>>::as_schema();
+    std::fs::write(
+        path.join("manifest.json"),
+        serde_json::to_vec(&declaration).unwrap(),
+    )
+    .unwrap();
+    let dishonest = scheduler.package(&path).await.unwrap();
+    let offset = observations.count();
+    let active_scheduler = scheduler.clone();
+    let active =
+        tokio::spawn(
+            async move { call::<_, i64>(&active_scheduler, object, "/serial", &200i64).await },
+        );
+    observations.until(offset + 1).await;
+    let reload_scheduler = scheduler.clone();
+    let reload =
+        tokio::spawn(async move { reload_scheduler.reload(dishonest, StopMode::Drain).await });
+    phase(&scheduler, object, ModulePhase::Stopping).await;
+    let result = scheduler
+        .call::<_, Result<i64, String>>(
+            "/user/test".parse().unwrap(),
+            object.parse().unwrap(),
+            "/implementation".parse().unwrap(),
+            &(),
+        )
+        .await;
+    assert!(matches!(result, Err(DispatchError::OutputContract)));
+    active.await.unwrap();
+    reload.await.unwrap().unwrap();
+    phase(&scheduler, object, ModulePhase::Failed).await;
+    scheduler.shutdown(StopMode::Drain).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn force_waits_for_submitted_sqlite_write_before_recreating_instance() {
     let temp = tempfile::tempdir().unwrap();
     let store = forest_config::ConfigStore::open(temp.path().join("config.sqlite3"))

@@ -71,7 +71,8 @@ Ctrl+C 默认 Drain，可用 `--shutdown-mode yield` 或 `force` 显式选择。
 | 操作 | 行为 |
 |---|---|
 | package(directory) | 读取 Manifest、编译 Wasm、校验固定导出与私有内存 |
-| plan_load(packages, roots) | 纯计划，给出依赖闭包及依赖优先顺序 |
+| plan_manifests(manifests, roots) | 仅从声明给出依赖优先顺序，不编译 Wasm |
+| plan_load(packages, roots) | 复用相同规划，返回编译包闭包及依赖优先顺序 |
 | load_roots(packages, roots) | 明确执行计划，依赖先初始化 |
 | load(package) | 单包装载，依赖必须已在目录中 |
 | reload(package, mode) | 以稳定对象身份交接，新请求留给候选 |
@@ -84,9 +85,9 @@ Ctrl+C 默认 Drain，可用 `--shutdown-mode yield` 或 `force` 显式选择。
 
 Drain 完成截止前的旧集合；AtYield 等当前推进交回后中断其他旧请求；Force 中断原推进并跳过所有来宾析构。三者都等待已提交的本地 SQL/文件操作实际结束，之后才创建新实例，避免旧写入追上新状态。已接纳的下游调用不递归撤销，远端效果不回滚。
 
-替换保留已发布接口及输入/输出契约。当前不支持更改配置 Schema、默认值或键集合；提交候选前拒绝此类变化，不做隐式转换。ACL 随新声明切换；create 使用自己的候选规则，外部仍看到旧规则，直到 Serving 时整体发布。已接纳请求不追溯重新鉴权。
+替换保留已发布接口，按 `old.input <: new.input`、`new.output <: old.output` 检查函数子类型；完整 Result 输出包含错误分支。加载依赖采用相同方向：`uses.input <: provides.input`、`provides.output <: uses.output`。不兼容候选在停止旧实例前拒绝，适用于全部停止方式。交接请求执行时绑定新实例的输出 Schema，正常调用也使用同一子类型关系检查 uses。当前不支持更改配置 Schema、默认值或键集合；配置仍要求等价。ACL 随新声明切换；create 使用自己的候选规则，外部仍看到旧规则，直到 Serving 时整体发布。已接纳请求不追溯重新鉴权。
 
-trap 后保留 Failed 槽位，回收实例，不自动重启；外部可 load 恢复或 unload 移除。CLI 只加载指定包；库已提供热重载 API。[只读调试台](14-inspection-webui.md)提供状态和配置观测，尚无装卸 UI 和文件监视。
+trap 后保留 Failed 槽位，回收实例，不自动重启；外部可 load 恢复或 unload 移除。CLI 启动时加载指定包；[宿主调试台](14-inspection-webui.md)通过独立 ModuleManager 能力提供本地包装载、三种模式的重载与卸载，以及显式 Force。管理操作不提供任意模块调用或配置写入。尚无文件监视。
 
 ## 4. 固定 ABI
 
@@ -143,4 +144,4 @@ cargo test --workspace --all-features --locked
 
 集成测试编译真实 Wasm，使用两个代码不同、契约相同的候选。覆盖类型化调用、ACL、非重入与重入交错、自唤醒和组合 Future、容量、三种卸载方式、代码替换、trap、单线程执行器下的抢占、配置恢复和延迟 SQLite 写入交接、文件隔离、HTTP/WS，以及实际 CLI 的群消息到 OneBot 回执。自动测试流量只进入本地模拟服务。
 
-宿主当前注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`；独立 API 库中的其他 action 尚未逐一映射为原生接口。可选 WebUI 已提供只读观测。Agent、记忆系统、包分发、配置变更通知、默认值/Schema 更新策略尚未实现，它们不参与当前 hello world 包与核心验证。
+宿主当前注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`；独立 API 库中的其他 action 尚未逐一映射为原生接口。CLI 的 OneBot callers 仍只授权启动根包的对象，加载其他对象不隐式扩大该原生接口的权限。可选 WebUI 已提供观测和模块装卸。Agent、记忆系统、包分发、配置变更通知、默认值/Schema 更新策略尚未实现，它们不参与当前 hello world 包与核心验证。

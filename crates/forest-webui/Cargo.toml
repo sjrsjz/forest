@@ -21,5 +21,6 @@ subtle = "2.6.1"
 getrandom = "0.3.4"
 
 [dev-dependencies]
+forest-scheduler-probe = { path = "../forest-runtime/tests/fixtures/probe" }
 tempfile = "3.23.0"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "stream", "rustls-tls"] }

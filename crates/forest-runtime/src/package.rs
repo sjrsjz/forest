@@ -138,10 +138,11 @@ impl Package {
                 .provides
                 .iter()
                 .find(|new| new.path == old.path)
-                .context("replacement removes interface")?;
+                .with_context(|| format!("replacement removes interface {}", old.path))?;
             ensure!(
-                equivalent(&old.input, &new.input) && equivalent(&old.output, &new.output),
-                "replacement changes interface contract"
+                new.satisfies(&old.input, &old.output),
+                "incompatible replacement for interface {}: previous input must be a subtype of new input, new output must be a subtype of previous output",
+                old.path
             );
         }
         ensure!(

@@ -70,6 +70,24 @@ impl Module for Probe {
             .with("/http".parse().unwrap(), true, policy(), Self::http)
             .with("/ws".parse().unwrap(), true, policy(), Self::ws)
             .with(
+                "/variance".parse().unwrap(),
+                false,
+                policy(),
+                Self::variance,
+            )
+            .with(
+                "/use-variance".parse().unwrap(),
+                true,
+                policy(),
+                Self::use_variance,
+            )
+            .with(
+                "/use-native-variance".parse().unwrap(),
+                true,
+                policy(),
+                Self::use_native_variance,
+            )
+            .with(
                 "/atomic-write".parse().unwrap(),
                 false,
                 policy(),
@@ -99,6 +117,32 @@ impl Module for Probe {
 forest_sdk::export_module!(super::Probe);
 
 impl Probe {
+    async fn variance(self: Rc<Self>, _: CallContext, input: i64) -> Result<i32, i32> {
+        if input < 0 { Err(9) } else { Ok(7) }
+    }
+    async fn use_variance(self: Rc<Self>, _: CallContext, input: i32) -> Result<i64, String> {
+        Self::variance_call("/module/variance-provider", input).await
+    }
+    async fn use_native_variance(
+        self: Rc<Self>,
+        _: CallContext,
+        input: i32,
+    ) -> Result<i64, String> {
+        Self::variance_call("/core/variance", input).await
+    }
+    async fn variance_call(object: &str, input: i32) -> Result<i64, String> {
+        let response: Result<i64, i64> = host::call(
+            object.parse().unwrap(),
+            "/variance".parse().unwrap(),
+            &input,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(match response {
+            Ok(value) => value,
+            Err(value) => -value,
+        })
+    }
     async fn echo(self: Rc<Self>, _: CallContext, input: String) -> Result<String, String> {
         Ok(input)
     }

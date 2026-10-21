@@ -18,7 +18,7 @@ mod websocket;
 #[command(name="forest",about="Forest Wasm microkernel and OneBot host",group(ArgGroup::new("ingress").required(true).args(["reverse_ws","events_ws"])))]
 struct Arguments {
     #[cfg(feature = "webui")]
-    #[arg(long, help = "Enable the read-only host console on this address")]
+    #[arg(long, help = "Enable the host console on this address")]
     webui: Option<SocketAddr>,
     #[cfg(feature = "webui")]
     #[arg(
@@ -30,6 +30,13 @@ struct Arguments {
     #[cfg(feature = "webui")]
     #[arg(long, default_value = "webui/dist", help = "Built Vue console assets")]
     webui_assets: PathBuf,
+    #[cfg(feature = "webui")]
+    #[arg(
+        long,
+        default_value = "packages",
+        help = "Local package directory managed by the console"
+    )]
+    packages_directory: PathBuf,
     #[arg(long, default_value = "packages/forest-test")]
     package: PathBuf,
     #[arg(long, default_value = "data/forest.sqlite3")]
@@ -116,10 +123,12 @@ async fn main() -> Result<()> {
             .with_context(|| format!("missing environment variable {}", args.web_password_env))?;
         let server = forest_webui::Console::bind(
             scheduler.inspector(),
+            scheduler.module_manager(),
             forest_webui::Options {
                 address,
                 password,
                 assets: args.webui_assets,
+                packages: args.packages_directory,
             },
         )
         .await?;

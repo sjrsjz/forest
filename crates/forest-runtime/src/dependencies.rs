@@ -64,10 +64,21 @@ pub(crate) fn dependents(directory: &Directory, object: &Token) -> Vec<Token> {
 }
 
 impl Scheduler {
+    /// Plan from external declarations without compiling or executing Wasm.
+    pub fn plan_manifests(&self, available: &[Manifest], roots: &[Token]) -> Result<Vec<Token>> {
+        let mut candidates = HashMap::new();
+        for manifest in available {
+            let id = manifest.package.id.clone();
+            ensure!(
+                candidates.insert(id.clone(), manifest).is_none(),
+                "duplicate candidate object {id}"
+            );
+        }
+        plan(&self.core.directory.lock().unwrap(), candidates, roots)
+    }
     /// Returns a dependency-first plan for the explicitly enabled roots.
     /// Packages already present in the directory are left in place.
     pub fn plan_load(&self, available: Vec<Package>, roots: &[Token]) -> Result<Vec<Package>> {
-        let directory = self.core.directory.lock().unwrap();
         let mut candidates = HashMap::new();
         for package in available {
             let id = package.manifest().package.id.clone();
@@ -76,35 +87,14 @@ impl Scheduler {
                 "duplicate candidate object"
             );
         }
-        let mut selected = HashMap::new();
-        let mut pending = roots.to_vec();
-        while let Some(id) = pending.pop() {
-            if selected.contains_key(&id)
-                || directory
-                    .slots
-                    .get(&id)
-                    .is_some_and(|slot| !matches!(slot.state, State::Failed(_)))
-            {
-                continue;
-            }
-            let package = candidates
-                .get(&id)
-                .with_context(|| format!("missing package {id}"))?;
-            for dependency in &package.manifest().uses {
-                if dependency.object != id
-                    && !directory.has_native(&dependency.object, &dependency.interface)
-                {
-                    pending.push(dependency.object.clone());
-                }
-            }
-            selected.insert(id, package.manifest());
-        }
-        let (mut active, mut done, mut sequence) = (HashSet::new(), HashSet::new(), Vec::new());
-        for root in roots {
-            if selected.contains_key(root) {
-                visit(root, &selected, &mut active, &mut done, &mut sequence)?;
-            }
-        }
+        let sequence = plan(
+            &self.core.directory.lock().unwrap(),
+            candidates
+                .iter()
+                .map(|(id, p)| (id.clone(), p.manifest()))
+                .collect(),
+            roots,
+        )?;
         Ok(sequence
             .into_iter()
             .map(|id| candidates.remove(&id).unwrap())
@@ -127,4 +117,41 @@ impl Scheduler {
         }
         Ok(())
     }
+}
+
+fn plan(
+    directory: &Directory,
+    candidates: HashMap<Token, &Manifest>,
+    roots: &[Token],
+) -> Result<Vec<Token>> {
+    let mut selected = HashMap::new();
+    let mut pending = roots.to_vec();
+    while let Some(id) = pending.pop() {
+        if selected.contains_key(&id)
+            || directory
+                .slots
+                .get(&id)
+                .is_some_and(|slot| !matches!(slot.state, State::Failed(_)))
+        {
+            continue;
+        }
+        let manifest = *candidates
+            .get(&id)
+            .with_context(|| format!("missing package {id}"))?;
+        for dependency in &manifest.uses {
+            if dependency.object != id
+                && !directory.has_native(&dependency.object, &dependency.interface)
+            {
+                pending.push(dependency.object.clone());
+            }
+        }
+        selected.insert(id, manifest);
+    }
+    let (mut active, mut done, mut sequence) = (HashSet::new(), HashSet::new(), Vec::new());
+    for root in roots {
+        if selected.contains_key(root) {
+            visit(root, &selected, &mut active, &mut done, &mut sequence)?;
+        }
+    }
+    Ok(sequence)
 }

@@ -18,7 +18,10 @@
 | [notifier 与依赖](11-notifier-and-dependencies.md) | 静态转发及装卸计划已实现 |
 | [状态机与所有权](12-scheduler-state-machine.md) | 已实现，关键交错经真实 Wasm 验证 |
 | [运行与 SDK](13-runtime-and-sdk.md) | 实际命令、ABI、范围及验证 |
-| [宿主调试台与实时观测](14-inspection-webui.md) | Vue/TypeScript、只读 Inspector、SSE、声明依赖图及管理员完整配置查看已实现 |
+| [宿主调试台与模块管理](14-inspection-webui.md) | Vue/TypeScript、Inspector、SSE、依赖图、配置查看及受限本地包管理已实现 |
+| [多主干多模态记忆模型](15-memory-model.md) | 已整理设计，尚未实现；OneBot 单元、归档集合、跨主干联想与并发语义 |
+| [Qwen VL 与记忆设施](16-memory-infrastructure.md) | 2048 维 VL 接口已实测；SQLite 与 Qdrant 的记忆设施待实现 |
+| [向量化 Wasm 模块](17-embedding-module.md) | 已实现；JSON 浮点载荷、热重载、真实图文批量调用已验证 |
 
 文档中的“待定”表示尚未形成决定。编写对应实现前应继续讨论，不能把示例名称或先前提案直接固定为接口。
 

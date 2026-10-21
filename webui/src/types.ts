@@ -1,4 +1,5 @@
 export type Phase = 'creating' | 'serving' | 'stopping' | 'destroying' | 'releasing' | 'failed'
+export type StopMode = 'drain' | 'at_yield' | 'force'
 export interface Release {
   version: string
   name: string | null
@@ -13,7 +14,7 @@ export type Lifecycle =
   | {
       phase: 'stopping'
       instance: Instance
-      mode: 'drain' | 'at_yield' | 'force'
+      mode: StopMode
       replacement: Release | null
     }
   | { phase: 'destroying' | 'releasing'; instance: Instance; replacement: Release | null }
@@ -49,6 +50,21 @@ export interface Snapshot {
   memory_limit_bytes: number
   modules: Module[]
   hosts: Host[]
+}
+export interface Manifest {
+  package: { id: string; version: string; name?: string; description?: string }
+  module: string
+  configs: { key: string; schema: unknown; default: unknown; access: unknown }[]
+  provides: { path: string; input: unknown; output: unknown; reentrant: boolean; access: unknown }[]
+  uses: { object: string; interface: string; input: unknown; output: unknown }[]
+  subscriptions: { source: string; event: string; interface: string }[]
+}
+export type LocalPackage =
+  | { status: 'ready'; directory: string; manifest: Manifest }
+  | { status: 'invalid'; directory: string; message: string }
+export interface LoadPlan {
+  object: string
+  order: { directory: string; manifest: Manifest }[]
 }
 export interface Timed<T> {
   read_at_ms: number

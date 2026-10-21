@@ -65,10 +65,12 @@ async fn authenticated_inspection_is_read_only_and_stream_closes_on_shutdown() {
         .unwrap();
     let console = Console::bind(
         scheduler.inspector(),
+        scheduler.module_manager(),
         Options {
             address: "127.0.0.1:0".parse().unwrap(),
             password: "test-admin".into(),
             assets: temp.path().into(),
+            packages: temp.path().into(),
         },
     )
     .await

@@ -6,6 +6,7 @@ import { phaseLabel, time } from './types'
 import ModuleOverview from './components/ModuleOverview.vue'
 import DependencyGraph from './components/DependencyGraph.vue'
 import ConfigPanel from './components/ConfigPanel.vue'
+import ModuleManagement from './components/ModuleManagement.vue'
 
 const session = ref<'checking' | 'out' | 'in'>('checking')
 const password = ref('')
@@ -17,6 +18,31 @@ const search = ref('')
 const phase = ref<Phase | ''>('')
 const selected = ref('')
 const tab = ref<'status' | 'graph' | 'config'>('status')
+const managementOpen = ref(false)
+const managementIntent = ref<'load' | 'reload' | 'unload'>('load')
+const managementTarget = ref('')
+function manage(intent: 'load' | 'reload' | 'unload') {
+  managementIntent.value = intent
+  managementTarget.value = intent === 'load' ? '' : selected.value
+  managementOpen.value = true
+}
+function acceptSnapshot(next: Snapshot) {
+  snapshot.value = next
+  if (
+    !next.modules.some((m) => m.object === selected.value) &&
+    !next.hosts.some((h) => h.object === selected.value)
+  )
+    selected.value = next.modules[0]?.object ?? next.hosts[0]?.object ?? ''
+}
+async function managed(object: string) {
+  try {
+    const next = await request<Snapshot>('/api/inspect/snapshot')
+    if (object) selected.value = object
+    acceptSnapshot(next)
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 401) session.value = 'out'
+  }
+}
 const selectedModule = computed(() =>
   snapshot.value?.modules.find((m) => m.object === selected.value),
 )
@@ -81,20 +107,15 @@ async function logout() {
 watch(session, (state, _, cleanup) => {
   if (state !== 'in') {
     snapshot.value = null
+    managementOpen.value = false
     return
   }
   connection.value = 'connecting'
   const source = new EventSource('/api/inspect/events')
   let verifying = false
   source.addEventListener('snapshot', (event: MessageEvent<string>) => {
-    const next = JSON.parse(event.data) as Snapshot
-    snapshot.value = next
+    acceptSnapshot(JSON.parse(event.data) as Snapshot)
     connection.value = 'live'
-    if (
-      !next.modules.some((m) => m.object === selected.value) &&
-      !next.hosts.some((h) => h.object === selected.value)
-    )
-      selected.value = next.modules[0]?.object ?? next.hosts[0]?.object ?? ''
   })
   source.onerror = async () => {
     connection.value = 'retrying'
@@ -167,6 +188,7 @@ onMounted(checkSession)
           <option value="">全部生命周期</option>
           <option v-for="(label, key) in phaseLabel" :key="key" :value="key">{{ label }}</option>
         </select>
+        <button class="package-open" @click="manage('load')">本地包</button>
       </div>
       <div class="sidebar-objects scroll-area">
         <div class="sidebar-heading">
@@ -225,9 +247,20 @@ onMounted(checkSession)
             <h1>{{ title }}</h1>
             <code class="object-path">{{ selected || '尚无登记对象' }}</code>
           </div>
-          <span v-if="selectedModule" class="phase-badge" :class="selectedModule.lifecycle.phase">
-            {{ phaseLabel[selectedModule.lifecycle.phase] }}
-          </span>
+          <div v-if="selectedModule" class="module-actions">
+            <span class="phase-badge" :class="selectedModule.lifecycle.phase">
+              {{ phaseLabel[selectedModule.lifecycle.phase] }}
+            </span>
+            <button
+              :disabled="selectedModule.lifecycle.phase !== 'serving'"
+              @click="manage('reload')"
+            >
+              重载
+            </button>
+            <button @click="manage('unload')">
+              {{ ['serving', 'failed'].includes(selectedModule.lifecycle.phase) ? '卸载' : '管理' }}
+            </button>
+          </div>
           <span v-else-if="selectedHost" class="phase-badge registered">已注册</span>
         </div>
         <nav class="tabs" aria-label="对象视图">
@@ -259,5 +292,15 @@ onMounted(checkSession)
         <strong>等待宿主快照</strong>
       </div>
     </main>
+    <ModuleManagement
+      v-if="snapshot"
+      :open="managementOpen"
+      :intent="managementIntent"
+      :target="managementTarget"
+      :snapshot="snapshot"
+      @close="managementOpen = false"
+      @updated="managed"
+      @expired="session = 'out'"
+    />
   </div>
 </template>

@@ -54,7 +54,9 @@ pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
         let mut held = Vec::new();
         for task in retired {
             instance.mailbox.retire(task.signal.id);
-            let Started { request, permit } = task.started;
+            let Started {
+                request, permit, ..
+            } = task.started;
             let crate::core::Request {
                 outcome, admission, ..
             } = request;
@@ -136,7 +138,7 @@ async fn run_guest(
             Ok(Step::Pending) => {
                 tasks.insert(task.signal.id, task);
             }
-            Ok(Step::Output(value)) if value.check(&task.started.request.output, false) => {
+            Ok(Step::Output(value)) if value.check(&task.started.output, false) => {
                 instance.operations.finish_task(task.signal.id).await;
                 instance.mailbox.retire(task.signal.id);
                 core.complete(instance, task.started, Ok(value));
@@ -169,7 +171,9 @@ async fn run_guest(
     let mut held = Vec::new();
     for (_, task) in tasks {
         instance.mailbox.retire(task.signal.id);
-        let Started { request, permit } = task.started;
+        let Started {
+            request, permit, ..
+        } = task.started;
         let crate::core::Request {
             outcome, admission, ..
         } = request;

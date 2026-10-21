@@ -1,8 +1,8 @@
-# 宿主调试台与只读运行观测
+# 宿主调试台与模块管理
 
 状态：第一版已实现。控制台供受信管理员使用，可以查看完整配置，包括仅允许 SelfModule 读取的项；普通模块与用户的 ACL 语义保持不变。
 
-第一版展示模块实时状态、声明依赖关系、配置表内容。运行时仍是状态权威，WebUI 是可选的宿主适配层。
+调试台展示模块实时状态、声明依赖关系、配置表内容，并提供本地包加载、重载和卸载入口。运行时仍是状态权威，WebUI 是可选的宿主适配层。
 
 ## 1. 边界
 
@@ -18,9 +18,9 @@ flowchart LR
     Snapshot --> Web
 ```
 
-Web 层只持有 Inspector，不持有 Scheduler 的装卸、调用能力，也不取得可写 ConfigStore。Inspector 由宿主构造，提供固定的读取方法；模块 SDK 不提供该能力，模块 send/call 不能寻址它。
+Web 层持有两个独立能力：Inspector 只读观测，ModuleManager 执行包读取、依赖规划及装卸；两者由宿主显式授予。Web 层不持有完整 Scheduler、模块调用能力或可写 ConfigStore。模块 SDK 不提供这两个管理能力，模块 send/call 不能寻址它们。
 
-观测不执行来宾代码、不遍历来宾内存、不恢复任务。控制台连接、读取和关闭不改变模块生命周期。先不增加装卸按钮、配置编辑、日志平台、模块自带 UI 或 Agent 页面。
+观测不执行来宾代码、不遍历来宾内存、不恢复任务。控制台连接、读取和关闭不改变模块生命周期。只有显式装卸请求可以执行生命周期代码。配置编辑、日志平台、模块自带 UI 和 Agent 页面另行设计。
 
 ## 2. 权限
 
@@ -34,7 +34,7 @@ Web 层只持有 Inspector，不持有 Scheduler 的装卸、调用能力，也�
 
 第一版采用单个宿主管理口令和会话，不建用户数据库或角色系统。口令由宿主启动配置提供；认证后用同源 HttpOnly 会话 Cookie 访问 HTTP/SSE，不把口令放入 URL。默认回环监听，远程访问可由用户配置受保护的入口。
 
-完整配置可能包含凭据，因此运行状态、配置列表和单项读取均置于认证边界内。静态资源不嵌入运行数据；数据响应不缓存。认证后的“可读全部”不授予写入、重置、调用模块或切换声明的权力。
+运行状态、配置读取、本地包列表和模块管理均置于认证边界内。静态资源不嵌入运行数据；数据响应不缓存。模块管理请求与登录一样检查同源。管理端口不提供配置写入、重置或任意模块调用。
 
 ## 3. 页面
 
@@ -137,11 +137,32 @@ SQLite 中已保存但当前没有加载模块的实体仍可查看，标注为�
 ## 6. 实施范围
 
 1. 在 forest-runtime 增加 Inspector 与只读快照 DTO；复用现有 State、Manifest、Budget 和 ConfigStore，不引入调度控制副本。
-2. 增加可选 forest-webui，承载认证、固定查询和 SSE，CLI 显式挂载。
+2. 增加可选 forest-webui，承载认证、固定查询、受限模块管理和 SSE，CLI 显式挂载。
 3. 实现 PC 页面与 Mermaid 依赖图，资源随程序分发。
 4. 验证读取不执行模块、不初始化数据；热重载时发布信息正确切换；慢客户端不积压；普通 Wasm 仍不能读取未授权配置。
 
 这一阶段不改变现有模块 ABI，不为 UI 注册新的 Wasm 接口，不停止正在正常服务的初号机。
+
+### 6.1 本地包与装卸入口
+
+宿主通过 `--packages-directory` 指定包根目录，默认 `packages`。控制台枚举其直接子目录中的 Manifest，不执行 Wasm、不缓存编译结果或维护第二份已加载目录。列表保留无效 Manifest 的具体错误；一个无关坏包不妨碍其他包加载。同一对象出现多个候选时拒绝有歧义的装载规划。
+
+包以根目录下的目录名选择，模块身份始终来自 Manifest 的 package.id。服务器限制路径在指定根目录内；接口不接受任意宿主文件路径。查看 Manifest 和依赖预览只读取声明；执行时才编译所需 Wasm。依赖顺序复用调度器的纯规划算法，执行时重新检查实际编译包和当前目录，不把预览视为预留。
+
+| 接口 | 行为 |
+|---|---|
+| GET /api/modules/packages | 列出本地包及完整 Manifest，坏包显示错误 |
+| POST /api/modules/plan | 按目录选择根包，返回依赖优先的装载顺序 |
+| POST /api/modules/load | 编译根包所需闭包，交给现有 load_roots |
+| POST /api/modules/reload | 指定目标对象、候选目录及 StopMode，执行现有 reload |
+| POST /api/modules/unload | 指定对象及 StopMode，执行现有 unload |
+| POST /api/modules/force | 显式中断初始化或升级已有停止过程 |
+
+加载不自动重载已有模块；恢复 Failed 对象使用 load。重载必须保持目标对象身份，契约、ACL 发布和配置恢复继续使用现有调度规则。卸载仍由调度器拒绝存在静态使用者的对象，不自动级联卸载。
+
+长操作的 HTTP 请求等待实际结算，浏览器同时通过原有 SSE 查看 Creating、Stopping、Destroying、Releasing 与 Serving。请求开始后由宿主持有执行 Future，浏览器断开不取消已提交的操作。不引入任务数据库、操作轮询或自动超时；Force 始终由管理员明确选择。各对象能否转换由原状态机决定，Web 层不复制可变生命周期。
+
+页面增加本地包抽屉：选择包、查看 Manifest、预览依赖顺序并加载。模块标题区提供重载与卸载入口，操作面板明确展示目标对象、候选版本和三种停止方式。界面只保留实际状态、错误和操作标签。
 
 ## 7. 构建和使用
 
@@ -166,6 +187,7 @@ cargo run -p forest-cli --locked -- --events-ws ws://127.0.0.1:8080 --allow-grou
 | --webui | 不提供时不启动 HTTP 服务；提供时指定监听地址 |
 | --web-password-env | FOREST_WEB_PASSWORD，读取管理口令的环境变量名 |
 | --webui-assets | webui/dist，前端构建目录，分发时与程序一起携带 |
+| --packages-directory | packages，WebUI 可管理的本地包根目录 |
 
 `forest-cli` 默认编译 webui feature，但仅显式传入 `--webui` 才启用。`cargo build -p forest-cli --no-default-features` 可完全不引入 Web 服务端依赖。Rust 编译本身不要求安装 Node；启用控制台时检查前端目录并给出缺少产物的提示。
 
@@ -175,9 +197,11 @@ cargo run -p forest-cli --locked -- --events-ws ws://127.0.0.1:8080 --allow-grou
 
 `forest-webui/tests/console.rs` 通过实际 HTTP 验证匿名拒绝、口令、会话、同源限制、私有配置读取、完整值下载、拒绝写方法、无来宾执行及 SSE 关闭收尾。运行时的真实 Wasm 测试核对 Inspector 在初始化和重载后的投影。
 
+`forest-webui/tests/management.rs` 使用真实的两份 Wasm 工件，验证仅声明预览、依赖优先装载、无关坏包隔离、身份检查、存在使用者时拒绝卸载，以及三种重载方式。Drain 等待期间断开 HTTP 请求后，再由 Force 完成替换；新代码返回不同实现标识，持久计数继续累加。
+
 ```sh
 cargo test -p forest-config -p forest-runtime -p forest-cli -p forest-webui --tests --locked
 pnpm --dir webui build
 ```
 
-浏览器验证连接一个已运行的真实实例，默认 `http://127.0.0.1:3210`，可用 `FOREST_CONSOLE_URL` 修改。设置 `FOREST_TEST_WEB_PASSWORD` 为该实例的管理口令后执行 `pnpm --dir webui test:e2e`；使用已安装的 Edge、一个工作进程，不发送群消息。覆盖登录、实时采样、SVG 标签、图不随无关计数重排、配置当前值/默认值/Schema、下载、登出及 1280×720 桌面布局。截图输出到已忽略的 `webui/test-results`。
+浏览器验证连接一个已运行的测试宿主，默认 `http://127.0.0.1:3210`，可用 `FOREST_CONSOLE_URL` 修改。设置 `FOREST_TEST_WEB_PASSWORD` 为该实例的管理口令后执行 `pnpm --dir webui test:e2e`；使用已安装的 Edge、一个工作进程，不发送群消息。覆盖登录、实时采样、SVG 标签、配置查看、下载、登出及 1280×720 桌面布局；模块管理用例会对 forest-test 执行重载、卸载和重新加载，并核对实例替换及计数保留。截图输出到已忽略的 `webui/test-results`。

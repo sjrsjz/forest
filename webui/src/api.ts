@@ -24,3 +24,10 @@ export async function request<T>(url: string, init: RequestInit = {}): Promise<T
 export function query(path: string, params: Record<string, string>): string {
   return `/api/inspect/${path}?${new URLSearchParams(params)}`
 }
+export function command<T = void>(action: string, input: object): Promise<T> {
+  return request<T>(`/api/modules/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}

@@ -57,6 +57,12 @@ pub(crate) async fn protect(
         )
             .into_response();
     }
+    if request.method() != axum::http::Method::GET
+        && request.method() != axum::http::Method::HEAD
+        && !same_origin(request.headers())
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     next.run(request).await
 }
 #[derive(Deserialize)]

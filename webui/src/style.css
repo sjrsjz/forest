@@ -154,6 +154,143 @@ h3 {
 .subtle {
   background: #f9fafc;
 }
+.danger-button {
+  color: #ad4148;
+  border-color: #ebc6c9;
+}
+.danger-button:hover {
+  background: #fff3f3;
+  border-color: #dca1a6;
+}
+.package-open {
+  width: 100%;
+  margin-top: 5px;
+  text-align: left;
+}
+.module-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.management-dialog {
+  position: fixed;
+  inset: 0 0 0 auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--line);
+  width: min(680px, 100vw);
+  max-width: 100vw;
+  height: 100dvh;
+  max-height: 100dvh;
+  color: inherit;
+  background: #fff;
+  box-shadow: -12px 0 50px #1c2d4a20;
+}
+.management-dialog::backdrop {
+  background: #14243840;
+}
+.management-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.management-heading,
+.management-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 24px;
+  flex-shrink: 0;
+}
+.management-heading {
+  border-bottom: 1px solid var(--line);
+}
+.management-heading h2 {
+  font-size: 17px;
+  margin: 0 0 5px;
+}
+.management-heading code {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.management-body {
+  flex: 1;
+  padding: 22px 24px;
+}
+.package-select {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--muted);
+  margin-bottom: 18px;
+}
+.package-summary {
+  padding: 20px 0 0;
+}
+.package-summary > code {
+  display: block;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+.package-summary .properties {
+  margin-top: 20px;
+}
+.package-summary .plain-list,
+.load-plan ol {
+  margin-bottom: 25px;
+  overflow-wrap: anywhere;
+}
+.manifest-text {
+  padding: 16px 0;
+}
+.load-plan {
+  border-top: 1px solid var(--line);
+  padding-top: 20px;
+}
+.load-plan li {
+  line-height: 2;
+}
+.stop-modes {
+  margin: 20px 0 0;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+.stop-modes label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.stop-modes code {
+  color: var(--muted);
+  margin-left: auto;
+}
+.management-footer {
+  border-top: 1px solid var(--line);
+  background: #fbfcfe;
+}
+.management-feedback {
+  min-width: 0;
+  max-height: 140px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.management-feedback p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.management-error {
+  color: #ad4148;
+}
+.management-success {
+  color: #328368;
+}
 .brand {
   display: flex;
   align-items: center;

@@ -71,7 +71,7 @@ struct EventSubscription {
 
 - source/event 对应宿主已经提供并启用的事件。
 - interface 存在于当前模块的 provides。
-- 宿主事件 Schema 与接收接口 input 双向 subof，结构等价；不自动转换或投影数据。
+- 宿主事件 Schema 必须是接收接口 input 的子类型；宿主传递原始 Forest Value，解码遵守既有数字提升、字段及前缀投影规则。
 - 接收接口的 access.callers 允许宿主登记的事件源主体调用，例如 `/core/onebot`；subscriptions 本身不授予调用权。
 - 同一 Manifest 不重复声明相同的 (source, event, interface)。
 

@@ -732,6 +732,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "forest-qwen-vl-embedding"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "forest-config",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "forest-runtime"
 version = "0.1.0"
 dependencies = [
@@ -828,6 +846,7 @@ dependencies = [
  "forest-config",
  "forest-protocol",
  "forest-runtime",
+ "forest-scheduler-probe",
  "forest-serde",
  "futures",
  "getrandom 0.3.4",

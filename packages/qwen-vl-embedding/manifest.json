@@ -1,0 +1,147 @@
+{
+  "package": {
+    "id": "/module/qwen-vl-embedding",
+    "version": "0.1.0",
+    "name": "Qwen VL Embedding",
+    "description": "Qwen3-VL-Embedding-8B, 2048 dimensions, L2 normalized"
+  },
+  "module": "module.wasm",
+  "configs": [
+    {
+      "key": "/connection",
+      "schema": [
+        {
+          "Record": {
+            "api_key": "String",
+            "endpoint": "String"
+          }
+        }
+      ],
+      "default": {
+        "Record": {
+          "api_key": {
+            "String": ""
+          },
+          "endpoint": {
+            "String": "https://api.siliconflow.cn/v1/embeddings"
+          }
+        }
+      },
+      "access": {
+        "readers": [
+          "SelfModule"
+        ],
+        "writers": [
+          {
+            "Path": "/user/admin"
+          }
+        ],
+        "callers": []
+      }
+    }
+  ],
+  "provides": [
+    {
+      "path": "/embed",
+      "input": [
+        {
+          "Array": {
+            "Variant": {
+              "Image": {
+                "Unnamed": [
+                  "String"
+                ]
+              },
+              "Text": {
+                "Unnamed": [
+                  "String"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Count": {
+                      "Named": {
+                        "actual": "I64",
+                        "expected": "I64"
+                      }
+                    },
+                    "Dimensions": {
+                      "Named": {
+                        "actual": "I64",
+                        "index": "I64"
+                      }
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Http": {
+                      "Named": {
+                        "request_id": {
+                          "Option": "String"
+                        },
+                        "status": "I32"
+                      }
+                    },
+                    "InvalidVector": {
+                      "Named": {
+                        "index": "I64"
+                      }
+                    },
+                    "ModelMismatch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotConfigured": {
+                      "Unnamed": []
+                    },
+                    "Response": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "json": "String"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": true,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/**"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    }
+  ],
+  "uses": [],
+  "subscriptions": []
+}

@@ -7,7 +7,7 @@ use crate::{
     Package, operations::Operations, package::AccessTables, ready::Mailbox, services::Services,
 };
 use anyhow::{Context, Result, ensure};
-use forest_protocol::{abi, manifest::equivalent, *};
+use forest_protocol::{abi, *};
 use forest_util::acl::{Access, AclEntry, AclTable};
 use std::{
     collections::{HashMap, VecDeque},
@@ -30,7 +30,7 @@ pub enum ModulePhase {
     Releasing,
     Failed,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopMode {
     Drain,
@@ -191,6 +191,7 @@ pub(crate) struct Live {
 pub(crate) struct Inbox {
     pub queue: VecDeque<Request>,
     pub gate: Gate,
+    pub output: Schema,
 }
 pub(crate) enum Gate {
     Parallel,
@@ -238,7 +239,6 @@ pub(crate) struct Admission {
 pub(crate) struct Request {
     pub invocation: Invocation,
     pub bytes: Vec<u8>,
-    pub output: Schema,
     pub admission: Admission,
     pub outcome: Outcome,
 }
@@ -249,6 +249,7 @@ pub(crate) enum Outcome {
 pub(crate) struct Started {
     pub request: Request,
     pub permit: InterfacePermit,
+    pub output: Schema,
 }
 
 impl Outcome {
@@ -323,6 +324,7 @@ impl Live {
                     d.path.clone(),
                     Inbox {
                         queue: VecDeque::new(),
+                        output: d.output.clone(),
                         gate: if d.reentrant {
                             Gate::Parallel
                         } else {
@@ -362,7 +364,11 @@ impl Live {
         if !inbox.queue.is_empty() && matches!(inbox.gate, Gate::Parallel) {
             self.instance.mailbox.start(interface.clone());
         }
-        Started { request, permit }
+        Started {
+            request,
+            permit,
+            output: inbox.output.clone(),
+        }
     }
     pub fn complete(&mut self, permit: InterfacePermit) {
         if let InterfacePermit::Serial(permit) = permit {

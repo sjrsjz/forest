@@ -40,9 +40,10 @@ impl Core {
             };
             let declaration = declaration.context("interface dependency is not loaded")?;
             ensure!(
-                equivalent(&dependency.input, &declaration.input)
-                    && equivalent(&dependency.output, &declaration.output),
-                "dependency schema mismatch"
+                declaration.satisfies(&dependency.input, &dependency.output),
+                "incompatible dependency {} {}",
+                dependency.object,
+                dependency.interface
             );
         }
         for subscription in &manifest.subscriptions {
@@ -56,8 +57,11 @@ impl Core {
                 .find(|p| p.path == subscription.interface)
                 .unwrap();
             ensure!(
-                equivalent(&event.input, &handler.input),
-                "event schema mismatch"
+                event.input.subof(&handler.input),
+                "incompatible event {} {} -> {}",
+                subscription.source,
+                subscription.event,
+                handler.path
             );
             let acl = AclTable::new([AclEntry {
                 entity: manifest.package.id.clone(),

@@ -52,7 +52,7 @@ impl Core {
                 .iter()
                 .find(|u| u.object == request.object && u.interface == request.interface)
                 .ok_or(DispatchError::Denied)?;
-            if !equivalent(output, &dependency.output) {
+            if !output.subof(&dependency.output) {
                 return Err(DispatchError::OutputContract);
             }
             if !request.input.check(&dependency.input, false) {
@@ -128,7 +128,6 @@ impl Core {
         };
         let bytes = abi::encode(&invocation).map_err(|_| DispatchError::InputContract)?;
         let accepted = Request {
-            output: declaration.output.clone(),
             admission: slot.budget.reserve(bytes.len())?,
             invocation,
             bytes,

@@ -127,6 +127,12 @@ pub fn equivalent(a: &Schema, b: &Schema) -> bool {
 }
 
 impl InterfaceDeclaration {
+    /// Whether this implementation can serve the required input -> output.
+    /// Inputs are contravariant; the complete Result output is covariant.
+    pub fn satisfies(&self, input: &Schema, output: &Schema) -> bool {
+        input.subof(&self.input) && self.output.subof(output)
+    }
+
     pub fn validate(&self) -> Result<(), ManifestError> {
         if !self.access.readers.is_empty() || !self.access.writers.is_empty() {
             return Err(ManifestError("interface grants must use callers".into()));

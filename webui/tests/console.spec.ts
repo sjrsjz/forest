@@ -70,3 +70,68 @@ test('real console: authentication, runtime stream, dependency SVG and config in
   expect((await page.request.get('/api/inspect/snapshot')).status()).toBe(401)
   expect(errors).toEqual([])
 })
+
+test('module management: inspect local package, reload, unload and load', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  await page.goto('/')
+  await page.getByLabel('管理口令').fill(password)
+  await page.getByRole('button', { name: '进入调试台' }).click()
+  await expect(page.locator('.connection.live')).toBeVisible()
+  const object = '/module/forest-test'
+  const before = await page.request.get('/api/inspect/snapshot').then((r) => r.json())
+  const original = before.modules.find((m: { object: string }) => m.object === object)
+  expect(original.lifecycle.phase).toBe('serving')
+  const counterUrl = '/api/inspect/config-value?object=/module/forest-test&key=/state/replies'
+  const count = await page.request.get(counterUrl).then((r) => r.text())
+  try {
+    await page.getByRole('button', { name: '本地包', exact: true }).click()
+    const packages = page.getByRole('dialog', { name: '本地包', exact: true })
+    await packages.getByLabel('包目录').selectOption('forest-test')
+    await expect(packages.locator('.load-plan')).toContainText('已加载')
+    await packages.getByRole('button', { name: 'Manifest', exact: true }).click()
+    await expect(packages.locator('.manifest-text')).toContainText(object)
+    await page.screenshot({ path: 'test-results/packages.png' })
+    await page.keyboard.press('Escape')
+    await expect(packages).not.toBeVisible()
+
+    await page.getByRole('button', { name: '重载', exact: true }).click()
+    const reload = page.getByRole('dialog', { name: '重载模块', exact: true })
+    await expect(reload.getByRole('button', { name: '执行重载' })).toBeEnabled()
+    await reload.getByRole('button', { name: '执行重载' }).click()
+    await expect(reload.locator('.management-success')).toHaveText('已重载', { timeout: 30_000 })
+    const after = await page.request.get('/api/inspect/snapshot').then((r) => r.json())
+    expect(
+      after.modules.find((m: { object: string }) => m.object === object).lifecycle.instance.id,
+    ).not.toBe(original.lifecycle.instance.id)
+    expect(await page.request.get(counterUrl).then((r) => r.text())).toBe(count)
+    await page.screenshot({ path: 'test-results/reload.png' })
+    await reload.getByRole('button', { name: '关闭模块管理' }).click()
+
+    await page.getByRole('button', { name: '卸载', exact: true }).click()
+    const unload = page.getByRole('dialog', { name: '卸载模块', exact: true })
+    await unload.locator('input[value="at_yield"]').check()
+    await unload.getByRole('button', { name: '卸载', exact: true }).click()
+    await expect(unload.locator('.management-success')).toHaveText('已卸载')
+    await unload.getByRole('button', { name: '关闭模块管理' }).click()
+    await expect(page.locator('.object-button').filter({ hasText: object })).toHaveCount(0)
+
+    await page.getByRole('button', { name: '本地包', exact: true }).click()
+    const load = page.getByRole('dialog', { name: '本地包', exact: true })
+    await load.getByLabel('包目录').selectOption('forest-test')
+    await expect(load.locator('.load-plan')).toContainText(object)
+    await load.getByRole('button', { name: '加载', exact: true }).click()
+    await expect(load.locator('.management-success')).toHaveText('已加载', { timeout: 30_000 })
+    await load.getByRole('button', { name: '关闭模块管理' }).click()
+    await expect(page.locator('.workspace-heading h1')).toHaveText('Forest Test')
+    expect(await page.request.get(counterUrl).then((r) => r.text())).toBe(count)
+    await page.setViewportSize({ width: 1280, height: 720 })
+    await page.getByRole('button', { name: '重载', exact: true }).click()
+    await page.screenshot({ path: 'test-results/management-1280.png' })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    expect(errors).toEqual([])
+  } finally {
+    // Restore the test module even if a browser assertion failed after unloading.
+    await page.request.post('/api/modules/load', { data: { directory: 'forest-test' } })
+  }
+})
