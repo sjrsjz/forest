@@ -20,9 +20,14 @@ crates/
   forest-cli/            可执行宿主与 OneBot HTTP/WebSocket 接入
 webui/                  Vue、TypeScript、Mermaid 前端，构建产物为 dist
 plugins/forest-test/     #forest-test 示例模块与打包程序
+plugins/qwen-vl-embedding/ 2048 维多模态向量供应 Wasm 模块
+plugins/openai-provider/  OpenAI 兼容 Chat Completions Wasm 模块
+plugins/context/          可配置 Agent 提示词的上下文格式化 Wasm 模块
 packages/forest-test/    生成的外部 Manifest 与 module.wasm
 data/                   默认运行数据，不进入 Git
 ```
+
+插件的实现、提示词和 Rust 类型映射均留在各自的 `plugins/` 包中。模块间通过固定 Wasm ABI 传递 Forest Value，以 Manifest 的 Schema 为契约；不依赖对方的 Rust crate。打包同时输出可独立读取的 Schema 语言文本，其他语言可按相同契约实现模块。
 
 ```sh
 rustup target add wasm32-unknown-unknown

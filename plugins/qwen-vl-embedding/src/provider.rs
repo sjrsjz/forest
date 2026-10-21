@@ -1,5 +1,5 @@
 //! Concrete SiliconFlow request/response mapping, with no host or storage access.
-use crate::api::{DIMENSIONS, Embeddings, Error, Input, MODEL};
+use crate::types::{DIMENSIONS, Embeddings, Error, Input, MODEL};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]

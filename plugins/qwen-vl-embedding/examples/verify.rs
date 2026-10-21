@@ -1,9 +1,9 @@
 //! One live batch through the actual Wasm plugin. Configuration stays local.
 use base64::{Engine, engine::general_purpose::STANDARD};
 use forest_config::{ConfigStore, Declaration, Key};
-use forest_qwen_vl_embedding::{
-    api::{CONNECTION, Connection, DIMENSIONS, EMBED, Embeddings, Error, Input, OBJECT},
-    manifest,
+use forest_qwen_vl_embedding::manifest;
+use forest_qwen_vl_embedding::types::{
+    CONNECTION, Connection, DIMENSIONS, EMBED, Embeddings, Error, Input, OBJECT,
 };
 use forest_runtime::{RuntimeOptions, Scheduler, StopMode};
 use std::{path::PathBuf, time::Instant};
@@ -19,7 +19,7 @@ fn cosine(left: &[f32], right: &[f32]) -> f64 {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let configuration = std::env::args()
         .nth(1)
-        .ok_or("usage: verify <connection.json>")?;
+        .ok_or("usage: verify-qwen-vl-embedding <connection.json>")?;
     let connection: Connection = serde_json::from_slice(&tokio::fs::read(configuration).await?)?;
     let image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg";
     let image = reqwest::Client::builder()

@@ -32,4 +32,6 @@ match client.call(&GetLoginInfo {}).await? {
 
 只读示例（需要自己运行的 OneBot HTTP 服务）：设置 `ONEBOT_HTTP_URL` 和可选 `ONEBOT_ACCESS_TOKEN`，运行 `cargo run -p forest-onebot --features http --example inspect`。它只查询登录信息和群列表，不发送消息或执行群管理。
 
-本次不包含 WS/反向 WS、事件上报服务器、CQ 解析器、实现扩展或 Forest 授权逻辑。评估记录与标准链接见[设计文档](../../doc/04-onebot-v11.md)。
+`cq` 提供消息段与 CQ 字符串转换，以及独立的文本/参数转义函数。`cq::segments` 将三种 Message 表示统一为消息段视图；未知类型或不合法 CQ 返回明确错误，不猜测修复。`cq::encode` 保留嵌套转发内容，所有转换均为本地纯操作，依据 [OneBot 字符串规则](https://github.com/botuniverse/onebot-11/blob/master/message/string.md)。
+
+本库不包含 WS/反向 WS、事件上报服务器、实现扩展或 Forest 授权逻辑。评估记录与标准链接见[设计文档](../../doc/04-onebot-v11.md)。

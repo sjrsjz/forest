@@ -49,9 +49,11 @@ cargo run -p forest-cli --locked -- \
 
 Ctrl+C 默认 Drain，可用 `--shutdown-mode yield` 或 `force` 显式选择。正向 WS 断开结束当前宿主，未收回的 API 调用按传输关闭结算；不自动重连、重试或重放。
 
-## 2. 模块 SDK
+## 2. Rust 模块 SDK
 
-实际示例见 [forest-test](../plugins/forest-test/src/lib.rs)。实现 `forest_sdk::Module`：
+Rust SDK 是可选的语言绑定。模块不链接调度器，也不链接被调用模块；其他语言只需提供规定的 Wasm 导出、使用固定宿主导入，并按 Schema/Value 编码数据。当前现成 SDK 与主要验证使用 Rust，尚未提供其他语言的 SDK。
+
+实际 Rust 示例见 [forest-test](../plugins/forest-test/src/lib.rs)。实现 `forest_sdk::Module`：
 
 - `create(CreateContext)` 返回模块对象，可以恢复配置表中的状态。
 - `handlers()` 用 `Handlers::with` 注册路径、重入属性、访问规则和具体 Rust 异步函数；输入和完整 `Result<T, E>` 的 Schema 从函数类型生成。
@@ -106,6 +108,8 @@ buffer 低 32 位为指针，高 32 位为长度。输入由宿主经 guest allo
 create 输入为 CreateContext，invoke 为 Invocation，两者只建立任务。poll 推进 Future，返回 `Pending`、`Output(Value)` 或 `Lifecycle(Result<(), String>)`。参数和结果收尾均属于同一次独占推进。
 
 ABI 结构与操作结构采用 `forest_protocol::abi` 固定小端、定长整数 bincode 编码；接口值和配置值仍是 Forest Schema/Value。单帧最多 16 MiB，拒绝尾随字节。此边界没有版本协商。
+
+这里描述的是字节协议，不是 Rust 对象内存布局。非 Rust 模块无须导入 Rust trait、crate 或 TypeId；需要实现相同的字节编码、任务推进和资源所有权约定。模块间调用按对象与接口地址派发，双方分别以自己的类型表示相同 Schema，在线性内存之间传递编码后的 Value。Manifest 的类型图和打包附带的 `.schema` 文本均可在不执行 Wasm、不读取 Rust 源码的情况下取得。
 
 导入模块名为 `forest_host`。每个宿主操作有独立函数：
 

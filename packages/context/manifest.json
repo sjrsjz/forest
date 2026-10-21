@@ -1,0 +1,2070 @@
+{
+  "package": {
+    "id": "/module/context",
+    "version": "0.1.0",
+    "name": "Context formatter",
+    "description": "Ordered content to OpenAI messages with a configurable Agent prompt"
+  },
+  "module": "module.wasm",
+  "configs": [
+    {
+      "key": "/prompt/agent",
+      "schema": [
+        "String"
+      ],
+      "default": {
+        "String": "你是一个在群聊中协助参与者的机器人。根据当前对话自然回应；需要外部信息或操作时，使用当前提供的工具。清楚区分已知信息、历史记录和推测。"
+      },
+      "access": {
+        "readers": [
+          "SelfModule"
+        ],
+        "writers": [
+          {
+            "Path": "/user/admin"
+          }
+        ],
+        "callers": []
+      }
+    }
+  ],
+  "provides": [
+    {
+      "path": "/format",
+      "input": [
+        {
+          "Record": {
+            "identity": {
+              "Record": {
+                "bot_id": "I64",
+                "bot_name": {
+                  "Option": "String"
+                },
+                "group_id": "I64",
+                "group_name": {
+                  "Option": "String"
+                }
+              }
+            },
+            "images": {
+              "Array": {
+                "Record": {
+                  "image": {
+                    "Record": {
+                      "detail": {
+                        "Option": {
+                          "Variant": {
+                            "Auto": {
+                              "Unnamed": []
+                            },
+                            "High": {
+                              "Unnamed": []
+                            },
+                            "Low": {
+                              "Unnamed": []
+                            }
+                          }
+                        }
+                      },
+                      "url": "String"
+                    }
+                  },
+                  "reference": "String"
+                }
+              }
+            },
+            "items": {
+              "Array": {
+                "Variant": {
+                  "Content": {
+                    "Unnamed": [
+                      {
+                        "Variant": {
+                          "GroupMessage": {
+                            "Unnamed": [
+                              {
+                                "Record": {
+                                  "anonymous": {
+                                    "Option": {
+                                      "Record": {
+                                        "flag": "String",
+                                        "id": "I64",
+                                        "name": "String"
+                                      }
+                                    }
+                                  },
+                                  "group_id": "I64",
+                                  "message": {
+                                    "Variant": {
+                                      "Cq": {
+                                        "Unnamed": [
+                                          "String"
+                                        ]
+                                      },
+                                      "Segments": {
+                                        "Unnamed": [
+                                          {
+                                            "Array": {
+                                              "Variant": {
+                                                "Anonymous": {
+                                                  "Named": {
+                                                    "ignore": {
+                                                      "Option": "String"
+                                                    }
+                                                  }
+                                                },
+                                                "At": {
+                                                  "Named": {
+                                                    "qq": "String"
+                                                  }
+                                                },
+                                                "Contact": {
+                                                  "Unnamed": [
+                                                    {
+                                                      "Variant": {
+                                                        "Group": {
+                                                          "Named": {
+                                                            "id": "String"
+                                                          }
+                                                        },
+                                                        "Qq": {
+                                                          "Named": {
+                                                            "id": "String"
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  ]
+                                                },
+                                                "Dice": {
+                                                  "Named": {}
+                                                },
+                                                "Face": {
+                                                  "Named": {
+                                                    "id": "String"
+                                                  }
+                                                },
+                                                "Forward": {
+                                                  "Named": {
+                                                    "id": "String"
+                                                  }
+                                                },
+                                                "Image": {
+                                                  "Unnamed": [
+                                                    {
+                                                      "Record": {
+                                                        "file": "String",
+                                                        "kind": {
+                                                          "Option": {
+                                                            "Variant": {
+                                                              "Flash": {
+                                                                "Unnamed": []
+                                                              }
+                                                            }
+                                                          }
+                                                        },
+                                                        "options": {
+                                                          "Record": {
+                                                            "cache": {
+                                                              "Option": "String"
+                                                            },
+                                                            "proxy": {
+                                                              "Option": "String"
+                                                            },
+                                                            "timeout": {
+                                                              "Option": "String"
+                                                            },
+                                                            "url": {
+                                                              "Option": "String"
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  ]
+                                                },
+                                                "Json": {
+                                                  "Named": {
+                                                    "data": "String"
+                                                  }
+                                                },
+                                                "Location": {
+                                                  "Named": {
+                                                    "content": {
+                                                      "Option": "String"
+                                                    },
+                                                    "lat": "String",
+                                                    "lon": "String",
+                                                    "title": {
+                                                      "Option": "String"
+                                                    }
+                                                  }
+                                                },
+                                                "Music": {
+                                                  "Unnamed": [
+                                                    {
+                                                      "Variant": {
+                                                        "Custom": {
+                                                          "Named": {
+                                                            "audio": "String",
+                                                            "content": {
+                                                              "Option": "String"
+                                                            },
+                                                            "image": {
+                                                              "Option": "String"
+                                                            },
+                                                            "title": "String",
+                                                            "url": "String"
+                                                          }
+                                                        },
+                                                        "Netease": {
+                                                          "Named": {
+                                                            "id": "String"
+                                                          }
+                                                        },
+                                                        "Qq": {
+                                                          "Named": {
+                                                            "id": "String"
+                                                          }
+                                                        },
+                                                        "Xiami": {
+                                                          "Named": {
+                                                            "id": "String"
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  ]
+                                                },
+                                                "Node": {
+                                                  "Unnamed": [
+                                                    {
+                                                      "Variant": {
+                                                        "Custom": {
+                                                          "Named": {
+                                                            "content": {
+                                                              "Ref": 1
+                                                            },
+                                                            "nickname": "String",
+                                                            "user_id": "String"
+                                                          }
+                                                        },
+                                                        "Reference": {
+                                                          "Named": {
+                                                            "id": "String"
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  ]
+                                                },
+                                                "Poke": {
+                                                  "Named": {
+                                                    "id": "String",
+                                                    "kind": "String",
+                                                    "name": {
+                                                      "Option": "String"
+                                                    }
+                                                  }
+                                                },
+                                                "Record": {
+                                                  "Unnamed": [
+                                                    {
+                                                      "Record": {
+                                                        "file": "String",
+                                                        "magic": {
+                                                          "Option": "String"
+                                                        },
+                                                        "options": {
+                                                          "Record": {
+                                                            "cache": {
+                                                              "Option": "String"
+                                                            },
+                                                            "proxy": {
+                                                              "Option": "String"
+                                                            },
+                                                            "timeout": {
+                                                              "Option": "String"
+                                                            },
+                                                            "url": {
+                                                              "Option": "String"
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  ]
+                                                },
+                                                "Reply": {
+                                                  "Named": {
+                                                    "id": "String"
+                                                  }
+                                                },
+                                                "Rps": {
+                                                  "Named": {}
+                                                },
+                                                "Shake": {
+                                                  "Named": {}
+                                                },
+                                                "Share": {
+                                                  "Named": {
+                                                    "content": {
+                                                      "Option": "String"
+                                                    },
+                                                    "image": {
+                                                      "Option": "String"
+                                                    },
+                                                    "title": "String",
+                                                    "url": "String"
+                                                  }
+                                                },
+                                                "Text": {
+                                                  "Named": {
+                                                    "text": "String"
+                                                  }
+                                                },
+                                                "Video": {
+                                                  "Unnamed": [
+                                                    {
+                                                      "Record": {
+                                                        "file": "String",
+                                                        "options": {
+                                                          "Record": {
+                                                            "cache": {
+                                                              "Option": "String"
+                                                            },
+                                                            "proxy": {
+                                                              "Option": "String"
+                                                            },
+                                                            "timeout": {
+                                                              "Option": "String"
+                                                            },
+                                                            "url": {
+                                                              "Option": "String"
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  ]
+                                                },
+                                                "Xml": {
+                                                  "Named": {
+                                                    "data": "String"
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        ]
+                                      },
+                                      "Single": {
+                                        "Unnamed": [
+                                          {
+                                            "Variant": {
+                                              "Anonymous": {
+                                                "Named": {
+                                                  "ignore": {
+                                                    "Option": "String"
+                                                  }
+                                                }
+                                              },
+                                              "At": {
+                                                "Named": {
+                                                  "qq": "String"
+                                                }
+                                              },
+                                              "Contact": {
+                                                "Unnamed": [
+                                                  {
+                                                    "Variant": {
+                                                      "Group": {
+                                                        "Named": {
+                                                          "id": "String"
+                                                        }
+                                                      },
+                                                      "Qq": {
+                                                        "Named": {
+                                                          "id": "String"
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                ]
+                                              },
+                                              "Dice": {
+                                                "Named": {}
+                                              },
+                                              "Face": {
+                                                "Named": {
+                                                  "id": "String"
+                                                }
+                                              },
+                                              "Forward": {
+                                                "Named": {
+                                                  "id": "String"
+                                                }
+                                              },
+                                              "Image": {
+                                                "Unnamed": [
+                                                  {
+                                                    "Record": {
+                                                      "file": "String",
+                                                      "kind": {
+                                                        "Option": {
+                                                          "Variant": {
+                                                            "Flash": {
+                                                              "Unnamed": []
+                                                            }
+                                                          }
+                                                        }
+                                                      },
+                                                      "options": {
+                                                        "Record": {
+                                                          "cache": {
+                                                            "Option": "String"
+                                                          },
+                                                          "proxy": {
+                                                            "Option": "String"
+                                                          },
+                                                          "timeout": {
+                                                            "Option": "String"
+                                                          },
+                                                          "url": {
+                                                            "Option": "String"
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                ]
+                                              },
+                                              "Json": {
+                                                "Named": {
+                                                  "data": "String"
+                                                }
+                                              },
+                                              "Location": {
+                                                "Named": {
+                                                  "content": {
+                                                    "Option": "String"
+                                                  },
+                                                  "lat": "String",
+                                                  "lon": "String",
+                                                  "title": {
+                                                    "Option": "String"
+                                                  }
+                                                }
+                                              },
+                                              "Music": {
+                                                "Unnamed": [
+                                                  {
+                                                    "Variant": {
+                                                      "Custom": {
+                                                        "Named": {
+                                                          "audio": "String",
+                                                          "content": {
+                                                            "Option": "String"
+                                                          },
+                                                          "image": {
+                                                            "Option": "String"
+                                                          },
+                                                          "title": "String",
+                                                          "url": "String"
+                                                        }
+                                                      },
+                                                      "Netease": {
+                                                        "Named": {
+                                                          "id": "String"
+                                                        }
+                                                      },
+                                                      "Qq": {
+                                                        "Named": {
+                                                          "id": "String"
+                                                        }
+                                                      },
+                                                      "Xiami": {
+                                                        "Named": {
+                                                          "id": "String"
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                ]
+                                              },
+                                              "Node": {
+                                                "Unnamed": [
+                                                  {
+                                                    "Variant": {
+                                                      "Custom": {
+                                                        "Named": {
+                                                          "content": {
+                                                            "Ref": 1
+                                                          },
+                                                          "nickname": "String",
+                                                          "user_id": "String"
+                                                        }
+                                                      },
+                                                      "Reference": {
+                                                        "Named": {
+                                                          "id": "String"
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                ]
+                                              },
+                                              "Poke": {
+                                                "Named": {
+                                                  "id": "String",
+                                                  "kind": "String",
+                                                  "name": {
+                                                    "Option": "String"
+                                                  }
+                                                }
+                                              },
+                                              "Record": {
+                                                "Unnamed": [
+                                                  {
+                                                    "Record": {
+                                                      "file": "String",
+                                                      "magic": {
+                                                        "Option": "String"
+                                                      },
+                                                      "options": {
+                                                        "Record": {
+                                                          "cache": {
+                                                            "Option": "String"
+                                                          },
+                                                          "proxy": {
+                                                            "Option": "String"
+                                                          },
+                                                          "timeout": {
+                                                            "Option": "String"
+                                                          },
+                                                          "url": {
+                                                            "Option": "String"
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                ]
+                                              },
+                                              "Reply": {
+                                                "Named": {
+                                                  "id": "String"
+                                                }
+                                              },
+                                              "Rps": {
+                                                "Named": {}
+                                              },
+                                              "Shake": {
+                                                "Named": {}
+                                              },
+                                              "Share": {
+                                                "Named": {
+                                                  "content": {
+                                                    "Option": "String"
+                                                  },
+                                                  "image": {
+                                                    "Option": "String"
+                                                  },
+                                                  "title": "String",
+                                                  "url": "String"
+                                                }
+                                              },
+                                              "Text": {
+                                                "Named": {
+                                                  "text": "String"
+                                                }
+                                              },
+                                              "Video": {
+                                                "Unnamed": [
+                                                  {
+                                                    "Record": {
+                                                      "file": "String",
+                                                      "options": {
+                                                        "Record": {
+                                                          "cache": {
+                                                            "Option": "String"
+                                                          },
+                                                          "proxy": {
+                                                            "Option": "String"
+                                                          },
+                                                          "timeout": {
+                                                            "Option": "String"
+                                                          },
+                                                          "url": {
+                                                            "Option": "String"
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                ]
+                                              },
+                                              "Xml": {
+                                                "Named": {
+                                                  "data": "String"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  },
+                                  "message_id": "I32",
+                                  "message_type": "String",
+                                  "post_type": "String",
+                                  "raw_message": "String",
+                                  "self_id": "I64",
+                                  "sender": {
+                                    "Record": {
+                                      "age": {
+                                        "Option": "I32"
+                                      },
+                                      "area": {
+                                        "Option": "String"
+                                      },
+                                      "card": {
+                                        "Option": "String"
+                                      },
+                                      "level": {
+                                        "Option": "String"
+                                      },
+                                      "nickname": {
+                                        "Option": "String"
+                                      },
+                                      "role": {
+                                        "Option": "String"
+                                      },
+                                      "sex": {
+                                        "Option": "String"
+                                      },
+                                      "title": {
+                                        "Option": "String"
+                                      },
+                                      "user_id": {
+                                        "Option": "I64"
+                                      }
+                                    }
+                                  },
+                                  "sub_type": "String",
+                                  "time": "I64",
+                                  "user_id": "I64"
+                                }
+                              }
+                            ]
+                          },
+                          "ModelTurn": {
+                            "Unnamed": [
+                              {
+                                "Record": {
+                                  "assistant": {
+                                    "Record": {
+                                      "content": {
+                                        "Option": "String"
+                                      },
+                                      "reasoning_content": {
+                                        "Option": "String"
+                                      },
+                                      "refusal": {
+                                        "Option": "String"
+                                      },
+                                      "tool_calls": {
+                                        "Option": {
+                                          "Array": {
+                                            "Variant": {
+                                              "Function": {
+                                                "Named": {
+                                                  "function": {
+                                                    "Record": {
+                                                      "arguments": "String",
+                                                      "name": "String"
+                                                    }
+                                                  },
+                                                  "id": "String"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  },
+                                  "time": "I64"
+                                }
+                              }
+                            ]
+                          },
+                          "ToolResult": {
+                            "Unnamed": [
+                              {
+                                "Record": {
+                                  "content": "String",
+                                  "time": "I64",
+                                  "tool_call_id": "String"
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "Recall": {
+                    "Unnamed": [
+                      {
+                        "Record": {
+                          "content": {
+                            "Variant": {
+                              "GroupMessage": {
+                                "Unnamed": [
+                                  {
+                                    "Record": {
+                                      "anonymous": {
+                                        "Option": {
+                                          "Record": {
+                                            "flag": "String",
+                                            "id": "I64",
+                                            "name": "String"
+                                          }
+                                        }
+                                      },
+                                      "group_id": "I64",
+                                      "message": {
+                                        "Variant": {
+                                          "Cq": {
+                                            "Unnamed": [
+                                              "String"
+                                            ]
+                                          },
+                                          "Segments": {
+                                            "Unnamed": [
+                                              {
+                                                "Array": {
+                                                  "Variant": {
+                                                    "Anonymous": {
+                                                      "Named": {
+                                                        "ignore": {
+                                                          "Option": "String"
+                                                        }
+                                                      }
+                                                    },
+                                                    "At": {
+                                                      "Named": {
+                                                        "qq": "String"
+                                                      }
+                                                    },
+                                                    "Contact": {
+                                                      "Unnamed": [
+                                                        {
+                                                          "Variant": {
+                                                            "Group": {
+                                                              "Named": {
+                                                                "id": "String"
+                                                              }
+                                                            },
+                                                            "Qq": {
+                                                              "Named": {
+                                                                "id": "String"
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      ]
+                                                    },
+                                                    "Dice": {
+                                                      "Named": {}
+                                                    },
+                                                    "Face": {
+                                                      "Named": {
+                                                        "id": "String"
+                                                      }
+                                                    },
+                                                    "Forward": {
+                                                      "Named": {
+                                                        "id": "String"
+                                                      }
+                                                    },
+                                                    "Image": {
+                                                      "Unnamed": [
+                                                        {
+                                                          "Record": {
+                                                            "file": "String",
+                                                            "kind": {
+                                                              "Option": {
+                                                                "Variant": {
+                                                                  "Flash": {
+                                                                    "Unnamed": []
+                                                                  }
+                                                                }
+                                                              }
+                                                            },
+                                                            "options": {
+                                                              "Record": {
+                                                                "cache": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "proxy": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "timeout": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "url": {
+                                                                  "Option": "String"
+                                                                }
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      ]
+                                                    },
+                                                    "Json": {
+                                                      "Named": {
+                                                        "data": "String"
+                                                      }
+                                                    },
+                                                    "Location": {
+                                                      "Named": {
+                                                        "content": {
+                                                          "Option": "String"
+                                                        },
+                                                        "lat": "String",
+                                                        "lon": "String",
+                                                        "title": {
+                                                          "Option": "String"
+                                                        }
+                                                      }
+                                                    },
+                                                    "Music": {
+                                                      "Unnamed": [
+                                                        {
+                                                          "Variant": {
+                                                            "Custom": {
+                                                              "Named": {
+                                                                "audio": "String",
+                                                                "content": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "image": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "title": "String",
+                                                                "url": "String"
+                                                              }
+                                                            },
+                                                            "Netease": {
+                                                              "Named": {
+                                                                "id": "String"
+                                                              }
+                                                            },
+                                                            "Qq": {
+                                                              "Named": {
+                                                                "id": "String"
+                                                              }
+                                                            },
+                                                            "Xiami": {
+                                                              "Named": {
+                                                                "id": "String"
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      ]
+                                                    },
+                                                    "Node": {
+                                                      "Unnamed": [
+                                                        {
+                                                          "Variant": {
+                                                            "Custom": {
+                                                              "Named": {
+                                                                "content": {
+                                                                  "Ref": 1
+                                                                },
+                                                                "nickname": "String",
+                                                                "user_id": "String"
+                                                              }
+                                                            },
+                                                            "Reference": {
+                                                              "Named": {
+                                                                "id": "String"
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      ]
+                                                    },
+                                                    "Poke": {
+                                                      "Named": {
+                                                        "id": "String",
+                                                        "kind": "String",
+                                                        "name": {
+                                                          "Option": "String"
+                                                        }
+                                                      }
+                                                    },
+                                                    "Record": {
+                                                      "Unnamed": [
+                                                        {
+                                                          "Record": {
+                                                            "file": "String",
+                                                            "magic": {
+                                                              "Option": "String"
+                                                            },
+                                                            "options": {
+                                                              "Record": {
+                                                                "cache": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "proxy": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "timeout": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "url": {
+                                                                  "Option": "String"
+                                                                }
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      ]
+                                                    },
+                                                    "Reply": {
+                                                      "Named": {
+                                                        "id": "String"
+                                                      }
+                                                    },
+                                                    "Rps": {
+                                                      "Named": {}
+                                                    },
+                                                    "Shake": {
+                                                      "Named": {}
+                                                    },
+                                                    "Share": {
+                                                      "Named": {
+                                                        "content": {
+                                                          "Option": "String"
+                                                        },
+                                                        "image": {
+                                                          "Option": "String"
+                                                        },
+                                                        "title": "String",
+                                                        "url": "String"
+                                                      }
+                                                    },
+                                                    "Text": {
+                                                      "Named": {
+                                                        "text": "String"
+                                                      }
+                                                    },
+                                                    "Video": {
+                                                      "Unnamed": [
+                                                        {
+                                                          "Record": {
+                                                            "file": "String",
+                                                            "options": {
+                                                              "Record": {
+                                                                "cache": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "proxy": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "timeout": {
+                                                                  "Option": "String"
+                                                                },
+                                                                "url": {
+                                                                  "Option": "String"
+                                                                }
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      ]
+                                                    },
+                                                    "Xml": {
+                                                      "Named": {
+                                                        "data": "String"
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                              }
+                                            ]
+                                          },
+                                          "Single": {
+                                            "Unnamed": [
+                                              {
+                                                "Variant": {
+                                                  "Anonymous": {
+                                                    "Named": {
+                                                      "ignore": {
+                                                        "Option": "String"
+                                                      }
+                                                    }
+                                                  },
+                                                  "At": {
+                                                    "Named": {
+                                                      "qq": "String"
+                                                    }
+                                                  },
+                                                  "Contact": {
+                                                    "Unnamed": [
+                                                      {
+                                                        "Variant": {
+                                                          "Group": {
+                                                            "Named": {
+                                                              "id": "String"
+                                                            }
+                                                          },
+                                                          "Qq": {
+                                                            "Named": {
+                                                              "id": "String"
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    ]
+                                                  },
+                                                  "Dice": {
+                                                    "Named": {}
+                                                  },
+                                                  "Face": {
+                                                    "Named": {
+                                                      "id": "String"
+                                                    }
+                                                  },
+                                                  "Forward": {
+                                                    "Named": {
+                                                      "id": "String"
+                                                    }
+                                                  },
+                                                  "Image": {
+                                                    "Unnamed": [
+                                                      {
+                                                        "Record": {
+                                                          "file": "String",
+                                                          "kind": {
+                                                            "Option": {
+                                                              "Variant": {
+                                                                "Flash": {
+                                                                  "Unnamed": []
+                                                                }
+                                                              }
+                                                            }
+                                                          },
+                                                          "options": {
+                                                            "Record": {
+                                                              "cache": {
+                                                                "Option": "String"
+                                                              },
+                                                              "proxy": {
+                                                                "Option": "String"
+                                                              },
+                                                              "timeout": {
+                                                                "Option": "String"
+                                                              },
+                                                              "url": {
+                                                                "Option": "String"
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    ]
+                                                  },
+                                                  "Json": {
+                                                    "Named": {
+                                                      "data": "String"
+                                                    }
+                                                  },
+                                                  "Location": {
+                                                    "Named": {
+                                                      "content": {
+                                                        "Option": "String"
+                                                      },
+                                                      "lat": "String",
+                                                      "lon": "String",
+                                                      "title": {
+                                                        "Option": "String"
+                                                      }
+                                                    }
+                                                  },
+                                                  "Music": {
+                                                    "Unnamed": [
+                                                      {
+                                                        "Variant": {
+                                                          "Custom": {
+                                                            "Named": {
+                                                              "audio": "String",
+                                                              "content": {
+                                                                "Option": "String"
+                                                              },
+                                                              "image": {
+                                                                "Option": "String"
+                                                              },
+                                                              "title": "String",
+                                                              "url": "String"
+                                                            }
+                                                          },
+                                                          "Netease": {
+                                                            "Named": {
+                                                              "id": "String"
+                                                            }
+                                                          },
+                                                          "Qq": {
+                                                            "Named": {
+                                                              "id": "String"
+                                                            }
+                                                          },
+                                                          "Xiami": {
+                                                            "Named": {
+                                                              "id": "String"
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    ]
+                                                  },
+                                                  "Node": {
+                                                    "Unnamed": [
+                                                      {
+                                                        "Variant": {
+                                                          "Custom": {
+                                                            "Named": {
+                                                              "content": {
+                                                                "Ref": 1
+                                                              },
+                                                              "nickname": "String",
+                                                              "user_id": "String"
+                                                            }
+                                                          },
+                                                          "Reference": {
+                                                            "Named": {
+                                                              "id": "String"
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    ]
+                                                  },
+                                                  "Poke": {
+                                                    "Named": {
+                                                      "id": "String",
+                                                      "kind": "String",
+                                                      "name": {
+                                                        "Option": "String"
+                                                      }
+                                                    }
+                                                  },
+                                                  "Record": {
+                                                    "Unnamed": [
+                                                      {
+                                                        "Record": {
+                                                          "file": "String",
+                                                          "magic": {
+                                                            "Option": "String"
+                                                          },
+                                                          "options": {
+                                                            "Record": {
+                                                              "cache": {
+                                                                "Option": "String"
+                                                              },
+                                                              "proxy": {
+                                                                "Option": "String"
+                                                              },
+                                                              "timeout": {
+                                                                "Option": "String"
+                                                              },
+                                                              "url": {
+                                                                "Option": "String"
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    ]
+                                                  },
+                                                  "Reply": {
+                                                    "Named": {
+                                                      "id": "String"
+                                                    }
+                                                  },
+                                                  "Rps": {
+                                                    "Named": {}
+                                                  },
+                                                  "Shake": {
+                                                    "Named": {}
+                                                  },
+                                                  "Share": {
+                                                    "Named": {
+                                                      "content": {
+                                                        "Option": "String"
+                                                      },
+                                                      "image": {
+                                                        "Option": "String"
+                                                      },
+                                                      "title": "String",
+                                                      "url": "String"
+                                                    }
+                                                  },
+                                                  "Text": {
+                                                    "Named": {
+                                                      "text": "String"
+                                                    }
+                                                  },
+                                                  "Video": {
+                                                    "Unnamed": [
+                                                      {
+                                                        "Record": {
+                                                          "file": "String",
+                                                          "options": {
+                                                            "Record": {
+                                                              "cache": {
+                                                                "Option": "String"
+                                                              },
+                                                              "proxy": {
+                                                                "Option": "String"
+                                                              },
+                                                              "timeout": {
+                                                                "Option": "String"
+                                                              },
+                                                              "url": {
+                                                                "Option": "String"
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    ]
+                                                  },
+                                                  "Xml": {
+                                                    "Named": {
+                                                      "data": "String"
+                                                    }
+                                                  }
+                                                }
+                                              }
+                                            ]
+                                          }
+                                        }
+                                      },
+                                      "message_id": "I32",
+                                      "message_type": "String",
+                                      "post_type": "String",
+                                      "raw_message": "String",
+                                      "self_id": "I64",
+                                      "sender": {
+                                        "Record": {
+                                          "age": {
+                                            "Option": "I32"
+                                          },
+                                          "area": {
+                                            "Option": "String"
+                                          },
+                                          "card": {
+                                            "Option": "String"
+                                          },
+                                          "level": {
+                                            "Option": "String"
+                                          },
+                                          "nickname": {
+                                            "Option": "String"
+                                          },
+                                          "role": {
+                                            "Option": "String"
+                                          },
+                                          "sex": {
+                                            "Option": "String"
+                                          },
+                                          "title": {
+                                            "Option": "String"
+                                          },
+                                          "user_id": {
+                                            "Option": "I64"
+                                          }
+                                        }
+                                      },
+                                      "sub_type": "String",
+                                      "time": "I64",
+                                      "user_id": "I64"
+                                    }
+                                  }
+                                ]
+                              },
+                              "ModelTurn": {
+                                "Unnamed": [
+                                  {
+                                    "Record": {
+                                      "assistant": {
+                                        "Record": {
+                                          "content": {
+                                            "Option": "String"
+                                          },
+                                          "reasoning_content": {
+                                            "Option": "String"
+                                          },
+                                          "refusal": {
+                                            "Option": "String"
+                                          },
+                                          "tool_calls": {
+                                            "Option": {
+                                              "Array": {
+                                                "Variant": {
+                                                  "Function": {
+                                                    "Named": {
+                                                      "function": {
+                                                        "Record": {
+                                                          "arguments": "String",
+                                                          "name": "String"
+                                                        }
+                                                      },
+                                                      "id": "String"
+                                                    }
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "time": "I64"
+                                    }
+                                  }
+                                ]
+                              },
+                              "ToolResult": {
+                                "Unnamed": [
+                                  {
+                                    "Record": {
+                                      "content": "String",
+                                      "time": "I64",
+                                      "tool_call_id": "String"
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          "id": {
+                            "Record": {
+                              "group": "I64",
+                              "sequence": "I64"
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "multimodal": "Bool"
+          }
+        },
+        {
+          "Variant": {
+            "Cq": {
+              "Unnamed": [
+                "String"
+              ]
+            },
+            "Segments": {
+              "Unnamed": [
+                {
+                  "Array": {
+                    "Variant": {
+                      "Anonymous": {
+                        "Named": {
+                          "ignore": {
+                            "Option": "String"
+                          }
+                        }
+                      },
+                      "At": {
+                        "Named": {
+                          "qq": "String"
+                        }
+                      },
+                      "Contact": {
+                        "Unnamed": [
+                          {
+                            "Variant": {
+                              "Group": {
+                                "Named": {
+                                  "id": "String"
+                                }
+                              },
+                              "Qq": {
+                                "Named": {
+                                  "id": "String"
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "Dice": {
+                        "Named": {}
+                      },
+                      "Face": {
+                        "Named": {
+                          "id": "String"
+                        }
+                      },
+                      "Forward": {
+                        "Named": {
+                          "id": "String"
+                        }
+                      },
+                      "Image": {
+                        "Unnamed": [
+                          {
+                            "Record": {
+                              "file": "String",
+                              "kind": {
+                                "Option": {
+                                  "Variant": {
+                                    "Flash": {
+                                      "Unnamed": []
+                                    }
+                                  }
+                                }
+                              },
+                              "options": {
+                                "Record": {
+                                  "cache": {
+                                    "Option": "String"
+                                  },
+                                  "proxy": {
+                                    "Option": "String"
+                                  },
+                                  "timeout": {
+                                    "Option": "String"
+                                  },
+                                  "url": {
+                                    "Option": "String"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "Json": {
+                        "Named": {
+                          "data": "String"
+                        }
+                      },
+                      "Location": {
+                        "Named": {
+                          "content": {
+                            "Option": "String"
+                          },
+                          "lat": "String",
+                          "lon": "String",
+                          "title": {
+                            "Option": "String"
+                          }
+                        }
+                      },
+                      "Music": {
+                        "Unnamed": [
+                          {
+                            "Variant": {
+                              "Custom": {
+                                "Named": {
+                                  "audio": "String",
+                                  "content": {
+                                    "Option": "String"
+                                  },
+                                  "image": {
+                                    "Option": "String"
+                                  },
+                                  "title": "String",
+                                  "url": "String"
+                                }
+                              },
+                              "Netease": {
+                                "Named": {
+                                  "id": "String"
+                                }
+                              },
+                              "Qq": {
+                                "Named": {
+                                  "id": "String"
+                                }
+                              },
+                              "Xiami": {
+                                "Named": {
+                                  "id": "String"
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "Node": {
+                        "Unnamed": [
+                          {
+                            "Variant": {
+                              "Custom": {
+                                "Named": {
+                                  "content": {
+                                    "Ref": 1
+                                  },
+                                  "nickname": "String",
+                                  "user_id": "String"
+                                }
+                              },
+                              "Reference": {
+                                "Named": {
+                                  "id": "String"
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "Poke": {
+                        "Named": {
+                          "id": "String",
+                          "kind": "String",
+                          "name": {
+                            "Option": "String"
+                          }
+                        }
+                      },
+                      "Record": {
+                        "Unnamed": [
+                          {
+                            "Record": {
+                              "file": "String",
+                              "magic": {
+                                "Option": "String"
+                              },
+                              "options": {
+                                "Record": {
+                                  "cache": {
+                                    "Option": "String"
+                                  },
+                                  "proxy": {
+                                    "Option": "String"
+                                  },
+                                  "timeout": {
+                                    "Option": "String"
+                                  },
+                                  "url": {
+                                    "Option": "String"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "Reply": {
+                        "Named": {
+                          "id": "String"
+                        }
+                      },
+                      "Rps": {
+                        "Named": {}
+                      },
+                      "Shake": {
+                        "Named": {}
+                      },
+                      "Share": {
+                        "Named": {
+                          "content": {
+                            "Option": "String"
+                          },
+                          "image": {
+                            "Option": "String"
+                          },
+                          "title": "String",
+                          "url": "String"
+                        }
+                      },
+                      "Text": {
+                        "Named": {
+                          "text": "String"
+                        }
+                      },
+                      "Video": {
+                        "Unnamed": [
+                          {
+                            "Record": {
+                              "file": "String",
+                              "options": {
+                                "Record": {
+                                  "cache": {
+                                    "Option": "String"
+                                  },
+                                  "proxy": {
+                                    "Option": "String"
+                                  },
+                                  "timeout": {
+                                    "Option": "String"
+                                  },
+                                  "url": {
+                                    "Option": "String"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "Xml": {
+                        "Named": {
+                          "data": "String"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "Single": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Anonymous": {
+                      "Named": {
+                        "ignore": {
+                          "Option": "String"
+                        }
+                      }
+                    },
+                    "At": {
+                      "Named": {
+                        "qq": "String"
+                      }
+                    },
+                    "Contact": {
+                      "Unnamed": [
+                        {
+                          "Variant": {
+                            "Group": {
+                              "Named": {
+                                "id": "String"
+                              }
+                            },
+                            "Qq": {
+                              "Named": {
+                                "id": "String"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "Dice": {
+                      "Named": {}
+                    },
+                    "Face": {
+                      "Named": {
+                        "id": "String"
+                      }
+                    },
+                    "Forward": {
+                      "Named": {
+                        "id": "String"
+                      }
+                    },
+                    "Image": {
+                      "Unnamed": [
+                        {
+                          "Record": {
+                            "file": "String",
+                            "kind": {
+                              "Option": {
+                                "Variant": {
+                                  "Flash": {
+                                    "Unnamed": []
+                                  }
+                                }
+                              }
+                            },
+                            "options": {
+                              "Record": {
+                                "cache": {
+                                  "Option": "String"
+                                },
+                                "proxy": {
+                                  "Option": "String"
+                                },
+                                "timeout": {
+                                  "Option": "String"
+                                },
+                                "url": {
+                                  "Option": "String"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "Json": {
+                      "Named": {
+                        "data": "String"
+                      }
+                    },
+                    "Location": {
+                      "Named": {
+                        "content": {
+                          "Option": "String"
+                        },
+                        "lat": "String",
+                        "lon": "String",
+                        "title": {
+                          "Option": "String"
+                        }
+                      }
+                    },
+                    "Music": {
+                      "Unnamed": [
+                        {
+                          "Variant": {
+                            "Custom": {
+                              "Named": {
+                                "audio": "String",
+                                "content": {
+                                  "Option": "String"
+                                },
+                                "image": {
+                                  "Option": "String"
+                                },
+                                "title": "String",
+                                "url": "String"
+                              }
+                            },
+                            "Netease": {
+                              "Named": {
+                                "id": "String"
+                              }
+                            },
+                            "Qq": {
+                              "Named": {
+                                "id": "String"
+                              }
+                            },
+                            "Xiami": {
+                              "Named": {
+                                "id": "String"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "Node": {
+                      "Unnamed": [
+                        {
+                          "Variant": {
+                            "Custom": {
+                              "Named": {
+                                "content": {
+                                  "Ref": 1
+                                },
+                                "nickname": "String",
+                                "user_id": "String"
+                              }
+                            },
+                            "Reference": {
+                              "Named": {
+                                "id": "String"
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "Poke": {
+                      "Named": {
+                        "id": "String",
+                        "kind": "String",
+                        "name": {
+                          "Option": "String"
+                        }
+                      }
+                    },
+                    "Record": {
+                      "Unnamed": [
+                        {
+                          "Record": {
+                            "file": "String",
+                            "magic": {
+                              "Option": "String"
+                            },
+                            "options": {
+                              "Record": {
+                                "cache": {
+                                  "Option": "String"
+                                },
+                                "proxy": {
+                                  "Option": "String"
+                                },
+                                "timeout": {
+                                  "Option": "String"
+                                },
+                                "url": {
+                                  "Option": "String"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "Reply": {
+                      "Named": {
+                        "id": "String"
+                      }
+                    },
+                    "Rps": {
+                      "Named": {}
+                    },
+                    "Shake": {
+                      "Named": {}
+                    },
+                    "Share": {
+                      "Named": {
+                        "content": {
+                          "Option": "String"
+                        },
+                        "image": {
+                          "Option": "String"
+                        },
+                        "title": "String",
+                        "url": "String"
+                      }
+                    },
+                    "Text": {
+                      "Named": {
+                        "text": "String"
+                      }
+                    },
+                    "Video": {
+                      "Unnamed": [
+                        {
+                          "Record": {
+                            "file": "String",
+                            "options": {
+                              "Record": {
+                                "cache": {
+                                  "Option": "String"
+                                },
+                                "proxy": {
+                                  "Option": "String"
+                                },
+                                "timeout": {
+                                  "Option": "String"
+                                },
+                                "url": {
+                                  "Option": "String"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "Xml": {
+                      "Named": {
+                        "data": "String"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Cq": {
+                      "Unnamed": [
+                        {
+                          "Variant": {
+                            "InvalidParameter": {
+                              "Unnamed": []
+                            },
+                            "InvalidValue": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "MissingParameter": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "UnknownType": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "Unterminated": {
+                              "Unnamed": []
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "InlineMedia": {
+                      "Unnamed": []
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Array": {
+                    "Variant": {
+                      "Assistant": {
+                        "Unnamed": [
+                          {
+                            "Record": {
+                              "content": {
+                                "Option": "String"
+                              },
+                              "reasoning_content": {
+                                "Option": "String"
+                              },
+                              "refusal": {
+                                "Option": "String"
+                              },
+                              "tool_calls": {
+                                "Option": {
+                                  "Array": {
+                                    "Variant": {
+                                      "Function": {
+                                        "Named": {
+                                          "function": {
+                                            "Record": {
+                                              "arguments": "String",
+                                              "name": "String"
+                                            }
+                                          },
+                                          "id": "String"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "Developer": {
+                        "Named": {
+                          "content": "String"
+                        }
+                      },
+                      "System": {
+                        "Named": {
+                          "content": "String"
+                        }
+                      },
+                      "Tool": {
+                        "Named": {
+                          "content": "String",
+                          "tool_call_id": "String"
+                        }
+                      },
+                      "User": {
+                        "Named": {
+                          "content": {
+                            "Variant": {
+                              "Parts": {
+                                "Unnamed": [
+                                  {
+                                    "Array": {
+                                      "Variant": {
+                                        "ImageUrl": {
+                                          "Named": {
+                                            "image_url": {
+                                              "Record": {
+                                                "detail": {
+                                                  "Option": {
+                                                    "Variant": {
+                                                      "Auto": {
+                                                        "Unnamed": []
+                                                      },
+                                                      "High": {
+                                                        "Unnamed": []
+                                                      },
+                                                      "Low": {
+                                                        "Unnamed": []
+                                                      }
+                                                    }
+                                                  }
+                                                },
+                                                "url": "String"
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "Text": {
+                                          "Named": {
+                                            "text": "String"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                ]
+                              },
+                              "Text": {
+                                "Unnamed": [
+                                  "String"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": true,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/**"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    }
+  ],
+  "uses": [],
+  "subscriptions": []
+}

@@ -27,10 +27,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspace.join("target/wasm32-unknown-unknown/debug/forest_qwen_vl_embedding.wasm"),
         package.join("module.wasm"),
     )?;
+    let manifest = forest_qwen_vl_embedding::manifest();
     std::fs::write(
         package.join("manifest.json"),
-        serde_json::to_vec_pretty(&forest_qwen_vl_embedding::manifest())?,
+        serde_json::to_vec_pretty(&manifest)?,
     )?;
+    for interface in &manifest.provides {
+        let name = interface.path.to_string();
+        for (direction, schema) in [("input", &interface.input), ("output", &interface.output)] {
+            let path = package.join(format!(
+                "{}.{direction}.schema",
+                name.trim_start_matches('/')
+            ));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, schema.to_string())?;
+        }
+    }
     println!("{}", package.display());
     Ok(())
 }

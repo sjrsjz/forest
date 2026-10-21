@@ -1,5 +1,5 @@
-//! The public contract. Floating point data is an explicit JSON payload.
-use forest_sdk::{DeriveSchema, DeriveValue};
+//! Plugin-local Rust mapping. Floating point data is an explicit JSON payload.
+use forest_serde::{DeriveSchema, DeriveValue};
 use serde::{Deserialize, Serialize};
 
 pub const OBJECT: &str = "/module/qwen-vl-embedding";
@@ -27,7 +27,8 @@ impl Embeddings {
         serde_json::from_str(&self.json)
     }
 
-    pub(crate) fn from_vectors(vectors: &[Vec<f32>]) -> Self {
+    /// Encode vectors after the provider has qualified their dimensions and values.
+    pub fn from_vectors(vectors: &[Vec<f32>]) -> Self {
         Self {
             json: serde_json::to_string(vectors).expect("validated finite embedding vectors"),
         }

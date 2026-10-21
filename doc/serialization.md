@@ -8,7 +8,17 @@
 
 `Schema` 表达结构类型；`Value` 表达独立值树。Rust `TypeId` 只参与本地类型图构造，导出的 Schema 使用索引引用。Record、Variant 和命名载荷使用有序映射，使同一 Rust 类型重复生成的 Schema 具有稳定的字段遍历和引用编号。不同但结构等价的类型图不承诺编码字节相同。
 
-`DeriveSchema` 和 `DeriveValue` 从同一 Rust 类型生成对应契约与转换，包括泛型和递归类型。
+Schema 语言独立于 Rust。例如：
+
+```text
+schema Request = { text: string };
+schema Reply = variant { Ok(string), Err(string) };
+export Request;
+```
+
+`parse_schema` 将该文本解析为类型图。对应输入 Value 可写成 `{ text: "hello" }`；模块间按这份结构契约通信，不需要共享 Rust 类型源码或库。插件可发布自己的 Schema 文本，Rust、C 等实现分别选择自己的内部表示。
+
+`DeriveSchema` 和 `DeriveValue` 是 Rust 的可选映射工具，从本地类型生成对应 Schema 与 Value 转换，包括泛型和递归类型；它们不是跨模块类型身份，也不要求调用双方依赖同一个 crate。
 
 ```rust
 use forest_serde::{DeriveSchema, DeriveValue};

@@ -7,6 +7,14 @@ publish.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "package-qwen-vl-embedding"
+path = "src/bin/package.rs"
+
+[[example]]
+name = "verify-qwen-vl-embedding"
+path = "examples/verify.rs"
+
 [dependencies]
 forest-sdk = { path = "../../crates/forest-sdk" }
 forest-protocol = { path = "../../crates/forest-protocol" }

@@ -154,9 +154,10 @@ pub fn parse_value(input: &str) -> Result<Value, ParseError> {
 ///
 /// Syntax:
 /// ```text
-/// type Point = record { x: i32, y: i64 };
-/// type Option = variant { Some(value), None };
-/// type List = variant { Cons(i32, List), Nil };
+/// schema Point = { x: i32, y: i64 };
+/// schema MaybePoint = variant { Some(Point), None };
+/// schema List = variant { Cons(i32, List), Nil };
+/// export List;
 /// ```
 pub fn parse_schema(input: &str) -> Result<Schema, SchemaParseError> {
     let lexer = SchemaToken::lexer(input);

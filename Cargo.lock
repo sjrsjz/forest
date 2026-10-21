@@ -708,6 +708,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "forest-context-module"
+version = "0.1.0"
+dependencies = [
+ "forest-config",
+ "forest-onebot",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "forest-onebot"
 version = "0.1.0"
 dependencies = [
@@ -716,6 +732,22 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "forest-openai-provider"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "forest-config",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 

@@ -1,0 +1,462 @@
+{
+  "package": {
+    "id": "/module/openai-provider",
+    "version": "0.1.0",
+    "name": "OpenAI Chat Completions",
+    "description": "Typed messages and native function tools; configured model and image capability"
+  },
+  "module": "module.wasm",
+  "configs": [
+    {
+      "key": "/settings",
+      "schema": [
+        {
+          "Record": {
+            "api_key": "String",
+            "endpoint": "String",
+            "model": "String",
+            "multimodal": "Bool",
+            "output_limit": {
+              "Variant": {
+                "CompletionTokens": {
+                  "Unnamed": [
+                    "I64"
+                  ]
+                },
+                "ProviderDefault": {
+                  "Unnamed": []
+                },
+                "Tokens": {
+                  "Unnamed": [
+                    "I64"
+                  ]
+                }
+              }
+            },
+            "reasoning_effort": {
+              "Option": "String"
+            }
+          }
+        }
+      ],
+      "default": {
+        "Record": {
+          "api_key": {
+            "String": ""
+          },
+          "endpoint": {
+            "String": "https://api.openai.com/v1/chat/completions"
+          },
+          "model": {
+            "String": ""
+          },
+          "multimodal": {
+            "Bool": false
+          },
+          "output_limit": {
+            "Variant": [
+              "ProviderDefault",
+              {
+                "Unnamed": []
+              }
+            ]
+          },
+          "reasoning_effort": "None"
+        }
+      },
+      "access": {
+        "readers": [
+          "SelfModule"
+        ],
+        "writers": [
+          {
+            "Path": "/user/admin"
+          }
+        ],
+        "callers": []
+      }
+    }
+  ],
+  "provides": [
+    {
+      "path": "/capabilities",
+      "input": [
+        {
+          "Tuple": []
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Http": {
+                      "Named": {
+                        "request_id": {
+                          "Option": "String"
+                        },
+                        "status": "I32"
+                      }
+                    },
+                    "NotConfigured": {
+                      "Unnamed": []
+                    },
+                    "Response": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "ToolSchema": {
+                      "Named": {
+                        "name": "String",
+                        "reason": "String"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "model": "String",
+                    "multimodal": "Bool"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": true,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/**"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/complete",
+      "input": [
+        {
+          "Record": {
+            "messages": {
+              "Array": {
+                "Variant": {
+                  "Assistant": {
+                    "Unnamed": [
+                      {
+                        "Record": {
+                          "content": {
+                            "Option": "String"
+                          },
+                          "reasoning_content": {
+                            "Option": "String"
+                          },
+                          "refusal": {
+                            "Option": "String"
+                          },
+                          "tool_calls": {
+                            "Option": {
+                              "Array": {
+                                "Variant": {
+                                  "Function": {
+                                    "Named": {
+                                      "function": {
+                                        "Record": {
+                                          "arguments": "String",
+                                          "name": "String"
+                                        }
+                                      },
+                                      "id": "String"
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "Developer": {
+                    "Named": {
+                      "content": "String"
+                    }
+                  },
+                  "System": {
+                    "Named": {
+                      "content": "String"
+                    }
+                  },
+                  "Tool": {
+                    "Named": {
+                      "content": "String",
+                      "tool_call_id": "String"
+                    }
+                  },
+                  "User": {
+                    "Named": {
+                      "content": {
+                        "Variant": {
+                          "Parts": {
+                            "Unnamed": [
+                              {
+                                "Array": {
+                                  "Variant": {
+                                    "ImageUrl": {
+                                      "Named": {
+                                        "image_url": {
+                                          "Record": {
+                                            "detail": {
+                                              "Option": {
+                                                "Variant": {
+                                                  "Auto": {
+                                                    "Unnamed": []
+                                                  },
+                                                  "High": {
+                                                    "Unnamed": []
+                                                  },
+                                                  "Low": {
+                                                    "Unnamed": []
+                                                  }
+                                                }
+                                              }
+                                            },
+                                            "url": "String"
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "Text": {
+                                      "Named": {
+                                        "text": "String"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            ]
+                          },
+                          "Text": {
+                            "Unnamed": [
+                              "String"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "tool_choice": {
+              "Option": {
+                "Variant": {
+                  "Auto": {
+                    "Unnamed": []
+                  },
+                  "Function": {
+                    "Unnamed": [
+                      "String"
+                    ]
+                  },
+                  "None": {
+                    "Unnamed": []
+                  },
+                  "Required": {
+                    "Unnamed": []
+                  }
+                }
+              }
+            },
+            "tools": {
+              "Array": {
+                "Record": {
+                  "description": {
+                    "Option": "String"
+                  },
+                  "name": "String",
+                  "parameters_json": "String",
+                  "strict": {
+                    "Option": "Bool"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Http": {
+                      "Named": {
+                        "request_id": {
+                          "Option": "String"
+                        },
+                        "status": "I32"
+                      }
+                    },
+                    "NotConfigured": {
+                      "Unnamed": []
+                    },
+                    "Response": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "ToolSchema": {
+                      "Named": {
+                        "name": "String",
+                        "reason": "String"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "choices": {
+                      "Array": {
+                        "Record": {
+                          "finish_reason": {
+                            "Variant": {
+                              "ContentFilter": {
+                                "Unnamed": []
+                              },
+                              "Length": {
+                                "Unnamed": []
+                              },
+                              "Stop": {
+                                "Unnamed": []
+                              },
+                              "ToolCalls": {
+                                "Unnamed": []
+                              }
+                            }
+                          },
+                          "index": "I64",
+                          "message": {
+                            "Record": {
+                              "content": {
+                                "Option": "String"
+                              },
+                              "reasoning_content": {
+                                "Option": "String"
+                              },
+                              "refusal": {
+                                "Option": "String"
+                              },
+                              "tool_calls": {
+                                "Option": {
+                                  "Array": {
+                                    "Variant": {
+                                      "Function": {
+                                        "Named": {
+                                          "function": {
+                                            "Record": {
+                                              "arguments": "String",
+                                              "name": "String"
+                                            }
+                                          },
+                                          "id": "String"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "created": "I64",
+                    "id": "String",
+                    "model": "String",
+                    "usage": {
+                      "Option": {
+                        "Record": {
+                          "completion_tokens": "I64",
+                          "completion_tokens_details": {
+                            "Option": {
+                              "Record": {
+                                "reasoning_tokens": {
+                                  "Option": "I64"
+                                }
+                              }
+                            }
+                          },
+                          "prompt_cache_hit_tokens": {
+                            "Option": "I64"
+                          },
+                          "prompt_cache_miss_tokens": {
+                            "Option": "I64"
+                          },
+                          "prompt_tokens": "I64",
+                          "prompt_tokens_details": {
+                            "Option": {
+                              "Record": {
+                                "cached_tokens": {
+                                  "Option": "I64"
+                                }
+                              }
+                            }
+                          },
+                          "total_tokens": "I64"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": true,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/**"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    }
+  ],
+  "uses": [],
+  "subscriptions": []
+}

@@ -938,3 +938,14 @@ pub trait AsValue: Sized + 'static {
     /// Deserializes a dynamic [`Value`] tree back into an instance of the type.
     fn from_value(value: Value) -> Result<Self, DecodeError>;
 }
+
+/// Already-encoded values pass through language bindings without a Rust DTO.
+impl AsValue for Value {
+    fn as_value(&self) -> Value {
+        self.clone()
+    }
+
+    fn from_value(value: Value) -> Result<Self, DecodeError> {
+        Ok(value)
+    }
+}

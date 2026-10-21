@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {Host(string), Http {request_id: optional string, status: i32}, NotConfigured, Response(string), ToolSchema {name: string, reason: string}}), Ok({model: string, multimodal: bool})};
+export T0;

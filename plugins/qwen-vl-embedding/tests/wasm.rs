@@ -1,9 +1,9 @@
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use forest_config::{ConfigStore, Declaration, Key};
 use forest_protocol::{DispatchError, Token};
-use forest_qwen_vl_embedding::{
-    api::{CONNECTION, Connection, DIMENSIONS, EMBED, Embeddings, Error, Input, MODEL, OBJECT},
-    manifest,
+use forest_qwen_vl_embedding::manifest;
+use forest_qwen_vl_embedding::types::{
+    CONNECTION, Connection, DIMENSIONS, EMBED, Embeddings, Error, Input, MODEL, OBJECT,
 };
 use forest_runtime::{ModulePhase, RuntimeOptions, Scheduler, StopMode};
 use serde_json::{Value, json};

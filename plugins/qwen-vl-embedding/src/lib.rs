@@ -1,8 +1,8 @@
 //! Hot-reloadable multimodal embedding provider. No memory database is required.
-pub mod api;
 mod provider;
+pub mod types;
 
-use api::{CONNECTION, Connection, EMBED, Embeddings, Error, Input, OBJECT};
+use crate::types::{CONNECTION, Connection, EMBED, Embeddings, Error, Input, OBJECT};
 use forest_protocol::{manifest::callers, service::HttpRequest, *};
 use forest_sdk::{Handlers, Module, host};
 use std::rc::Rc;

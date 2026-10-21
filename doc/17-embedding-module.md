@@ -7,7 +7,8 @@
 源代码位于 `plugins/qwen-vl-embedding`，包身份为 `/module/qwen-vl-embedding`，接口为 `/embed`。使用现有 SDK、配置、HTTP 和生命周期能力，未新增宿主导入，也未修改 forest-serde 的 Value 类型。
 
 ```rust
-use forest_qwen_vl_embedding::api::{Input, Embeddings, Error};
+// 本插件内部对 Schema 的 Rust 映射：
+use crate::types::{Input, Embeddings, Error};
 
 // /embed 的输入和模块返回值：
 type Request = Vec<Input>;
@@ -15,6 +16,8 @@ type Response = Result<Embeddings, Error>;
 ```
 
 `Input::Text(String)` 编码文字，`Input::Image(String)` 接受服务可读图片 URL 或临时 base64/data URL。混合列表代表多个独立输入，按输入顺序返回一个向量，不融合或平均。空列表直接返回空结果，不调用模型。
+
+接口以包内 Manifest 的 Schema 和 Forest Value 为契约。Rust 类型定义位于本插件的 `src/types.rs`，调用方可以复制所需类型，也可以直接按 Schema 编码 Value；不依赖本插件或模块专属共享 crate。实现、默认连接及模型设置全部在本插件中。
 
 模型固定为 `Qwen/Qwen3-VL-Embedding-8B`，维度固定为 2048，返回向量进行 L2 归一化。外部响应只在边界解析一次，确认输入索引、数量、维度和可归一化性；错误通过模块 Result 返回，不修补成替代向量、不自动重试。
 
@@ -42,16 +45,16 @@ type Response = Result<Embeddings, Error>;
 ## 3. 构建与隔离验证
 
 ```powershell
-cargo run --offline --locked -p forest-qwen-vl-embedding --bin package
+cargo run --offline --locked -p forest-qwen-vl-embedding --bin package-qwen-vl-embedding
 cargo test --offline --locked -p forest-qwen-vl-embedding --test wasm
 ```
 
-打包生成 `packages/qwen-vl-embedding/manifest.json` 与 `module.wasm`。Manifest 从处理器类型声明生成，默认值中无真实凭据；Wasm 构建产物忽略提交。宿主调试台可以发现本地包。
+打包生成 `packages/qwen-vl-embedding/manifest.json`、`module.wasm` 及 `embed.input.schema`、`embed.output.schema`。Schema 文件是接口契约的 Forest Schema 语言表示，不依赖 Rust。默认值中无真实凭据；Wasm 构建产物忽略提交。宿主调试台可以发现本地包。
 
 在线验证程序读取本地 Connection JSON，为隔离调度器建立临时配置库并加载实际包，发出一批请求后卸载，不连接 OneBot：
 
 ```powershell
-cargo run --offline --locked -p forest-qwen-vl-embedding --example verify -- <connection.json>
+cargo run --offline --locked -p forest-qwen-vl-embedding --example verify-qwen-vl-embedding -- <connection.json>
 ```
 
 验证使用 Qwen 官方示例图，包含两段文字、图片 URL 和相同图片的 data URL。连接文件应放在忽略提交的位置；命令行只传文件路径。程序不输出凭据、原图 base64 或完整向量。
