@@ -68,7 +68,7 @@ impl Wasm {
         store.set_epoch_deadline(1);
         store.epoch_deadline_callback(|context| {
             if context.data().instance.force.load(Ordering::Acquire) {
-                anyhow::bail!("externally interrupted");
+                return Err(wasmtime::Error::msg("externally interrupted"));
             }
             Ok(UpdateDeadline::Yield(1))
         });
@@ -200,62 +200,30 @@ fn imports(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostState>> {
         linker.func_wrap(
             "forest_host",
             name,
-            move |mut caller: Caller<'_, HostState>, ptr: u32, len: u32| -> Result<u64> {
-                submit(&mut caller, operation, ptr, len)
+            move |mut caller: Caller<'_, HostState>, ptr: u32, len: u32| {
+                submit(&mut caller, operation, ptr, len).map_err(wasmtime::Error::from_anyhow)
             },
         )?;
     }
     linker.func_wrap(
         "forest_host",
         "operation_status",
-        |caller: Caller<'_, HostState>, id: u64| -> Result<i64> {
-            ensure!(
-                !caller.data().instance.force.load(Ordering::Acquire),
-                "externally interrupted"
-            );
-            caller
-                .data()
-                .instance
-                .operations
-                .status(caller.data().frame.signal.id, id)
+        |caller: Caller<'_, HostState>, id: u64| {
+            operation_status(caller, id).map_err(wasmtime::Error::from_anyhow)
         },
     )?;
     linker.func_wrap(
         "forest_host",
         "operation_take",
-        |mut caller: Caller<'_, HostState>, id: u64, ptr: u32, len: u32| -> Result<()> {
-            ensure!(
-                !caller.data().instance.force.load(Ordering::Acquire),
-                "externally interrupted"
-            );
-            let instance = caller.data().instance.clone();
-            let task = caller.data().frame.signal.id;
-            let memory = caller
-                .get_export("memory")
-                .and_then(|e| e.into_memory())
-                .context("ABI memory")?;
-            instance.operations.take(task, id, |bytes| {
-                ensure!(
-                    bytes.len() == len as usize,
-                    "incorrect operation result buffer length"
-                );
-                memory.write(&mut caller, ptr as usize, bytes)?;
-                Ok(())
-            })
+        |caller: Caller<'_, HostState>, id: u64, ptr: u32, len: u32| {
+            operation_take(caller, id, ptr, len).map_err(wasmtime::Error::from_anyhow)
         },
     )?;
     linker.func_wrap(
         "forest_host",
         "operation_release",
-        |caller: Caller<'_, HostState>, id: u64| -> Result<()> {
-            let state = caller.data();
-            let core = state.instance.core.upgrade().context("host stopped")?;
-            let cleanup =
-                core.permission(&state.instance, HostAccess::Release)? == ModulePhase::Destroying;
-            state
-                .instance
-                .operations
-                .release(state.frame.signal.id, id, cleanup)
+        |caller: Caller<'_, HostState>, id: u64| {
+            operation_release(caller, id).map_err(wasmtime::Error::from_anyhow)
         },
     )?;
     linker.func_wrap(
@@ -266,6 +234,49 @@ fn imports(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostState>> {
         },
     )?;
     Ok(linker)
+}
+
+fn operation_status(caller: Caller<'_, HostState>, id: u64) -> Result<i64> {
+    ensure!(
+        !caller.data().instance.force.load(Ordering::Acquire),
+        "externally interrupted"
+    );
+    caller
+        .data()
+        .instance
+        .operations
+        .status(caller.data().frame.signal.id, id)
+}
+
+fn operation_take(mut caller: Caller<'_, HostState>, id: u64, ptr: u32, len: u32) -> Result<()> {
+    ensure!(
+        !caller.data().instance.force.load(Ordering::Acquire),
+        "externally interrupted"
+    );
+    let instance = caller.data().instance.clone();
+    let task = caller.data().frame.signal.id;
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .context("ABI memory")?;
+    instance.operations.take(task, id, |bytes| {
+        ensure!(
+            bytes.len() == len as usize,
+            "incorrect operation result buffer length"
+        );
+        memory.write(&mut caller, ptr as usize, bytes)?;
+        Ok(())
+    })
+}
+
+fn operation_release(caller: Caller<'_, HostState>, id: u64) -> Result<()> {
+    let state = caller.data();
+    let core = state.instance.core.upgrade().context("host stopped")?;
+    let cleanup = core.permission(&state.instance, HostAccess::Release)? == ModulePhase::Destroying;
+    state
+        .instance
+        .operations
+        .release(state.frame.signal.id, id, cleanup)
 }
 
 fn read<T: DeserializeOwned>(caller: &mut Caller<'_, HostState>, ptr: u32, len: u32) -> Result<T> {

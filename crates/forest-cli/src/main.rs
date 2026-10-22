@@ -39,7 +39,7 @@ struct Arguments {
     )]
     packages_directory: PathBuf,
     #[arg(long, default_value = "packages/forest-test")]
-    package: PathBuf,
+    package: Vec<PathBuf>,
     #[arg(long, default_value = "data/forest.sqlite3")]
     database: PathBuf,
     #[arg(long, default_value = "data/modules")]
@@ -156,8 +156,15 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let package = scheduler.package(&args.package).await?;
-    let object = package.manifest().package.id.clone();
+    let mut available = Vec::new();
+    let mut roots = Vec::new();
+    let mut declarations = Vec::new();
+    for directory in args.package {
+        let package = scheduler.package(&directory).await?;
+        roots.push(package.manifest().package.id.clone());
+        declarations.push((directory, package.manifest().clone()));
+        available.push(package);
+    }
     let mut actions = None;
     let transport = if let Some(endpoint) = args.onebot_http {
         let http = reqwest::Client::builder()
@@ -185,7 +192,6 @@ async fn main() -> Result<()> {
         },
         vec![SubjectPattern::Path("/module/**".parse()?)],
     )?;
-    let mut declarations = vec![(args.package.clone(), package.manifest().clone())];
     let directories = match tokio::fs::read_dir(&args.packages_directory).await {
         Ok(directory) => Some(directory),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -200,7 +206,7 @@ async fn main() -> Result<()> {
                 let candidate: forest_protocol::Manifest = serde_json::from_slice(
                     &tokio::fs::read(entry.path().join("manifest.json")).await?,
                 )?;
-                if candidate.package.id != object {
+                if !roots.contains(&candidate.package.id) {
                     declarations.push((entry.path(), candidate));
                 }
             }
@@ -211,17 +217,14 @@ async fn main() -> Result<()> {
             .iter()
             .map(|(_, m)| m.clone())
             .collect::<Vec<_>>(),
-        std::slice::from_ref(&object),
+        &roots,
     )?;
-    let mut available = vec![package];
     for (directory, manifest) in declarations {
-        if manifest.package.id != object && selected.contains(&manifest.package.id) {
+        if !roots.contains(&manifest.package.id) && selected.contains(&manifest.package.id) {
             available.push(scheduler.package(directory).await?);
         }
     }
-    scheduler
-        .load_roots(available, std::slice::from_ref(&object))
-        .await?;
+    scheduler.load_roots(available, &roots).await?;
     let connection = async {
         match (args.reverse_ws, args.events_ws) {
             (Some(address), _) => reverse(address, ingress, event_token, logs).await,

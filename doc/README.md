@@ -31,6 +31,7 @@
 | [Wolfram Alpha 工具](24-wolfram-alpha.md) | 独立 Wasm 计算插件、连接配置与工具网关路由 |
 | [文档渲染与受管媒体](25-document-rendering-proposal.md) | 独立 Typst/Media Wasm 包、PNG 引用、CQ 发送及媒体持久化 |
 | [群聊 Shell 与学校帮助](26-group-shell-and-school-help.md) | 授权管理 Wasm 包、共享宿主管理端口与 NPUCraft 帮助回复 |
+| [Linux ARM64 部署](27-linux-deployment.md) | 交叉构建、编译预热、systemd、WebUI 监听与数据搬迁 |
 
 文档中的“待定”表示尚未形成决定。编写对应实现前应继续讨论，不能把示例名称或先前提案直接固定为接口。
 

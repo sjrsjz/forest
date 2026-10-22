@@ -57,6 +57,21 @@ async fn run(root: &std::path::Path, restricted: bool) {
         serde_json::to_vec(&forest_test::manifest()).unwrap(),
     )
     .unwrap();
+    let second_package = temp.path().join("second-package");
+    std::fs::create_dir(&second_package).unwrap();
+    std::fs::copy(
+        package.join("module.wasm"),
+        second_package.join("module.wasm"),
+    )
+    .unwrap();
+    let mut second_manifest = forest_test::manifest();
+    second_manifest.package.id = "/module/second-root".parse().unwrap();
+    second_manifest.subscriptions.clear();
+    std::fs::write(
+        second_package.join("manifest.json"),
+        serde_json::to_vec(&second_manifest).unwrap(),
+    )
+    .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (ready, initialized) = tokio::sync::oneshot::channel();
@@ -108,6 +123,8 @@ async fn run(root: &std::path::Path, restricted: bool) {
         .current_dir(temp.path())
         .args(["--package"])
         .arg(&package)
+        .args(["--package"])
+        .arg(&second_package)
         .args([
             "--events-ws",
             &format!("ws://{address}"),
@@ -135,7 +152,7 @@ async fn run(root: &std::path::Path, restricted: bool) {
                 0,
                 "host exited before Serving"
             );
-            if line.contains("is Serving") {
+            if line.contains("module /module/second-root is Serving") {
                 break;
             }
         }

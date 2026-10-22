@@ -75,3 +75,5 @@ OneBot 使用方式见 [API 库说明](crates/forest-onebot/README.md)，选型�
 文档与公式可通过 `typst_render` 工具生成 PNG；工具只返回受管媒体引用，Agent 在正文中使用返回的 CQ 图片码发送。见 [文档渲染与受管媒体](doc/25-document-rendering-proposal.md)。
 
 群聊管理命令以 `#forest` 开头，授权与命令见[群聊 Shell 与学校帮助](doc/26-group-shell-and-school-help.md)。Shell 与 NPUCraft 为独立可热重载的 Wasm 包，可在 WebUI 本地包页面加载。
+
+Linux ARM64 的构建、systemd 常驻运行和数据搬迁见[部署说明](doc/27-linux-deployment.md)。CLI 可重复传入 `--package` 同时声明多个启动根包。

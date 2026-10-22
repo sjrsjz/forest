@@ -1,0 +1,19 @@
+[Unit]
+Description=Forest Wasm Bot
+Wants=network-online.target forest-qdrant.service
+After=network-online.target forest-qdrant.service
+
+[Service]
+Type=exec
+User=@USER@
+WorkingDirectory=@ROOT@
+EnvironmentFile=@ROOT@/.env
+ExecStart=@ROOT@/bin/forest --package @ROOT@/packages/agent --package @ROOT@/packages/shell --package @ROOT@/packages/npucraft --packages-directory @ROOT@/packages --database @ROOT@/data/config.sqlite3 --data-directory @ROOT@/data/modules --events-ws ws://127.0.0.1:8080 --webui 0.0.0.0:8081 --webui-assets @ROOT@/webui/dist
+KillSignal=SIGINT
+TimeoutStopSec=infinity
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

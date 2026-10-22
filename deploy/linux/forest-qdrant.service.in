@@ -1,0 +1,17 @@
+[Unit]
+Description=Forest vector index
+After=network.target
+
+[Service]
+Type=exec
+User=@USER@
+WorkingDirectory=@ROOT@
+EnvironmentFile=@ROOT@/.env
+ExecStart=@ROOT@/bin/qdrant --config-path @ROOT@/qdrant.yaml
+TimeoutStopSec=infinity
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

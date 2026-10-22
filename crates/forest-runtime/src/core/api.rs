@@ -30,7 +30,6 @@ impl Scheduler {
         cache_config.with_directory(tokio::fs::canonicalize(&cache_directory).await?);
         let mut config = wasmtime::Config::new();
         config
-            .async_support(true)
             .epoch_interruption(true)
             .cache(Some(wasmtime::Cache::new(cache_config)?));
         let engine = wasmtime::Engine::new(&config)?;
