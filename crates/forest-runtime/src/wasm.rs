@@ -434,8 +434,9 @@ fn submit(
         Import::Log => {
             let input: LogRecord = read(caller, ptr, len)?;
             let object = instance.object.clone();
+            let logs = core.logs.clone();
             launch!(HostAccess::Basic, async move {
-                eprintln!("[{:?}] {}: {}", input.level, object, input.message);
+                logs.write(input.level, object, input.message);
                 Ok(())
             })
         }

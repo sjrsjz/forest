@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/forest-serde", "crates/forest-serde-macros", "crates/forest-util", "crates/forest-onebot", "crates/forest-config", "crates/forest-protocol", "crates/forest-sdk", "crates/forest-runtime", "crates/forest-webui", "crates/forest-cli", "plugins/forest-test", "plugins/qwen-vl-embedding", "plugins/openai-provider", "plugins/context", "plugins/memory", "plugins/agent", "plugins/agent-tools", "plugins/deepseek-web", "crates/forest-runtime/tests/fixtures/probe"]
+members = ["crates/forest-serde", "crates/forest-serde-macros", "crates/forest-util", "crates/forest-onebot", "crates/forest-config", "crates/forest-protocol", "crates/forest-sdk", "crates/forest-runtime", "crates/forest-webui", "crates/forest-cli", "plugins/forest-test", "plugins/qwen-vl-embedding", "plugins/openai-provider", "plugins/context", "plugins/memory", "plugins/agent", "plugins/agent-tools", "plugins/deepseek-web", "plugins/wolfram-alpha", "crates/forest-runtime/tests/fixtures/probe"]
 resolver = "3"
 
 [workspace.package]

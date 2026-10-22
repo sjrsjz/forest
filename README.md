@@ -4,7 +4,7 @@ Rust + Wasm Bot 微内核。当前已实现调度器核心、基础 SDK、配置
 
 当前设计面向单个 Bot 账号，可处理多个群聊；不预设多 Bot 实体、账号路由或按 Bot 挂载配置。
 
-已提供 Vue + TypeScript [宿主调试台](doc/14-inspection-webui.md)：实时模块状态、声明依赖图、完整配置查看与 ACL 鉴权编辑，以及本地包加载、热重载和卸载。构建与启动方法见该文档。
+已提供 Vue + TypeScript [宿主调试台](doc/14-inspection-webui.md)：实时模块状态、声明依赖图、配置查看与 ACL 鉴权编辑、滚动日志，以及本地包加载、热重载和卸载。OneBot 连接中断会自动重连，模块与会话保持原实例。构建与启动方法见该文档。
 
 ```text
 crates/
@@ -27,6 +27,7 @@ plugins/memory/           原文、媒体、跨群联想与派生向量索引 Wa
 plugins/agent/            每群工作循环、持续点与短期窗口 Wasm 模块
 plugins/agent-tools/      原生工具声明与显式模块调用网关 Wasm 模块
 plugins/deepseek-web/     DeepSeek 搜索与 Markdown 网页抓取 Wasm 插件
+plugins/wolfram-alpha/    Wolfram Alpha LLM API 精确计算 Wasm 插件
 packages/forest-test/    生成的外部 Manifest 与 module.wasm
 data/                   默认运行数据，不进入 Git
 ```

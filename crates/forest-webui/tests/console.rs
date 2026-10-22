@@ -94,6 +94,7 @@ async fn authenticated_inspection_is_read_only_and_stream_closes_on_shutdown() {
     for path in [
         "snapshot",
         "events",
+        "logs",
         "config-entities",
         "config-keys?object=/module/private",
         "config-entry?object=/module/private&key=/private/value",
@@ -204,6 +205,73 @@ async fn authenticated_inspection_is_read_only_and_stream_closes_on_shutdown() {
         .await
         .unwrap();
     assert_eq!(full, value.to_string());
+    let logs = scheduler.logs();
+    logs.write(
+        forest_protocol::service::LogLevel::Info,
+        "/core/test".parse().unwrap(),
+        "before subscription",
+    );
+    let response = client
+        .get(format!("{base}/api/inspect/logs"))
+        .header("Cookie", cookie)
+        .send()
+        .await
+        .unwrap();
+    let mut log_stream = response.bytes_stream();
+    let chunk = tokio::time::timeout(Duration::from_secs(5), log_stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let initial = String::from_utf8_lossy(&chunk);
+    assert!(initial.contains("before subscription"));
+    assert!(initial.contains("\"reset\":true"));
+    logs.write(
+        forest_protocol::service::LogLevel::Warn,
+        "/module/test".parse().unwrap(),
+        "after subscription",
+    );
+    let chunk = tokio::time::timeout(Duration::from_secs(5), log_stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let update = String::from_utf8_lossy(&chunk);
+    assert!(update.contains("after subscription"));
+    assert!(!update.contains("before subscription"));
+    let resumed = client
+        .get(format!("{base}/api/inspect/logs"))
+        .header("Cookie", cookie)
+        .header("Last-Event-ID", format!("{}:1", logs.reader().id()))
+        .send()
+        .await
+        .unwrap();
+    let mut resumed = resumed.bytes_stream();
+    let chunk = tokio::time::timeout(Duration::from_secs(5), resumed.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let update = String::from_utf8_lossy(&chunk);
+    assert!(update.contains("after subscription"));
+    assert!(!update.contains("before subscription"));
+    assert!(update.contains("\"reset\":false"));
+    let restarted = client
+        .get(format!("{base}/api/inspect/logs"))
+        .header("Cookie", cookie)
+        .header("Last-Event-ID", "previous-host:1")
+        .send()
+        .await
+        .unwrap();
+    let mut restarted = restarted.bytes_stream();
+    let chunk = tokio::time::timeout(Duration::from_secs(5), restarted.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let update = String::from_utf8_lossy(&chunk);
+    assert!(update.contains("\"reset\":true"));
+    assert!(update.contains("before subscription") && update.contains("after subscription"));
     assert_eq!(
         client
             .get(format!(
@@ -254,5 +322,8 @@ async fn authenticated_inspection_is_read_only_and_stream_closes_on_shutdown() {
         .unwrap()
         .unwrap();
     drop(stream);
+    drop(log_stream);
+    drop(resumed);
+    drop(restarted);
     store.close().await.unwrap();
 }

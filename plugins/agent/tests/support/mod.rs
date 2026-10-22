@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post, put},
 };
@@ -42,6 +42,7 @@ pub struct Remote {
     pub requests: Vec<(i64, Value)>,
     pub embeddings: Vec<Value>,
     pub web_requests: Vec<(String, Value)>,
+    pub wolfram_requests: Vec<BTreeMap<String, String>>,
     pub points: BTreeMap<String, Value>,
     pub collection: bool,
     pub seed_filter: Option<(i64, i64)>,
@@ -182,6 +183,29 @@ async fn web_fetch(
         .push(("fetch".into(), body));
     Json(json!({"title":"Web source","content":"# Article\nExtracted Markdown"}))
 }
+async fn wolfram(
+    State(remote): State<Shared>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> (StatusCode, &'static str) {
+    assert_eq!(headers["authorization"], "Bearer wolfram-test");
+    assert!(!params.contains_key("appid"));
+    let query = params["input"].clone();
+    remote.lock().unwrap().wolfram_requests.push(params);
+    match query.as_str() {
+        "UNKNOWN" => (
+            StatusCode::NOT_IMPLEMENTED,
+            "Try a different interpretation.",
+        ),
+        "DENIED" => (
+            StatusCode::FORBIDDEN,
+            "private provider detail: wolfram-test",
+        ),
+        "EMPTY" => (StatusCode::OK, " "),
+        _ => (StatusCode::OK, "Result:\npi^3/3 + 2"),
+    }
+}
+
 pub struct Harness {
     pub scheduler: Scheduler,
     pub store: ConfigStore,
@@ -200,6 +224,7 @@ impl Harness {
             "forest-agent-module",
             "forest-agent-tools",
             "forest-deepseek-web",
+            "forest-wolfram-alpha",
             "forest-context-module",
             "forest-openai-provider",
             "forest-qwen-vl-embedding",
@@ -229,6 +254,7 @@ impl Harness {
             .route("/slow", get(slow))
             .route("/v1/tools/search", post(web_search))
             .route("/v1/tools/fetch", post(web_fetch))
+            .route("/wolfram", get(wolfram))
             .route("/collections/{name}", get(collection).put(create))
             .route("/collections/{name}/points", put(upsert))
             .route("/collections/{name}/points/query", post(query))
@@ -276,6 +302,7 @@ impl Harness {
             forest_memory_module::manifest(),
             forest_agent_tools::manifest(),
             forest_deepseek_web::manifest(),
+            forest_wolfram_alpha::manifest(),
             forest_agent_module::manifest(),
         ];
         let mut packages = BTreeMap::new();
@@ -286,6 +313,7 @@ impl Harness {
             "forest_memory_module",
             "forest_agent_tools",
             "forest_deepseek_web",
+            "forest_wolfram_alpha",
             "forest_agent_module",
         ]) {
             let id = manifest.package.id.clone();
@@ -360,6 +388,16 @@ impl Harness {
                 &forest_deepseek_web::Connection {
                     endpoint: format!("{}/v1", result.endpoint),
                     api_key: "test".into(),
+                },
+            )
+            .await;
+        result
+            .configure(
+                "/module/wolfram-alpha",
+                "/connection",
+                &forest_wolfram_alpha::Connection {
+                    endpoint: format!("{}/wolfram", result.endpoint),
+                    app_id: "wolfram-test".into(),
                 },
             )
             .await;

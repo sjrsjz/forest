@@ -51,6 +51,7 @@ async fn main() -> SetupResult<()> {
         "context",
         "memory",
         "deepseek-web",
+        "wolfram-alpha",
         "agent-tools",
         "agent",
     ] {
@@ -139,6 +140,24 @@ async fn main() -> SetupResult<()> {
                 endpoint: env::var("FOREST_DEEPSEEK_ENDPOINT")
                     .unwrap_or_else(|_| "https://api.deepseek.com/v1".into()),
                 api_key,
+            },
+        )
+        .await?;
+    }
+    if let Ok(app_id) = env::var("FOREST_WOLFRAM_APP_ID") {
+        #[derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)]
+        struct WolframConnection {
+            endpoint: String,
+            app_id: String,
+        }
+        set(
+            &store,
+            "/module/wolfram-alpha",
+            "/connection",
+            &WolframConnection {
+                endpoint: env::var("FOREST_WOLFRAM_ENDPOINT")
+                    .unwrap_or_else(|_| "https://www.wolframalpha.com/api/v1/llm-api".into()),
+                app_id,
             },
         )
         .await?;

@@ -12,6 +12,7 @@ Agent、Memory、工具网关是三个独立 Wasm 包，分别位于 `plugins/ag
 | `/module/memory` | `/index/advance`、`/index/rebuild`、`/status` | 持久索引待办、显式重建和索引状态 |
 | `/module/agent-tools` | `/describe`、`/invoke` | 原生工具声明与显式模块路由 |
 | `/module/deepseek-web` | `/search`、`/fetch` | 默认网页搜索与 Markdown 抓取 |
+| `/module/wolfram-alpha` | `/query` | 官方 LLM API 精确计算与科学知识查询 |
 | `/module/context` | `/format` | 人格提示词、账号身份、来源标记、CQ 和图片格式化 |
 | `/module/openai-provider` | `/complete`、`/capabilities` | 模型协议和多模态能力声明 |
 | `/module/qwen-vl-embedding` | `/embed` | 固定模型、2048 维文本或图片向量 |
@@ -50,7 +51,7 @@ Qdrant 保存向量和原群、序号引用。查询采用 [Query API](https://a
 ./scripts/build-agent.ps1
 ```
 
-该脚本构建七个独立 Wasm 包及其外部 Manifest/Schema，编译并行数为 2。
+该脚本构建八个独立 Wasm 包及其外部 Manifest/Schema，编译并行数为 2。
 
 配置项如下，修改后热重载所属模块生效：
 
@@ -63,6 +64,7 @@ Qdrant 保存向量和原群、序号引用。查询采用 [Query API](https://a
 | Memory `/settings` | Qdrant endpoint、api_key、collection、检索参数 JSON |
 | 工具网关 `/routes` | 工具声明及其目标对象、接口 |
 | DeepSeek Web `/connection` | DeepSeek API 前缀和独立凭据 |
+| Wolfram Alpha `/connection` | LLM API endpoint 和 AppID |
 
 初次部署可用配置辅助程序。先在当前终端设置 `FOREST_CHAT_ENDPOINT`、`FOREST_CHAT_MODEL`、`FOREST_CHAT_KEY`、`FOREST_EMBED_KEY`、`FOREST_GROUPS`，再执行：
 
@@ -83,7 +85,7 @@ cargo run --locked --offline -j 2 -p forest-cli -- --package packages/agent --ev
 
 ## 5. 工具扩展
 
-默认网关提供 `web_search`、`web_fetch`、`http_request` 和 `memory_read`。网页搜索及阅读优先使用独立 [DeepSeek Web 插件](23-deepseek-web.md)，返回搜索摘要和 Markdown；原始 HTTP 保留用于明确的 HTTP/API 操作。记忆工具按原群和序号读取已归档资料，保留来源，不输出历史思考。
+默认网关提供 `web_search`、`web_fetch`、`http_request`、`wolfram_alpha` 和 `memory_read`。网页搜索及阅读优先使用独立 [DeepSeek Web 插件](23-deepseek-web.md)，返回搜索摘要和 Markdown；原始 HTTP 保留用于明确的 HTTP/API 操作。[Wolfram Alpha 插件](24-wolfram-alpha.md)提供精确计算，连接配置可通过管理端或配置辅助程序的 `FOREST_WOLFRAM_APP_ID`、`FOREST_WOLFRAM_ENDPOINT` 设置。记忆工具按原群和序号读取已归档资料，保留来源，不输出历史思考。
 
 外部工具接口接受 `Invocation { group_id, bot_id, name, arguments_json }`，返回 `Result<String, Error>`。路由按工具名选择明确的 `(对象, 接口)`，调用仍经过 Manifest uses 和目标 ACL；参数不参与选择任意接口。把自定义路由列表交给打包程序，可同时生成静态依赖：
 

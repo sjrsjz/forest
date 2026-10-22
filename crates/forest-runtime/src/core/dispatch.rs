@@ -161,7 +161,11 @@ impl Core {
         instance: Option<&Instance>,
         request: forest_protocol::service::CallRequest,
     ) -> DispatchResult<()> {
-        let admitted = self.admit(context, instance, request, Outcome::Send)?;
+        let outcome = Outcome::Send {
+            logs: self.logs.clone(),
+            object: request.object.clone(),
+        };
+        let admitted = self.admit(context, instance, request, outcome)?;
         if let Admitted::Native {
             native,
             context,

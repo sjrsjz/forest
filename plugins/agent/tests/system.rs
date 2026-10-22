@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 async fn actual_wasm_agent_memory_context_provider_and_tools() {
     let mut h = Harness::new().await;
     deepseek_web_tools(&h).await;
+    wolfram_tool(&h).await;
     // A cross-group archived source exists; storing and recalling it never loses origin.
     let seed: Result<memory::Accepted, memory::Error> = h
         .call(
@@ -393,6 +394,94 @@ async fn deepseek_web_tools(h: &Harness) {
         serde_json::from_str::<Value>(&result).unwrap()["results"],
         json!([])
     );
+}
+
+async fn wolfram_tool(h: &Harness) {
+    use forest_agent_tools::contract::{Catalog, Error, Invocation};
+    async fn invoke(h: &Harness, args: Value) -> Result<String, Error> {
+        h.call(
+            "/module/agent-tools",
+            "/invoke",
+            &Invocation {
+                group_id: 10,
+                bot_id: 42,
+                name: "wolfram_alpha".into(),
+                arguments_json: args.to_string(),
+            },
+        )
+        .await
+    }
+    let catalog: Result<Catalog, Error> = h.call("/module/agent-tools", "/describe", &()).await;
+    assert!(
+        catalog
+            .unwrap()
+            .iter()
+            .any(|tool| tool.name == "wolfram_alpha")
+    );
+    let query = "integrate x^2 + sin(x) from 0 to pi";
+    let result = invoke(h, json!({"query": query, "max_chars": 500}))
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["status"], "complete");
+    assert_eq!(result["result"], "Result:\npi^3/3 + 2");
+    {
+        let remote = h.remote.lock().unwrap();
+        assert_eq!(remote.wolfram_requests[0]["input"], query);
+        assert_eq!(remote.wolfram_requests[0]["maxchars"], "500");
+    }
+    let result = invoke(h, json!({"query": "UNKNOWN"})).await.unwrap();
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["status"], "not_interpreted");
+    assert!(
+        result["suggestion"]
+            .as_str()
+            .unwrap()
+            .contains("interpretation")
+    );
+    assert!(matches!(
+        invoke(h, json!({"query": "DENIED"})).await,
+        Err(Error::Execution(message)) if message.contains("403") && !message.contains("wolfram-test")
+    ));
+    assert!(matches!(
+        invoke(h, json!({"query": "EMPTY"})).await,
+        Err(Error::Execution(_))
+    ));
+    let count = h.remote.lock().unwrap().wolfram_requests.len();
+    assert_eq!(count, 4); // A failed provider call is not retried.
+    for args in [
+        json!({"query": " "}),
+        json!({"query": "a\nb"}),
+        json!({"query": query, "max_chars": 0}),
+    ] {
+        assert!(matches!(invoke(h, args).await, Err(Error::Arguments(_))));
+    }
+    // Reload replaces module-owned connection state without changing the tool route.
+    for app_id in ["", "wolfram-test"] {
+        h.configure(
+            "/module/wolfram-alpha",
+            "/connection",
+            &forest_wolfram_alpha::Connection {
+                endpoint: format!("{}/wolfram", h.endpoint),
+                app_id: app_id.into(),
+            },
+        )
+        .await;
+        h.scheduler
+            .reload(h.packages["/module/wolfram-alpha"].clone(), StopMode::Drain)
+            .await
+            .unwrap();
+        let result = invoke(h, json!({"query": query})).await;
+        if app_id.is_empty() {
+            assert!(
+                matches!(result, Err(Error::Execution(message)) if message.contains("not configured"))
+            );
+            assert_eq!(h.remote.lock().unwrap().wolfram_requests.len(), count);
+        } else {
+            result.unwrap();
+        }
+    }
+    assert_eq!(h.remote.lock().unwrap().wolfram_requests.len(), count + 1);
 }
 
 async fn memory_index_and_media(h: &mut Harness) {

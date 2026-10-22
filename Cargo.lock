@@ -690,6 +690,7 @@ dependencies = [
  "forest-runtime",
  "forest-sdk",
  "forest-serde",
+ "forest-wolfram-alpha",
  "rusqlite",
  "serde",
  "serde_json",
@@ -969,6 +970,22 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower-http",
+]
+
+[[package]]
+name = "forest-wolfram-alpha"
+version = "0.1.0"
+dependencies = [
+ "forest-config",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
 ]
 
 [[package]]

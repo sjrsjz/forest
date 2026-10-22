@@ -18,7 +18,7 @@
 | [notifier 与依赖](11-notifier-and-dependencies.md) | 静态转发及装卸计划已实现 |
 | [状态机与所有权](12-scheduler-state-machine.md) | 已实现，关键交错经真实 Wasm 验证 |
 | [运行与 SDK](13-runtime-and-sdk.md) | 实际命令、ABI、范围及验证 |
-| [宿主调试台与模块管理](14-inspection-webui.md) | Vue/TypeScript、Inspector、SSE、依赖图、配置查看与 ACL 鉴权编辑、受限本地包管理已实现 |
+| [宿主调试台与模块管理](14-inspection-webui.md) | Vue/TypeScript、Inspector、SSE、依赖图、配置编辑、滚动日志与受限本地包管理已实现 |
 | [多主干多模态记忆模型](15-memory-model.md) | Memory 独立包已实现；多主干、归档集合、媒体引用、跨主干召回与联想 |
 | [Qwen VL 与记忆设施](16-memory-infrastructure.md) | 模块私有 SQLite 与 Qdrant 协议已接入；原文与派生向量分离 |
 | [向量化 Wasm 模块](17-embedding-module.md) | 已实现；JSON 浮点载荷、热重载、真实图文批量调用已验证 |
@@ -28,6 +28,8 @@
 | [Agent、Memory 与数据库边界](21-agent-storage-boundary.md) | 已实现；Wasm 持有数据模型，宿主按模块身份执行通用原子 SQLite 操作 |
 | [Agent 实现与启动](22-agent-implementation.md) | 包构建、配置、工具路由、启动命令及实际验证范围 |
 | [DeepSeek 网页工具](23-deepseek-web.md) | 独立 Wasm 搜索/抓取插件，默认联网工具与原始 HTTP 分工 |
+| [Wolfram Alpha 工具](24-wolfram-alpha.md) | 独立 Wasm 计算插件、连接配置与工具网关路由 |
+| [文档渲染方案讨论](25-document-rendering-proposal.md) | 待实施建议；Typst Wasm、浏览器服务及受管媒体边界 |
 
 文档中的“待定”表示尚未形成决定。编写对应实现前应继续讨论，不能把示例名称或先前提案直接固定为接口。
 

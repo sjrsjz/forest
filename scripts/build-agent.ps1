@@ -5,6 +5,7 @@ $packages = @(
     @('forest-context-module', 'package-context'),
     @('forest-memory-module', 'package-memory'),
     @('forest-deepseek-web', 'package-deepseek-web'),
+    @('forest-wolfram-alpha', 'package-wolfram-alpha'),
     @('forest-agent-tools', 'package-agent-tools'),
     @('forest-agent-module', 'package-agent')
 )

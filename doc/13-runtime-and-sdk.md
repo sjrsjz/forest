@@ -49,7 +49,9 @@ cargo run -p forest-cli --locked -- \
 
 默认路径均从启动工作目录解析：包 `packages/forest-test`，SQLite `data/forest.sqlite3`，受管文件 `data/modules`。分别可用 `--package`、`--database`、`--data-directory` 修改；不使用隐式 `.local` 工作区。
 
-Ctrl+C 默认 Drain，可用 `--shutdown-mode yield` 或 `force` 显式选择。正向 WS 断开结束当前宿主，未收回的 API 调用按传输关闭结算；不自动重连、重试或重放。
+Ctrl+C 默认 Drain，可用 `--shutdown-mode yield` 或 `force` 显式选择。OneBot 正向 WS 在初次连接失败或运行中断开后自动重连，间隔按 1、2、4、8、16、30 秒退避；成功连接后恢复为 1 秒。连接恢复不重建调度器、模块或 Agent 会话，WebUI 继续运行。反向 WS 保持原监听器，连接结束后等待网关再次接入。
+
+双向 WS 的动作队列和回执表属于单次连接。未连接时请求立即返回 Disconnected，连接关闭时尚未收到回执的请求返回 ReceiptLost，已排队动作随该连接释放；重连后的队列为空。未收到回执并不证明平台未执行，因此不自动重发消息或重试动作。HTTP action 传输不因事件 WS 重连而自动重试。连接、回执及模块诊断可在[调试台运行日志](14-inspection-webui.md)查看。
 
 ## 2. Rust 模块 SDK
 
@@ -140,7 +142,7 @@ file_read file_write file_remove sqlite sleep log now
 
 默认每个对象保留最多 1024 个请求、64 MiB 输入，Wasm 内存上限 256 MiB。名额随请求、任务和必要收尾移动，满额原子拒绝，不经隐藏的无界入口排队。原生接口也受容量和重入约束。
 
-HTTP/WS 不自动重试，受管文件由 capability directory 限制在实例目录内。卸载释放实例网络资源。配置与文件操作提交后必须等本地实际结束，丢弃 Future 不等于操作系统已撤销操作。
+Wasm 使用的 HTTP/WS 原语不自动重试或重连；OneBot 宿主适配器的连接恢复与这些原语分开。受管文件由 capability directory 限制在实例目录内。卸载释放实例网络资源。配置与文件操作提交后必须等本地实际结束，丢弃 Future 不等于操作系统已撤销操作。
 
 ## 6. 验证与范围
 

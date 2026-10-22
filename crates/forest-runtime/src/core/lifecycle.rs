@@ -187,6 +187,15 @@ impl Core {
                 state: State::Serving(live),
             },
         );
+        drop(directory);
+        self.logs.write(
+            service::LogLevel::Info,
+            instance.object.clone(),
+            format!(
+                "module {} is Serving (instance {})",
+                instance.object, instance.id
+            ),
+        );
         let _ = completion.send(Ok(()));
         Ok(())
     }

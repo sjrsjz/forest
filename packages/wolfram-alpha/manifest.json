@@ -1,0 +1,107 @@
+{
+  "package": {
+    "id": "/module/wolfram-alpha",
+    "version": "0.1.0",
+    "name": "Wolfram Alpha",
+    "description": "Exact computation and scientific knowledge via the Wolfram Alpha LLM API"
+  },
+  "module": "module.wasm",
+  "configs": [
+    {
+      "key": "/connection",
+      "schema": [
+        {
+          "Record": {
+            "app_id": "String",
+            "endpoint": "String"
+          }
+        }
+      ],
+      "default": {
+        "Record": {
+          "app_id": {
+            "String": ""
+          },
+          "endpoint": {
+            "String": "https://www.wolframalpha.com/api/v1/llm-api"
+          }
+        }
+      },
+      "access": {
+        "readers": [
+          "SelfModule"
+        ],
+        "writers": [
+          {
+            "Path": "/user/admin"
+          }
+        ],
+        "callers": []
+      }
+    }
+  ],
+  "provides": [
+    {
+      "path": "/query",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": true,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/agent-tools"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    }
+  ],
+  "uses": [],
+  "subscriptions": []
+}

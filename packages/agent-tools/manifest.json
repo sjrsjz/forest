@@ -114,6 +114,32 @@
           {
             "Record": {
               "interface": {
+                "String": "/query"
+              },
+              "object": {
+                "String": "/module/wolfram-alpha"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "Exact mathematics, scientific computation, units, dates and computable facts via Wolfram Alpha. Translate the query to concise single-line English. Use 6*10^14 instead of 6e14 for scientific notation. If status is not_interpreted, use the returned suggestions to reformulate the query. Image URLs in results are source links, not managed media references."
+                    }
+                  },
+                  "name": {
+                    "String": "wolfram_alpha"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"max_chars\":{\"default\":4000,\"description\":\"Result character limit requested from Wolfram Alpha.\",\"maximum\":6000,\"minimum\":500,\"type\":\"integer\"},\"query\":{\"description\":\"A concise single-line query in English, e.g. integrate x^2 sin(x) from 0 to pi.\",\"maxLength\":2000,\"minLength\":1,\"type\":\"string\"}},\"required\":[\"query\"],\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
                 "String": "/memory"
               },
               "object": {
@@ -540,6 +566,54 @@
     {
       "object": "/module/deepseek-web",
       "interface": "/search",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/wolfram-alpha",
+      "interface": "/query",
       "input": [
         {
           "Record": {

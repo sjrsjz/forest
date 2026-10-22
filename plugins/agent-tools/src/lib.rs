@@ -226,6 +226,20 @@ pub fn default_routes() -> Vec<Route> {
             "/http",
         ),
         route(
+            "wolfram_alpha",
+            "Exact mathematics, scientific computation, units, dates and computable facts via Wolfram Alpha. Translate the query to concise single-line English. Use 6*10^14 instead of 6e14 for scientific notation. If status is not_interpreted, use the returned suggestions to reformulate the query. Image URLs in results are source links, not managed media references.",
+            serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "query":{"type":"string","minLength":1,"maxLength":2000,"description":"A concise single-line query in English, e.g. integrate x^2 sin(x) from 0 to pi."},
+                    "max_chars":{"type":"integer","minimum":500,"maximum":6000,"default":4000,"description":"Result character limit requested from Wolfram Alpha."}
+                },
+                "required":["query"],"additionalProperties":false
+            }),
+            "/module/wolfram-alpha",
+            "/query",
+        ),
+        route(
             "memory_read",
             "Read up to 16 archived memory units by original group and sequence. Original source is preserved.",
             serde_json::json!({

@@ -1,0 +1,26 @@
+[package]
+name = "forest-wolfram-alpha"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "package-wolfram-alpha"
+path = "src/bin/package.rs"
+
+[dependencies]
+forest-sdk = { path = "../../crates/forest-sdk" }
+forest-protocol = { path = "../../crates/forest-protocol" }
+forest-serde = { path = "../../crates/forest-serde" }
+serde.workspace = true
+serde_json.workspace = true
+url = "2.5.8"
+
+[dev-dependencies]
+forest-config = { path = "../../crates/forest-config" }
+forest-runtime = { path = "../../crates/forest-runtime" }
+tempfile = "3.23.0"
+tokio.workspace = true

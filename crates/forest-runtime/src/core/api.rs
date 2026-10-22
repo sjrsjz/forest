@@ -39,6 +39,7 @@ impl Scheduler {
             engine: engine.clone(),
             options,
             services,
+            logs: crate::LogWriter::default(),
             run_queue,
             directory: Mutex::new(Directory {
                 slots: HashMap::new(),
@@ -53,6 +54,9 @@ impl Scheduler {
     }
     pub async fn package(&self, directory: impl AsRef<Path>) -> Result<Package> {
         Package::read(&self.core.engine, directory.as_ref()).await
+    }
+    pub fn logs(&self) -> crate::LogWriter {
+        self.core.logs.clone()
     }
     pub fn phase(&self, object: &Token) -> Option<ModulePhase> {
         self.core

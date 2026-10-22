@@ -140,6 +140,7 @@ pub(crate) struct Core {
     pub engine: wasmtime::Engine,
     pub options: RuntimeOptions,
     pub services: Services,
+    pub logs: crate::LogWriter,
     pub directory: Mutex<Directory>,
     pub run_queue: Arc<crate::fair::RunQueue>,
     next_instance: AtomicU64,
@@ -245,7 +246,10 @@ pub(crate) struct Request {
 }
 pub(crate) enum Outcome {
     Call(oneshot::Sender<DispatchResult<Value>>),
-    Send,
+    Send {
+        logs: crate::LogWriter,
+        object: Token,
+    },
 }
 pub(crate) struct Started {
     pub request: Request,
@@ -259,9 +263,13 @@ impl Outcome {
             Self::Call(reply) => {
                 let _ = reply.send(result);
             }
-            Self::Send => {
+            Self::Send { logs, object } => {
                 if let Err(error) = result {
-                    eprintln!("send failed after acceptance: {error}");
+                    logs.write(
+                        service::LogLevel::Warn,
+                        object,
+                        format!("send failed after acceptance: {error}"),
+                    );
                 }
             }
         }

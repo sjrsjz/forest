@@ -49,6 +49,18 @@ pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
                 tasks,
             ),
         };
+        if let Some(error) = &error {
+            let level = if matches!(error, DispatchError::Interrupted) {
+                service::LogLevel::Info
+            } else {
+                service::LogLevel::Error
+            };
+            core.logs.write(
+                level,
+                instance.object.clone(),
+                format!("instance {} stopped: {error}", instance.id),
+            );
+        }
         core.begin_releasing(&instance, error.clone());
         let error = error.unwrap_or(DispatchError::Interrupted);
         let mut held = Vec::new();
@@ -69,6 +81,11 @@ pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
         }
         drop(held);
         core.finish_releasing(&instance);
+        core.logs.write(
+            service::LogLevel::Info,
+            instance.object.clone(),
+            format!("instance {} released", instance.id),
+        );
     });
 }
 

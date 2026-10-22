@@ -227,6 +227,9 @@ impl Scheduler {
     }
 }
 impl Inspector {
+    pub fn logs(&self) -> std::result::Result<crate::LogReader, InspectError> {
+        Ok(self.host()?.logs.reader())
+    }
     fn host(&self) -> std::result::Result<Arc<Core>, InspectError> {
         self.core.upgrade().ok_or(InspectError::HostStopped)
     }

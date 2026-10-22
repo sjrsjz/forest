@@ -8,6 +8,7 @@ import DependencyGraph from './components/DependencyGraph.vue'
 import ConfigPanel from './components/ConfigPanel.vue'
 import ModuleManagement from './components/ModuleManagement.vue'
 import SplitPane from './components/SplitPane.vue'
+import LogPanel from './components/LogPanel.vue'
 
 const session = ref<'checking' | 'out' | 'in'>('checking')
 const password = ref('')
@@ -18,7 +19,7 @@ const connection = ref<'connecting' | 'live' | 'retrying'>('connecting')
 const search = ref('')
 const phase = ref<Phase | ''>('')
 const selected = ref('')
-const tab = ref<'status' | 'graph' | 'config'>('status')
+const tab = ref<'status' | 'graph' | 'config' | 'logs'>('status')
 const managementOpen = ref(false)
 const managementIntent = ref<'load' | 'reload' | 'unload'>('load')
 const managementTarget = ref('')
@@ -281,6 +282,7 @@ onMounted(checkSession)
             <button :class="{ active: tab === 'status' }" @click="tab = 'status'">运行状态</button>
             <button :class="{ active: tab === 'graph' }" @click="tab = 'graph'">依赖关系</button>
             <button :class="{ active: tab === 'config' }" @click="tab = 'config'">配置表</button>
+            <button :class="{ active: tab === 'logs' }" @click="tab = 'logs'">运行日志</button>
             <span class="tabs-tail">
               {{ snapshot.modules.length }} 个模块 · {{ snapshot.hosts.length }} 个宿主对象
             </span>
@@ -298,11 +300,12 @@ onMounted(checkSession)
               :selected="selected"
             />
             <ConfigPanel
-              v-else
+              v-else-if="tab === 'config'"
               :snapshot="snapshot"
               :selected="selected"
               @expired="session = 'out'"
             />
+            <LogPanel v-else :selected="selected" @expired="session = 'out'" />
           </div>
         </template>
         <div v-else class="empty-state">

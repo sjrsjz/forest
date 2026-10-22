@@ -2,6 +2,7 @@
 mod auth;
 mod configuration;
 mod form;
+mod logs;
 mod management;
 mod value;
 
@@ -78,6 +79,7 @@ impl Console {
         let api = Router::new()
             .route("/snapshot", get(snapshot))
             .route("/events", get(events))
+            .route("/logs", get(logs::stream))
             .route("/config-entities", get(entities))
             .route("/config-keys", get(keys))
             .route("/config-entry", get(entry))

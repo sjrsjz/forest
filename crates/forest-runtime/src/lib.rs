@@ -4,6 +4,7 @@ mod core;
 mod dependencies;
 mod driver;
 mod fair;
+mod logs;
 mod management;
 pub mod onebot;
 mod operations;
@@ -24,5 +25,6 @@ pub use core::{
     EventDefinition, ModulePhase, NativeInterface, RuntimeOptions, Scheduler, StopMode,
 };
 pub use forest_protocol as protocol;
+pub use logs::{LogBatch, LogEntry, LogReader, LogWriter};
 pub use management::ModuleManager;
 pub use package::Package;

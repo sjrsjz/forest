@@ -1,17 +1,19 @@
 use anyhow::{Context, Result, ensure};
 use clap::{ArgGroup, Parser, ValueEnum};
 use forest_onebot::{Client, http::HttpTransport};
-use forest_protocol::{SubjectPattern, abi};
+use forest_protocol::{SubjectPattern, abi, service::LogLevel};
 use forest_runtime::{
-    RuntimeOptions, Scheduler, StopMode,
+    LogWriter, RuntimeOptions, Scheduler, StopMode,
     onebot::{self, GroupScope, OneBotIngress},
 };
 use futures::{SinkExt, StreamExt};
 use std::{net::SocketAddr, path::PathBuf};
 use tokio_tungstenite::{
     WebSocketStream,
-    tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
+    tungstenite::{Message, protocol::WebSocketConfig},
 };
+mod connection;
+mod logs;
 mod websocket;
 
 #[derive(Parser)]
@@ -115,6 +117,8 @@ async fn main() -> Result<()> {
         },
     )
     .await?;
+    let logs = scheduler.logs();
+    let _stderr = logs::Stderr::start(logs.reader());
     #[cfg(feature = "webui")]
     let console = if let Some(address) = args.webui {
         let password = std::env::var(&args.web_password_env)
@@ -131,29 +135,17 @@ async fn main() -> Result<()> {
             },
         )
         .await?;
-        eprintln!("Forest console at http://{}", server.address());
+        logs.write(
+            LogLevel::Info,
+            "/core/runtime".parse().unwrap(),
+            format!("Forest console at http://{}", server.address()),
+        );
         Some(server)
     } else {
         None
     };
     let package = scheduler.package(&args.package).await?;
     let object = package.manifest().package.id.clone();
-    let mut forward = if let Some(url) = args.events_ws {
-        let mut request = url.into_client_request()?;
-        if let Some(token) = &event_token {
-            request
-                .headers_mut()
-                .insert("authorization", format!("Bearer {token}").parse()?);
-        }
-        let config = WebSocketConfig::default().max_message_size(Some(abi::MAX_FRAME_BYTES));
-        Some(
-            tokio_tungstenite::connect_async_with_config(request, Some(config), false)
-                .await?
-                .0,
-        )
-    } else {
-        None
-    };
     let mut actions = None;
     let transport = if let Some(endpoint) = args.onebot_http {
         let http = reqwest::Client::builder()
@@ -220,14 +212,10 @@ async fn main() -> Result<()> {
     scheduler
         .load_roots(available, std::slice::from_ref(&object))
         .await?;
-    eprintln!("module {object} is Serving");
     let connection = async {
-        match (args.reverse_ws, forward.take()) {
-            (Some(address), _) => reverse(address, ingress, event_token).await,
-            (_, Some(stream)) => match actions {
-                Some(actions) => websocket::serve(stream, &ingress, actions).await,
-                None => receive(stream, &ingress).await,
-            },
+        match (args.reverse_ws, args.events_ws) {
+            (Some(address), _) => reverse(address, ingress, event_token, logs).await,
+            (_, Some(url)) => connection::forward(url, event_token, ingress, actions, logs).await,
             _ => unreachable!("CLI validates ingress selection"),
         }
     };
@@ -276,12 +264,22 @@ fn optional_secret(name: &str) -> Result<Option<String>> {
     }
 }
 
-async fn reverse(address: SocketAddr, ingress: OneBotIngress, token: Option<String>) -> Result<()> {
+async fn reverse(
+    address: SocketAddr,
+    ingress: OneBotIngress,
+    token: Option<String>,
+    logs: LogWriter,
+) -> Result<()> {
     use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
     let listener = tokio::net::TcpListener::bind(address).await?;
-    eprintln!(
-        "OneBot reverse WebSocket listening on {}",
-        listener.local_addr()?
+    let source: forest_protocol::Token = "/core/onebot".parse().unwrap();
+    logs.write(
+        LogLevel::Info,
+        source.clone(),
+        format!(
+            "OneBot reverse WebSocket listening on {}",
+            listener.local_addr()?
+        ),
     );
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -309,24 +307,46 @@ async fn reverse(address: SocketAddr, ingress: OneBotIngress, token: Option<Stri
         match tokio_tungstenite::accept_hdr_async_with_config(stream, handshake, Some(config)).await
         {
             Ok(socket) => {
-                eprintln!("OneBot connected from {peer}");
-                if let Err(error) = receive(socket, &ingress).await {
-                    eprintln!("OneBot connection ended: {error}");
+                logs.write(
+                    LogLevel::Info,
+                    source.clone(),
+                    format!("OneBot connected from {peer}"),
+                );
+                if let Err(error) = receive(socket, &ingress, &logs).await {
+                    logs.write(
+                        LogLevel::Warn,
+                        source.clone(),
+                        format!("OneBot connection ended: {error}"),
+                    );
+                } else {
+                    logs.write(
+                        LogLevel::Info,
+                        source.clone(),
+                        "OneBot connection closed; waiting for reconnect",
+                    );
                 }
             }
-            Err(error) => eprintln!("OneBot handshake rejected: {error}"),
+            Err(error) => logs.write(
+                LogLevel::Warn,
+                source.clone(),
+                format!("OneBot handshake rejected: {error}"),
+            ),
         }
     }
 }
 
-async fn receive<S>(mut socket: WebSocketStream<S>, ingress: &OneBotIngress) -> Result<()>
+async fn receive<S>(
+    mut socket: WebSocketStream<S>,
+    ingress: &OneBotIngress,
+    logs: &LogWriter,
+) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     while let Some(message) = socket.next().await {
         match message? {
-            Message::Text(text) => dispatch_event(ingress, text.as_bytes()),
-            Message::Binary(bytes) => dispatch_event(ingress, &bytes),
+            Message::Text(text) => dispatch_event(ingress, logs, text.as_bytes()),
+            Message::Binary(bytes) => dispatch_event(ingress, logs, &bytes),
             Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await?,
             Message::Close(_) => break,
             Message::Pong(_) | Message::Frame(_) => {}
@@ -334,14 +354,22 @@ where
     }
     Ok(())
 }
-fn report(report: onebot::IngressReport) {
+fn report(report: onebot::IngressReport, logs: &LogWriter) {
     for (object, error) in report.rejected {
-        eprintln!("host event rejected by {object}: {error}");
+        logs.write(
+            LogLevel::Warn,
+            object.clone(),
+            format!("host event rejected by {object}: {error}"),
+        );
     }
 }
-fn dispatch_event(ingress: &OneBotIngress, bytes: &[u8]) {
+fn dispatch_event(ingress: &OneBotIngress, logs: &LogWriter, bytes: &[u8]) {
     match ingress.receive(bytes) {
-        Ok(result) => report(result),
-        Err(error) => eprintln!("OneBot event rejected before admission: {error}"),
+        Ok(result) => report(result, logs),
+        Err(error) => logs.write(
+            LogLevel::Warn,
+            "/core/onebot".parse().unwrap(),
+            format!("OneBot event rejected before admission: {error}"),
+        ),
     }
 }
