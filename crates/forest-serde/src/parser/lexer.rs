@@ -22,11 +22,26 @@ fn parse_hex(lex: &mut Lexer<ValueToken>) -> Option<Vec<u8>> {
 }
 
 fn extract_string(lex: &mut Lexer<ValueToken>) -> Option<String> {
+    lex.bump(quoted_length(lex.remainder())?);
     serde_json::from_str(lex.slice()).ok()
 }
 
 fn extract_string_schema(lex: &mut Lexer<SchemaToken>) -> Option<String> {
+    lex.bump(quoted_length(lex.remainder())?);
     serde_json::from_str(lex.slice()).ok()
+}
+
+// Scan after the opening quote without recursive lexer transitions for each
+// escape. The final JSON decode validates escapes and control characters.
+fn quoted_length(remainder: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (offset, byte) in remainder.bytes().enumerate() {
+        if byte == b'"' && !escaped {
+            return Some(offset + 1);
+        }
+        escaped = byte == b'\\' && !escaped;
+    }
+    None
 }
 
 /// Tokens for the value parser, including identifiers, literals, and comments.
@@ -57,7 +72,7 @@ pub enum ValueToken {
     })]
     Int64(i64),
 
-    #[regex(r#""([^"\\]|\\.)*""#, extract_string)]
+    #[token("\"", extract_string)]
     String(String),
 
     #[token("true")]
@@ -145,7 +160,7 @@ pub enum SchemaToken {
     FatArrow,
 
     #[regex(r"[\p{L}_][\p{L}\p{N}_]*", |lex| lex.slice().to_string())]
-    #[regex(r#""([^"\\]|\\.)*""#, extract_string_schema)]
+    #[token("\"", extract_string_schema)]
     Ident(String),
 
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<usize>().ok())]

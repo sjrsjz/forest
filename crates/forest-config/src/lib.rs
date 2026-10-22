@@ -55,6 +55,8 @@ pub enum ConfigError {
     InvalidValue { entity: Token, key: Token },
     #[error("typed key does not match declared schema: {key} in {entity}")]
     KeyTypeMismatch { entity: Token, key: Token },
+    #[error("configuration declaration keys differ for {entity}")]
+    DeclarationMismatch { entity: Token },
     #[error("typed value decoding failed: {0}")]
     Decode(#[from] DecodeError),
     #[error("invalid stored path {path:?}: {reason}")]

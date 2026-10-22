@@ -60,6 +60,8 @@ output_limit 是显式枚举：ProviderDefault 不发输出限制；CompletionTo
 
 Settings 是实例内不可变值。更改配置后通过已有热重载生效，旧调用保留旧连接与模型设置，新实例读取新配置。运行时继续沿用普通 Drain/AtYield/Force，没有新的任务目录或 Provider 专属生命周期。
 
+管理端选择本模块 → 配置表 → `/settings` → 编辑，即可通过 Schema 表单修改上述字段。`output_limit` 先选择 ProviderDefault、CompletionTokens 或 Tokens；后两项填写整数上限。`reasoning_effort` 勾选自定义时填写供应商支持的值，取消勾选则不发送该参数。保存后显式重载本模块生效，不需要编辑配置文件。
+
 ## 4. 错误
 
 外层仍是调度器的 DispatchResult，内层是 Provider 的 Result。模块 Error 区分 NotConfigured、Host、Http、ToolSchema 与 Response。错误字符串仅作诊断，不用于分发或判断恢复分支。
@@ -73,7 +75,7 @@ cargo run --offline --locked -p forest-openai-provider --bin package-openai-prov
 cargo test --offline --locked -p forest-openai-provider --test wasm
 ```
 
-生成包位于 `packages/openai-provider`。Manifest 从相同处理器注册表生成，并同时输出 `complete.input.schema`、`complete.output.schema`、`capabilities.input.schema`、`capabilities.output.schema`，供独立读取接口的 Schema 语言契约。Wasm 工件忽略提交。现有管理台可以发现并加载该包；配置写入仍使用宿主已有 ConfigStore 管理 API，本轮没有扩展管理台的配置编辑功能。
+生成包位于 `packages/openai-provider`。Manifest 从相同处理器注册表生成，并同时输出 `complete.input.schema`、`complete.output.schema`、`capabilities.input.schema`、`capabilities.output.schema`，供独立读取接口的 Schema 语言契约。Wasm 工件忽略提交。管理台可以发现并加载该包；配置表中的连接设置可经 `/user/admin` 来源和 writers 鉴权后编辑，保存后显式重载 Provider 使用新连接，见[宿主调试台](14-inspection-webui.md)。
 
 隔离在线验证程序读取上述 Settings JSON，加载实际 Wasm 包，以两次模型调用完成一个本地 echo 工具往返：
 

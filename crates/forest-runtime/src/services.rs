@@ -1,5 +1,5 @@
 use crate::core::{Core, Directory, Instance, State};
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use cap_std::fs::Dir;
 use forest_protocol::{service::*, *};
 use forest_util::acl::Access;
@@ -25,6 +25,7 @@ pub(crate) struct Services {
     pub config: forest_config::ConfigStore,
     pub http: reqwest::Client,
     root: Arc<Dir>,
+    database_root: std::path::PathBuf,
 }
 type SocketStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 struct Socket {
@@ -33,17 +34,31 @@ struct Socket {
 }
 pub(crate) struct Resources {
     pub files: Arc<Dir>,
+    pub database: Arc<crate::sqlite::Database>,
     sockets: Mutex<HashMap<u64, Arc<Socket>>>,
     next: AtomicU64,
 }
 
 impl Services {
+    pub(crate) async fn config_set(
+        &self,
+        input: ConfigSet,
+    ) -> Result<(), forest_config::ConfigError> {
+        self.config
+            .apply([forest_config::Change::set(
+                input.target.object,
+                input.target.key,
+                input.value,
+            )])
+            .await
+    }
     pub async fn new(
         config: forest_config::ConfigStore,
         root: &Path,
         proxy: Option<&str>,
     ) -> Result<Self> {
         tokio::fs::create_dir_all(root).await?;
+        let database_root = tokio::fs::canonicalize(root).await?.join(".databases");
         let root = Arc::new(Dir::open_ambient_dir(root, cap_std::ambient_authority())?);
         let mut http = reqwest::Client::builder()
             .no_proxy()
@@ -56,6 +71,7 @@ impl Services {
             config,
             http: http.build()?,
             root,
+            database_root,
         })
     }
     pub async fn mount(&self, manifest: &Manifest) -> Result<Arc<Resources>> {
@@ -63,42 +79,18 @@ impl Services {
         let target = object.clone();
         let existing = self
             .config
-            .read(move |view| {
-                if view.entities()?.contains(&target) {
-                    Ok(Some(view.entries(&target)?))
-                } else {
-                    Ok(None)
-                }
-            })
+            .read(move |view| Ok(view.entities()?.contains(&target)))
             .await?;
-        if let Some(entries) = existing {
-            ensure!(
-                entries.len() == manifest.configs.len(),
-                "stored configuration declaration differs from package"
-            );
-            for declaration in &manifest.configs {
-                let (_, entry) = entries
-                    .iter()
-                    .find(|(key, _)| key == &declaration.key)
-                    .ok_or_else(|| anyhow::anyhow!("stored configuration key missing"))?;
-                ensure!(
-                    equivalent(entry.schema(), &declaration.schema)
-                        && entry.default_value() == &declaration.default,
-                    "stored configuration schema/default differs from package"
-                );
-            }
+        let declarations = manifest
+            .configs
+            .iter()
+            .map(|d| {
+                forest_config::Declaration::new(d.key.clone(), d.schema.clone(), d.default.clone())
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if existing {
+            self.config.update_defaults(&object, declarations).await?;
         } else {
-            let declarations = manifest
-                .configs
-                .iter()
-                .map(|d| {
-                    forest_config::Declaration::new(
-                        d.key.clone(),
-                        d.schema.clone(),
-                        d.default.clone(),
-                    )
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()?;
             self.config.register(object.clone(), declarations).await?;
         }
         let name = object
@@ -108,6 +100,8 @@ impl Services {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let root = self.root.clone();
+        let database =
+            crate::sqlite::Database::new(self.database_root.join(&name).join("data.sqlite3"));
         let files = tokio::task::spawn_blocking(move || -> std::io::Result<Dir> {
             root.create_dir_all(&name)?;
             root.open_dir(name)
@@ -115,6 +109,7 @@ impl Services {
         .await??;
         Ok(Arc::new(Resources {
             files: Arc::new(files),
+            database,
             sockets: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
         }))
@@ -162,6 +157,23 @@ impl Services {
 }
 
 impl Core {
+    pub(crate) fn config_access_as(
+        directory: &Directory,
+        subject: &Token,
+        target: &ConfigKey,
+        access: Access,
+    ) -> DispatchResult<()> {
+        if directory.slots.get(&target.object).is_some_and(|slot| {
+            slot.access
+                .config
+                .check(subject, &target.object, &target.key, access)
+        }) {
+            Ok(())
+        } else {
+            Err(DispatchError::Denied)
+        }
+    }
+
     pub(crate) fn config_access_in(
         directory: &Directory,
         instance: &Instance,
@@ -173,31 +185,23 @@ impl Core {
             .get(&target.object)
             .ok_or(DispatchError::Denied)?;
         let owner = &target.object;
-        let policy =
-            if owner == &instance.object && matches!(target_slot.state, State::Creating { .. }) {
-                if instance.package.access.config.check(
-                    &instance.object,
-                    owner,
-                    &target.key,
-                    access,
-                ) {
-                    return Ok(());
-                }
-                return Err(DispatchError::Denied);
-            } else {
-                &target_slot.access.config
-            };
-        if policy.check(&instance.object, owner, &target.key, access) {
-            Ok(())
-        } else {
-            Err(DispatchError::Denied)
+        if owner == &instance.object && matches!(target_slot.state, State::Creating { .. }) {
+            return instance
+                .package
+                .access
+                .config
+                .check(&instance.object, owner, &target.key, access)
+                .then_some(())
+                .ok_or(DispatchError::Denied);
         }
+        Self::config_access_as(directory, &instance.object, target, access)
     }
 }
 
 impl Resources {
     pub fn close(&self) {
         self.sockets.lock().unwrap().clear();
+        self.database.close();
     }
     pub async fn ws_connect(
         &self,

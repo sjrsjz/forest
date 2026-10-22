@@ -4,7 +4,7 @@ use forest_onebot::{Client, http::HttpTransport};
 use forest_protocol::{SubjectPattern, abi};
 use forest_runtime::{
     RuntimeOptions, Scheduler, StopMode,
-    onebot::{self, OneBotIngress},
+    onebot::{self, GroupScope, OneBotIngress},
 };
 use futures::{SinkExt, StreamExt};
 use std::{net::SocketAddr, path::PathBuf};
@@ -30,11 +30,10 @@ struct Arguments {
     #[cfg(feature = "webui")]
     #[arg(long, default_value = "webui/dist", help = "Built Vue console assets")]
     webui_assets: PathBuf,
-    #[cfg(feature = "webui")]
     #[arg(
         long,
         default_value = "packages",
-        help = "Local package directory managed by the console"
+        help = "Local package catalog for dependency loading and the console"
     )]
     packages_directory: PathBuf,
     #[arg(long, default_value = "packages/forest-test")]
@@ -51,9 +50,8 @@ struct Arguments {
     events_ws: Option<String>,
     #[arg(
         long,
-        required = true,
         value_delimiter = ',',
-        help = "Only these groups may reach the plugin or receive native replies"
+        help = "Optional test restriction on received groups and native replies; omit for module-controlled group selection"
     )]
     allow_group: Vec<i64>,
     #[arg(
@@ -124,11 +122,12 @@ async fn main() -> Result<()> {
         let server = forest_webui::Console::bind(
             scheduler.inspector(),
             scheduler.module_manager(),
+            scheduler.config_writer("/user/admin".parse().unwrap()),
             forest_webui::Options {
                 address,
                 password,
                 assets: args.webui_assets,
-                packages: args.packages_directory,
+                packages: args.packages_directory.clone(),
             },
         )
         .await?;
@@ -175,12 +174,52 @@ async fn main() -> Result<()> {
     let ingress = onebot::install(
         &scheduler,
         Client::new(transport),
-        args.allow_group,
+        if args.allow_group.is_empty() {
+            GroupScope::All
+        } else {
+            GroupScope::only(args.allow_group)
+        },
         vec![SubjectPattern::Path(forest_protocol::TokenPattern::exact(
             object.clone(),
         ))],
     )?;
-    scheduler.load(package).await?;
+    let mut declarations = vec![(args.package.clone(), package.manifest().clone())];
+    let directories = match tokio::fs::read_dir(&args.packages_directory).await {
+        Ok(directory) => Some(directory),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(mut directories) = directories {
+        while let Some(entry) = directories.next_entry().await? {
+            if entry.file_type().await?.is_dir()
+                && entry.path().join("manifest.json").is_file()
+                && entry.path().join("module.wasm").is_file()
+            {
+                let candidate: forest_protocol::Manifest = serde_json::from_slice(
+                    &tokio::fs::read(entry.path().join("manifest.json")).await?,
+                )?;
+                if candidate.package.id != object {
+                    declarations.push((entry.path(), candidate));
+                }
+            }
+        }
+    }
+    let selected = scheduler.plan_manifests(
+        &declarations
+            .iter()
+            .map(|(_, m)| m.clone())
+            .collect::<Vec<_>>(),
+        std::slice::from_ref(&object),
+    )?;
+    let mut available = vec![package];
+    for (directory, manifest) in declarations {
+        if manifest.package.id != object && selected.contains(&manifest.package.id) {
+            available.push(scheduler.package(directory).await?);
+        }
+    }
+    scheduler
+        .load_roots(available, std::slice::from_ref(&object))
+        .await?;
     eprintln!("module {object} is Serving");
     let connection = async {
         match (args.reverse_ws, forward.take()) {

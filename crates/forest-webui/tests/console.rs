@@ -66,6 +66,7 @@ async fn authenticated_inspection_is_read_only_and_stream_closes_on_shutdown() {
     let console = Console::bind(
         scheduler.inspector(),
         scheduler.module_manager(),
+        scheduler.config_writer("/user/admin".parse().unwrap()),
         Options {
             address: "127.0.0.1:0".parse().unwrap(),
             password: "test-admin".into(),
@@ -108,6 +109,17 @@ async fn authenticated_inspection_is_read_only_and_stream_closes_on_shutdown() {
             401
         );
     }
+    assert_eq!(
+        client
+            .get(format!(
+                "{base}/api/config/form?object=/module/private&key=/private/value"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
     assert_eq!(
         client
             .post(format!("{base}/api/session"))
@@ -172,6 +184,7 @@ async fn authenticated_inspection_is_read_only_and_stream_closes_on_shutdown() {
     assert_eq!(result.headers()["cache-control"], "no-store");
     let entry: serde_json::Value = result.json().await.unwrap();
     assert_eq!(entry["data"]["current"]["kind"], "map");
+    assert_eq!(entry["data"]["writable"], false);
     assert_eq!(
         entry["data"]["current"]["entries"][0]["key"]["text"],
         i64::MAX.to_string()

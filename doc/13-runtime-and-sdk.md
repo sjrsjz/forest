@@ -43,6 +43,8 @@ cargo run -p forest-cli --locked -- \
 
 模块 Serving 后，在允许群发送 `#forest-test`，模块回复一次 `hello world`。支持文本段及消息数组中对当前账号的 @。示例接口不可重入；发送成功后才持久化 `/state/replies`。其余命令不触发回复，未允许群不会进入模块或收到原生发送。
 
+以上示例显式传入 `--allow-group` 以限制测试范围；该参数现在可选。省略时 OneBot 宿主不按群过滤，是否处理由接收模块决定，接口 ACL 始终检查。正常 Agent 实例只使用其配置表的 `allowed_groups`，见[Agent 启动](22-agent-implementation.md)。需要宿主测试限制时才传此参数；`GroupScope::Only` 的空集合拒绝全部群，不将空集合解释为全放行。
+
 支持多客户端的 OneBot 网关可以同时连接现有 Bot 和测试宿主。测试期间保持现有 Bot 正常服务，通过允许群和精确测试命令限制测试模块的响应范围；启动测试宿主不要求停止现有 Bot。
 
 默认路径均从启动工作目录解析：包 `packages/forest-test`，SQLite `data/forest.sqlite3`，受管文件 `data/modules`。分别可用 `--package`、`--database`、`--data-directory` 修改；不使用隐式 `.local` 工作区。
@@ -87,9 +89,9 @@ Rust SDK 是可选的语言绑定。模块不链接调度器，也不链接被�
 
 Drain 完成截止前的旧集合；AtYield 等当前推进交回后中断其他旧请求；Force 中断原推进并跳过所有来宾析构。三者都等待已提交的本地 SQL/文件操作实际结束，之后才创建新实例，避免旧写入追上新状态。已接纳的下游调用不递归撤销，远端效果不回滚。
 
-替换保留已发布接口，按 `old.input <: new.input`、`new.output <: old.output` 检查函数子类型；完整 Result 输出包含错误分支。加载依赖采用相同方向：`uses.input <: provides.input`、`provides.output <: uses.output`。不兼容候选在停止旧实例前拒绝，适用于全部停止方式。交接请求执行时绑定新实例的输出 Schema，正常调用也使用同一子类型关系检查 uses。当前不支持更改配置 Schema、默认值或键集合；配置仍要求等价。ACL 随新声明切换；create 使用自己的候选规则，外部仍看到旧规则，直到 Serving 时整体发布。已接纳请求不追溯重新鉴权。
+替换保留已发布接口，按 `old.input <: new.input`、`new.output <: old.output` 检查函数子类型；完整 Result 输出包含错误分支。加载依赖采用相同方向：`uses.input <: provides.input`、`provides.output <: uses.output`。不兼容候选在停止旧实例前拒绝，适用于全部停止方式。交接请求执行时绑定新实例的输出 Schema，正常调用也使用同一子类型关系检查 uses。配置键集合和 Schema 仍要求等价；允许原子更新默认值并保留全部当前值，后续 reset 使用新默认值。ACL 随新声明切换；create 使用自己的候选规则，外部仍看到旧规则，直到 Serving 时整体发布。已接纳请求不追溯重新鉴权。
 
-trap 后保留 Failed 槽位，回收实例，不自动重启；外部可 load 恢复或 unload 移除。CLI 启动时加载指定包；[宿主调试台](14-inspection-webui.md)通过独立 ModuleManager 能力提供本地包装载、三种模式的重载与卸载，以及显式 Force。管理操作不提供任意模块调用或配置写入。尚无文件监视。
+trap 后保留 Failed 槽位，回收实例，不自动重启；外部可 load 恢复或 unload 移除。CLI 启动时加载指定包；[宿主调试台](14-inspection-webui.md)通过独立 ModuleManager 能力提供本地包装载、三种模式的重载与卸载，以及显式 Force；ConfigWriter 使用宿主绑定的 `/user/admin` 来源按 ACL 执行配置 set，不授予可写 ConfigStore 或任意模块调用。尚无文件监视。
 
 ## 4. 固定 ABI
 
@@ -116,7 +118,7 @@ ABI 结构与操作结构采用 `forest_protocol::abi` 固定小端、定长整�
 ```text
 call send config_get config_set config_reset
 http_request ws_connect ws_send ws_receive ws_close
-file_read file_write file_remove sleep log now
+file_read file_write file_remove sqlite sleep log now
 ```
 
 操作函数接受 `(ptr: u32, len: u32)`，返回实例内 operation id。提交时检查阶段、来源及权限；完成只保存结果并唤醒，不重入 Wasm。
@@ -148,4 +150,4 @@ cargo test --workspace --all-features --locked
 
 集成测试编译真实 Wasm，使用两个代码不同、契约相同的候选。覆盖类型化调用、ACL、非重入与重入交错、自唤醒和组合 Future、容量、三种卸载方式、代码替换、trap、单线程执行器下的抢占、配置恢复和延迟 SQLite 写入交接、文件隔离、HTTP/WS，以及实际 CLI 的群消息到 OneBot 回执。自动测试流量只进入本地模拟服务。
 
-宿主当前注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`；独立 API 库中的其他 action 尚未逐一映射为原生接口。CLI 的 OneBot callers 仍只授权启动根包的对象，加载其他对象不隐式扩大该原生接口的权限。可选 WebUI 已提供观测和模块装卸。Agent、记忆系统、包分发、配置变更通知、默认值/Schema 更新策略尚未实现，它们不参与当前 hello world 包与核心验证。
+宿主当前注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`；独立 API 库中的其他 action 尚未逐一映射为原生接口。CLI 的 OneBot callers 仍只授权启动根包的对象，加载其他对象不隐式扩大该原生接口的权限。可选 WebUI 已提供观测和模块装卸。Agent、Memory 与工具网关已由独立 Wasm 包实现，见[实现与启动](22-agent-implementation.md)。热重载可更新同 Schema 的声明默认值并保留当前值；配置项集合或 Schema 变更仍拒绝。包分发与配置变更通知尚未实现。

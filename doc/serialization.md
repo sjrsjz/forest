@@ -61,4 +61,5 @@ let restored = State::<String>::from_value(value)?;
 - 继承原来的纯 Ref 环与递归结构类型规则；本次没有重定义类型代数。
 - 原生目标保留 `stacksafe` 调用栈增长；Wasm 目标不依赖原生栈切换，递归受其执行栈限制。当前不承诺任意深度的输入可成功处理。
 - 尚未扩展浮点数和无符号整数。
-- JSON 用于外部声明及可读 SQLite 数据，固定 bincode 编码用于[Wasm ABI](13-runtime-and-sdk.md)。本阶段不冻结跨版本持久化二进制协议，不加入状态迁移或 ABI 版本协商。单例身份由 Manifest 的对象 Token 确定；已有配置的 Schema 和默认值暂不允许在热重载时更改。
+- 文本中的字符串由迭代扫描确定边界，再按 JSON 规则解码；较长的转义字符串不递归推进词法器，配置提示词可按同一无损文本格式编辑。
+- JSON 用于外部声明及可读 SQLite 数据，固定 bincode 编码用于[Wasm ABI](13-runtime-and-sdk.md)。本阶段不冻结跨版本持久化二进制协议，不加入状态迁移或 ABI 版本协商。单例身份由 Manifest 的对象 Token 确定；热重载要求已有配置的键集合与 Schema 等价，允许更新默认值并保留当前值。

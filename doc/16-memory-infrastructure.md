@@ -1,6 +1,6 @@
 # Qwen VL 嵌入与记忆设施选择
 
-调研日期：2026-10-21。本文依据[记忆模型](15-memory-model.md)选择第一套实现设施。现已完成[向量化 Wasm 模块](17-embedding-module.md)及一批在线图文验证；记忆数据库和向量索引仍待实现，尚未进行规模性能评估。
+调研日期：2026-10-21。本文依据[记忆模型](15-memory-model.md)选择第一套实现设施。现已完成[向量化 Wasm 模块](17-embedding-module.md)及一批在线图文验证。Memory 的私有 SQLite、Qdrant 协议、媒体和索引待办均已实现，实际 Wasm 已用本地模拟服务联调；本轮尚未进行真实 Qdrant 与规模性能评估。实现和部署见[Agent 实现与启动](22-agent-implementation.md)。
 
 ## 1. 由记忆模型得到的要求
 
@@ -105,7 +105,7 @@ SQLite 使用短事务、单写入入口和独立有界读取。WAL 支持读写
 
 现有宿主配置 get/set/reset 和整文件读写不足以直接提供这个数据库。实现前需要独立确定模块私有 SQLite 的连接资源、参数化查询及原子短事务入口；不能把 SQL 藏进配置值，也不能每条消息整文件覆写数据库。该入口只提供通用原语，不硬编码上述表。
 
-Agent、Memory、通用数据库驱动和各类持久数据的归属划分见[存储边界提案](21-agent-storage-boundary.md)。通用资源按稳定模块令牌分配专用 SQLite，按需打开，热重载及卸载保留文件；Memory 使用的是自己的那一份。由宿主执行 SQLite 引擎，表结构和 SQL 均保留在 Wasm 中；该资源及其操作 ABI 尚未实现。
+Agent、Memory、通用数据库驱动和各类持久数据的归属划分见[存储边界](21-agent-storage-boundary.md)。通用资源按稳定模块令牌分配专用 SQLite，按需打开，热重载及卸载保留文件；Memory 使用的是自己的那一份。宿主执行 SQLite 引擎，表结构和 SQL 均保留在 Wasm 中；资源、操作 ABI 与 SDK 已实现。
 
 ### 5.2 Qdrant 点与发布
 

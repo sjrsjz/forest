@@ -157,8 +157,8 @@ impl Package {
                 .find(|new| new.key == old.key)
                 .context("replacement removes configuration")?;
             ensure!(
-                equivalent(&old.schema, &new.schema) && old.default == new.default,
-                "configuration schema/default changes are not enabled"
+                equivalent(&old.schema, &new.schema),
+                "configuration schema changes are not enabled"
             );
         }
         Ok(())

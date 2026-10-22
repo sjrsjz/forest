@@ -25,6 +25,7 @@ pub(crate) mod imports {
         file_read,
         file_write,
         file_remove,
+        sqlite,
         sleep,
         log,
         now
@@ -130,6 +131,11 @@ pub fn file_write(path: String, bytes: Vec<u8>) -> Operation<HostResult<()>> {
 }
 pub fn file_remove(path: String) -> Operation<HostResult<()>> {
     Operation::new(imports::file_remove, &path)
+}
+/// Executes the complete list atomically against the executing module's private DB.
+/// Each item is exactly one parameterized statement. Transactions never span awaits.
+pub fn sqlite(statements: Vec<SqlStatement>) -> Operation<HostResult<Vec<SqlRows>>> {
+    Operation::new(imports::sqlite, &statements)
 }
 pub fn sleep(milliseconds: i64) -> Operation<DispatchResult<()>> {
     Operation::new(imports::sleep, &milliseconds)

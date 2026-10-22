@@ -1,6 +1,6 @@
 # Agent 群会话状态与窗口裁剪
 
-本文制定 Agent 的正常工作状态机和短期窗口策略，尚未实现。Agent 将作为独立 Wasm 插件，通过 Schema/Value 调用 Memory、Context、Provider 与工具模块；本设计不向宿主加入 Agent 状态或模块专属 Rust 类型。
+本文制定 Agent 的正常工作状态机和短期窗口策略。独立 Wasm 实现位于 `plugins/agent`，通过 Schema/Value 调用 Memory、Context、Provider 与工具模块；宿主不持有 Agent 状态或模块专属 Rust 类型。构建、配置与验证范围见[实现与启动](22-agent-implementation.md)。
 
 ## 1. 两个状态
 

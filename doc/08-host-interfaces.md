@@ -1,6 +1,6 @@
 # 模块可用的宿主接口
 
-本文制定 Wasm 模块需要的最小宿主接口。它是接口设计，不表示运行时、Wasm 导入或 SDK 已实现；函数名用于说明职责，底层符号、内存传递和异步恢复方式随后确定。
+本文记录 Wasm 模块使用的最小宿主能力。当前运行时、导入与 SDK 已实现，实际符号、字节协议和异步恢复见[运行与 SDK](13-runtime-and-sdk.md)；下列概念签名用于说明职责。
 
 配置访问先采用单项 `get/set/reset`。数据冲突的处理方式由模块决定，不引入事务内模块回调、跨调用事务、版本、CAS 或自动重试。外部 I/O 采用专用 HTTP、WebSocket 和受管文件接口，不要求模块在 Wasm 内实现底层网络和文件协议。
 
@@ -13,6 +13,7 @@
 | HTTP | `request` | 异步 HTTP(S) 请求 |
 | WebSocket | `connect`、`send`、`receive`、`close` | WS(S) 连接和协议处理 |
 | 受管文件 | `read`、`write`、`remove` | 模块数据目录内的文件访问 |
+| 私有 SQLite | `sqlite` | 执行模块专用数据库内的一次原子事务 |
 | 日志 | `log` | 附加真实模块身份并记录日志 |
 | 时间 | `now`、`sleep` | 读取当前时间、异步等待 |
 
@@ -169,12 +170,24 @@ now 返回 Unix 毫秒，用于时间标记。sleep 接受非负毫秒数，宿�
 
 create 禁止 send/call，允许初始化需要的基础宿主操作；请求不会延后至初始化成功再发送。普通入口只在 create 成功返回后开放，已有配置提交和网络副作用不因初始化失败撤销。
 
-destroy 阶段宿主允许配置 get/set/reset、受管文件访问、日志、时钟和释放既有资源；禁止 send/call（包括原生服务对象）、新任务、新网络请求或连接、应用消息收发以及 sleep。限制由宿主执行，配置 ACL 仍有效，不能通过接口包装绕过。
+destroy 阶段宿主允许配置 get/set/reset、受管文件访问、私有 SQLite 原子操作、日志、时钟和释放既有资源；禁止 send/call（包括原生服务对象）、新任务、新网络请求或连接、应用消息收发以及 sleep。限制由宿主执行，配置 ACL 仍有效，不能通过接口包装绕过。
 
-接下来需要确定的是：
+基础调度、固定 ABI、静态依赖及宿主事件上下文现已实现。接口授权仍采用静态 access.callers，不增加 ABI 版本、动态授权表或通用监听协议。
 
-1. 按[调度设计](09-scheduling.md)和[状态机](12-scheduler-state-machine.md)落地模块任务推进、I/O 唤醒及 Wasm 内存传递 ABI；执行权、接口许可、结果归属与阶段转换已明确。
-2. 静态依赖环的装载规则与主动任务如何开始；create 已禁止 send/call，destroy 白名单及三种卸载方式也已明确。
-3. 将宿主事件来源、原始发起者及代用户操作落实为具体调用上下文；OneBot 事件沿用 v11 原始结构，监听属于宿主接入实现。
+## 11. 模块私有 SQLite
 
-这些决定完成后再固定底层 ABI 和实现顺序。接口授权采用静态 access.callers，不因此增加 ABI 版本、动态授权表或通用监听协议。
+```rust
+sqlite(statements: Vec<SqlStatement>) -> HostResult<Vec<SqlRows>>
+
+struct SqlStatement { sql: String, parameters: Vec<SqlValue> }
+enum SqlValue { Null, Integer(i64), Real(f64), Text(String), Blob(Vec<u8>) }
+struct SqlRows { columns: Vec<String>, rows: Vec<Vec<SqlValue>>, changed: u64 }
+```
+
+这是专用 `forest_host.sqlite` 导入。请求与结果使用现有宿主操作的 bincode 编码；SQL REAL 不扩充可哈希的 Forest Value 类型。SDK 数据定义位于 `forest-protocol::service`，成功结果与输入语句一一对应，SELECT 的 changed 为零。
+
+每个执行模块只能访问其稳定令牌对应的数据库，没有目标令牌或路径参数。每项是单条参数化 SQL；整批在一个事务内依次执行，失败整体回滚，成功编码结果后才提交。宿主禁止来宾自己管理事务、ATTACH/DETACH、PRAGMA 和加载扩展，不能通过 SQL 绕过私有资源范围。表结构和 SQL 的含义完全由模块解释。
+
+连接惰性建立，在专用阻塞工作任务内执行，通过模块 Pending 与恢复返回结果，不阻塞调度线程。同一实例的数据库操作按连接互斥串行执行；一次 SQL 事务提供原子性，分开的调用不会自动合并。当前连接启用 WAL、外键及同步持久化，不自动重试数据库错误。
+
+create、普通处理器和 destroy 都可使用该资源。已提交的 SQL 属于不可中断本地操作；停止或强制丢弃来宾后，宿主仍等它实际结束，再释放连接并启动新实例。数据库文件跨热重载和卸载保留。

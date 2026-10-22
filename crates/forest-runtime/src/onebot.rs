@@ -13,7 +13,26 @@ use std::{collections::HashSet, sync::Arc};
 #[derive(Clone)]
 pub struct OneBotIngress {
     scheduler: Scheduler,
-    groups: Arc<HashSet<i64>>,
+    groups: Arc<GroupScope>,
+}
+
+/// Optional host test boundary, independent of a module's enabled groups.
+#[derive(Clone, Debug, Default)]
+pub enum GroupScope {
+    #[default]
+    All,
+    Only(HashSet<i64>),
+}
+impl GroupScope {
+    pub fn only(groups: impl IntoIterator<Item = i64>) -> Self {
+        Self::Only(groups.into_iter().collect())
+    }
+    fn contains(&self, group: i64) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(groups) => groups.contains(&group),
+        }
+    }
 }
 pub struct IngressReport {
     pub accepted: usize,
@@ -23,11 +42,11 @@ pub struct IngressReport {
 pub fn install<T: Transport + Send + 'static>(
     scheduler: &Scheduler,
     client: Client<T>,
-    groups: Vec<i64>,
+    groups: GroupScope,
     permitted_callers: Vec<SubjectPattern>,
 ) -> Result<OneBotIngress> {
     let client = Arc::new(client);
-    let groups: Arc<HashSet<i64>> = Arc::new(groups.into_iter().collect());
+    let groups = Arc::new(groups);
     let allowed = groups.clone();
     scheduler.register_native(NativeInterface::new(
         contract::OBJECT.parse()?,
@@ -38,7 +57,7 @@ pub fn install<T: Transport + Send + 'static>(
             let client = client.clone();
             let allowed = allowed.clone();
             async move {
-                if !allowed.contains(&request.group_id) {
+                if !allowed.contains(request.group_id) {
                     Err(OneBotError::GroupDenied)
                 } else {
                     let action = SendGroupMsg {
@@ -99,7 +118,7 @@ impl OneBotIngress {
         }
         if !header
             .group_id
-            .is_some_and(|group| self.groups.contains(&group))
+            .is_some_and(|group| self.groups.contains(group))
         {
             return Ok(IngressReport {
                 accepted: 0,

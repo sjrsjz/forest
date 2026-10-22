@@ -43,13 +43,14 @@ pub(crate) enum HostAccess<'a> {
     Configuration(&'a forest_protocol::service::ConfigKey, Access),
     Network,
     File,
+    Database,
     Release,
     Wait,
     Basic,
 }
 impl HostAccess<'_> {
     fn cancellable(&self) -> bool {
-        !matches!(self, Self::Configuration(..) | Self::File)
+        !matches!(self, Self::Configuration(..) | Self::File | Self::Database)
     }
 }
 

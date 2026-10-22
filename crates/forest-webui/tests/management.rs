@@ -1,4 +1,7 @@
-use forest_protocol::{AsSchema, InterfaceUse, Manifest, SubjectPattern, manifest::callers};
+use forest_protocol::{
+    AccessPolicy, AsSchema, AsValue, ConfigDeclaration, InterfaceUse, Manifest, SubjectPattern,
+    manifest::callers,
+};
 use forest_runtime::{ModulePhase, NativeInterface, RuntimeOptions, Scheduler, StopMode};
 use forest_webui::{Console, Options};
 use serde_json::{Value, json};
@@ -107,6 +110,16 @@ async fn local_packages_load_dependencies_and_replace_code_without_losing_config
     let [first, second] = artifacts(temp.path());
     let mut provider = forest_scheduler_probe::manifest("/module/provider".parse().unwrap());
     provider.package.version = "1".into();
+    provider.configs.push(ConfigDeclaration {
+        key: "/settings/text".parse().unwrap(),
+        schema: String::as_schema(),
+        default: String::new().as_value(),
+        access: AccessPolicy {
+            readers: vec![SubjectPattern::SelfModule],
+            writers: vec![SubjectPattern::Path("/user/admin".parse().unwrap())],
+            callers: vec![],
+        },
+    });
     let mut consumer = forest_scheduler_probe::manifest("/module/consumer".parse().unwrap());
     consumer.uses.push(InterfaceUse {
         object: provider.package.id.clone(),
@@ -151,6 +164,7 @@ async fn local_packages_load_dependencies_and_replace_code_without_losing_config
     let console = Console::bind(
         scheduler.inspector(),
         scheduler.module_manager(),
+        scheduler.config_writer("/user/admin".parse().unwrap()),
         Options {
             address: "127.0.0.1:0".parse().unwrap(),
             password: "test-admin".into(),
@@ -295,6 +309,7 @@ async fn local_packages_load_dependencies_and_replace_code_without_losing_config
         scheduler.phase(&consumer.package.id),
         Some(ModulePhase::Serving)
     );
+    configuration_writes(&client, &base, &cookie, &scheduler).await;
     assert_eq!(
         value(&scheduler, "/module/provider", "/implementation").await,
         1
@@ -451,4 +466,122 @@ async fn local_packages_load_dependencies_and_replace_code_without_losing_config
     scheduler.shutdown(StopMode::Drain).await.unwrap();
     shutdown.send(()).unwrap();
     server.await.unwrap().unwrap();
+}
+
+async fn configuration_writes(
+    client: &reqwest::Client,
+    base: &str,
+    cookie: &str,
+    scheduler: &Scheduler,
+) {
+    let endpoint = format!("{base}/api/config/set");
+    // Exercise a body larger than the console's small login/management limit.
+    let text = "配置提示词\n".repeat(1000);
+    let input = json!({"object":"/module/provider", "key":"/settings/text", "value":serde_json::to_string(&text).unwrap()});
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .json(&input)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .header("Cookie", cookie)
+            .header("Origin", "https://untrusted.example")
+            .json(&input)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    success(
+        client
+            .post(&endpoint)
+            .header("Cookie", cookie)
+            .json(&input)
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let saved = scheduler
+        .inspector()
+        .config_entry(
+            "/module/provider".parse().unwrap(),
+            "/settings/text".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.value(), &forest_protocol::Value::String(text.clone()));
+    assert_eq!(
+        saved.default_value(),
+        &forest_protocol::Value::String(String::new())
+    );
+
+    for (key, value, status) in [
+        ("/settings/text", "true", 422),
+        ("/settings/text", "{", 400),
+        ("/counter", "90", 403),
+        ("/absent", "90", 403),
+    ] {
+        assert_eq!(
+            client
+                .post(&endpoint)
+                .header("Cookie", cookie)
+                .json(&json!({"object":"/module/provider", "key":key, "value":value}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            status
+        );
+    }
+    let mut forged = input.clone();
+    forged["subject"] = json!("/module/provider");
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .header("Cookie", cookie)
+            .json(&forged)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        422
+    );
+    for (key, writable) in [("/settings/text", true), ("/counter", false)] {
+        let view: Value = client
+            .get(format!("{base}/api/inspect/config-entry"))
+            .query(&[("object", "/module/provider"), ("key", key)])
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(view["data"]["writable"], writable);
+    }
+    let target = forest_protocol::service::ConfigKey {
+        object: "/module/provider".parse().unwrap(),
+        key: "/settings/text".parse().unwrap(),
+    };
+    assert_eq!(
+        scheduler
+            .config_writer("/user/viewer".parse().unwrap())
+            .check(&target),
+        Err(forest_protocol::DispatchError::Denied)
+    );
+    let saved = scheduler
+        .inspector()
+        .config_entry(target.object, target.key)
+        .await
+        .unwrap();
+    assert_eq!(saved.value(), &forest_protocol::Value::String(text));
 }

@@ -8,6 +8,68 @@ fn path(value: &str) -> Token {
 }
 
 #[tokio::test]
+async fn default_updates_preserve_values_and_commit_as_one_declaration_set() {
+    let store = ConfigStore::open_in_memory().await.unwrap();
+    let owner = path("/module/defaults");
+    let first = Key::<i64>::new(path("/first"));
+    let second = Key::<i64>::new(path("/second"));
+    store
+        .register(
+            owner.clone(),
+            [first.declare(&1).unwrap(), second.declare(&2).unwrap()],
+        )
+        .await
+        .unwrap();
+    store.set(&owner, &first, &42).await.unwrap();
+    store
+        .update_defaults(
+            &owner,
+            [first.declare(&10).unwrap(), second.declare(&20).unwrap()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.get(&owner, &first).await.unwrap(), 42);
+    assert_eq!(store.get(&owner, &second).await.unwrap(), 2); // Equal to the old default is still a current value.
+    assert_eq!(
+        store
+            .entry(&owner, first.path())
+            .await
+            .unwrap()
+            .default_value(),
+        &Value::I64(10)
+    );
+    assert!(matches!(
+        store
+            .update_defaults(
+                &owner,
+                [
+                    first.declare(&100).unwrap(),
+                    Key::<bool>::new(path("/second")).declare(&true).unwrap(),
+                ]
+            )
+            .await,
+        Err(ConfigError::KeyTypeMismatch { .. })
+    ));
+    assert_eq!(
+        store
+            .entry(&owner, first.path())
+            .await
+            .unwrap()
+            .default_value(),
+        &Value::I64(10)
+    );
+    store.reset(&owner, second.path()).await.unwrap();
+    assert_eq!(store.get(&owner, &second).await.unwrap(), 20);
+    assert!(matches!(
+        store
+            .update_defaults(&owner, [first.declare(&1).unwrap()])
+            .await,
+        Err(ConfigError::DeclarationMismatch { .. })
+    ));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn declarations_have_defaults_and_reads_do_not_initialize_entries() {
     let store = ConfigStore::open_in_memory().await.unwrap();
     let owner = path("/module/example");

@@ -1,5 +1,7 @@
-//! Optional host console with separate inspection and lifecycle capabilities.
+//! Optional host console with separate inspection, lifecycle and ACL write capabilities.
 mod auth;
+mod configuration;
+mod form;
 mod management;
 mod value;
 
@@ -15,8 +17,8 @@ use axum::{
     },
     routing::get,
 };
-use forest_protocol::Token;
-use forest_runtime::{InspectError, Inspector, ModuleManager, RuntimeSnapshot};
+use forest_protocol::{Token, service::ConfigKey};
+use forest_runtime::{ConfigWriter, InspectError, Inspector, ModuleManager, RuntimeSnapshot};
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -46,6 +48,7 @@ pub struct Console {
 #[derive(Clone)]
 struct App {
     inspector: Inspector,
+    config: ConfigWriter,
     packages: management::Packages,
     snapshots: Arc<watch::Receiver<Arc<RuntimeSnapshot>>>,
     closing: watch::Receiver<()>,
@@ -55,6 +58,7 @@ impl Console {
     pub async fn bind(
         inspector: Inspector,
         manager: ModuleManager,
+        config: ConfigWriter,
         options: Options,
     ) -> Result<Self> {
         anyhow::ensure!(
@@ -66,6 +70,7 @@ impl Console {
         let (closing, closed) = watch::channel(());
         let app = App {
             inspector: inspector.clone(),
+            config,
             packages: management::Packages::new(&options.packages, manager).await?,
             snapshots: Arc::new(receiver),
             closing: closed,
@@ -79,6 +84,7 @@ impl Console {
             .route("/config-value", get(download))
             .route_layer(middleware::from_fn_with_state(auth.clone(), auth::protect))
             .with_state(app.clone());
+        let config = configuration::routes(auth.clone()).with_state(app.clone());
         let modules = management::routes(auth.clone()).with_state(app);
         let session = Router::new()
             .route(
@@ -89,6 +95,7 @@ impl Console {
         let router = Router::new()
             .nest("/api/inspect", api)
             .nest("/api/modules", modules)
+            .nest("/api/config", config)
             .nest("/api", session)
             .fallback_service(ServeDir::new(options.assets))
             .layer(DefaultBodyLimit::max(4096))
@@ -250,17 +257,26 @@ struct EntryView {
     current: value::ValueTree,
     default: value::ValueTree,
     is_default: bool,
+    writable: bool,
 }
 async fn entry(
     State(app): State<App>,
     Query(query): Query<EntryQuery>,
 ) -> Result<Json<Timed<EntryView>>, ApiError> {
+    let writable = app
+        .config
+        .check(&ConfigKey {
+            object: query.object.clone(),
+            key: query.key.clone(),
+        })
+        .is_ok();
     let entry = app.inspector.config_entry(query.object, query.key).await?;
     Ok(timed(EntryView {
         schema: entry.schema().to_string(),
         current: value::tree(entry.value()),
         default: value::tree(entry.default_value()),
         is_default: entry.value() == entry.default_value(),
+        writable,
     }))
 }
 async fn download(

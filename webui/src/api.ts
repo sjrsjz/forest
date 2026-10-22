@@ -7,7 +7,7 @@ export class HttpError extends Error {
   }
 }
 
-export async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
+async function response(url: string, init: RequestInit): Promise<Response> {
   const response = await fetch(url, { ...init, credentials: 'same-origin', cache: 'no-store' })
   if (!response.ok) {
     const text = await response.text()
@@ -19,7 +19,11 @@ export async function request<T>(url: string, init: RequestInit = {}): Promise<T
     }
     throw new HttpError(response.status, message)
   }
-  return response.status === 204 ? (undefined as T) : ((await response.json()) as T)
+  return response
+}
+export async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const result = await response(url, init)
+  return result.status === 204 ? (undefined as T) : ((await result.json()) as T)
 }
 export function query(path: string, params: Record<string, string>): string {
   return `/api/inspect/${path}?${new URLSearchParams(params)}`

@@ -170,6 +170,7 @@ enum Import {
     FileRead,
     FileWrite,
     FileRemove,
+    Sqlite,
     Sleep,
     Log,
     Now,
@@ -191,6 +192,7 @@ fn imports(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostState>> {
         ("file_read", Import::FileRead),
         ("file_write", Import::FileWrite),
         ("file_remove", Import::FileRemove),
+        ("sqlite", Import::Sqlite),
         ("sleep", Import::Sleep),
         ("log", Import::Log),
         ("now", Import::Now),
@@ -338,16 +340,13 @@ fn submit(
         Import::ConfigSet => {
             let input: ConfigSet = read(caller, ptr, len)?;
             let auth = input.target.clone();
-            let service = core.services.config.clone();
+            let service = core.clone();
             launch!(
                 HostAccess::Configuration(&auth, Access::Write),
                 async move {
                     Ok(service
-                        .apply([forest_config::Change::set(
-                            input.target.object,
-                            input.target.key,
-                            input.value,
-                        )])
+                        .services
+                        .config_set(input)
                         .await
                         .map_err(|e| ServiceError::Storage(e.to_string())))
                 }
@@ -414,6 +413,12 @@ fn submit(
             let input: String = read(caller, ptr, len)?;
             launch!(HostAccess::File, async move {
                 Ok(resources.file_remove(input).await)
+            })
+        }
+        Import::Sqlite => {
+            let input: Vec<SqlStatement> = read(caller, ptr, len)?;
+            launch!(HostAccess::Database, async move {
+                Ok(resources.database.execute(input).await)
             })
         }
         Import::Sleep => {

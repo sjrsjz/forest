@@ -159,6 +159,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -177,6 +178,7 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -672,6 +674,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "forest-agent-module"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "forest-agent-tools",
+ "forest-config",
+ "forest-context-module",
+ "forest-deepseek-web",
+ "forest-memory-module",
+ "forest-onebot",
+ "forest-openai-provider",
+ "forest-protocol",
+ "forest-qwen-vl-embedding",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "forest-agent-tools"
+version = "0.1.0"
+dependencies = [
+ "forest-config",
+ "forest-onebot",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "forest-cli"
 version = "0.1.0"
 dependencies = [
@@ -721,6 +763,42 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "forest-deepseek-web"
+version = "0.1.0"
+dependencies = [
+ "forest-config",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "forest-memory-module"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "forest-config",
+ "forest-onebot",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -797,6 +875,7 @@ dependencies = [
  "futures",
  "indexmap",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
@@ -2595,6 +2674,7 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -2642,6 +2722,7 @@ version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
+ "log",
  "pin-project-lite",
  "tracing-core",
 ]

@@ -8,6 +8,13 @@ use crate::adt::{Schema, SchemaEnum, VariantPayloadSchema};
 // ============================================================================
 
 #[test]
+fn long_multiline_configuration_string() {
+    let text = "配置提示词\n".repeat(1000);
+    let encoded = serde_json::to_string(&text).unwrap();
+    assert_eq!(parse_value(&encoded).unwrap(), Value::String(text));
+}
+
+#[test]
 fn test_primitives() {
     assert_eq!(parse_value("null").unwrap(), Value::None);
     assert_eq!(parse_value("true").unwrap(), Value::Bool(true));

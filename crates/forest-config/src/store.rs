@@ -98,6 +98,55 @@ impl ConfigStore {
             .await?
     }
 
+    /// Installs new defaults for an existing entity atomically. Key sets and
+    /// schemas stay equivalent; current values are preserved, including values
+    /// that happen to equal the previous default. This is a host metadata write.
+    pub async fn update_defaults(
+        &self,
+        entity: &Token,
+        declarations: impl IntoIterator<Item = Declaration>,
+    ) -> Result<(), ConfigError> {
+        let entity = entity.clone();
+        let declarations: Vec<_> = declarations.into_iter().collect();
+        self.connection
+            .call_raw(move |connection| {
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let mut existing = sql::entries(&transaction, &entity)?
+                    .into_iter()
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                if existing.len() != declarations.len() {
+                    return Err(ConfigError::DeclarationMismatch { entity });
+                }
+                for declaration in declarations {
+                    let entry = existing.remove(&declaration.key).ok_or_else(|| {
+                        ConfigError::DeclarationMismatch {
+                            entity: entity.clone(),
+                        }
+                    })?;
+                    if !entry.schema.subof(&declaration.schema)
+                        || !declaration.schema.subof(&entry.schema)
+                    {
+                        return Err(ConfigError::KeyTypeMismatch {
+                            entity,
+                            key: declaration.key,
+                        });
+                    }
+                    if entry.default != declaration.default {
+                        sql::write_default(
+                            &transaction,
+                            &entity,
+                            &declaration.key,
+                            &serde_json::to_string(&declaration.default)?,
+                        )?;
+                    }
+                }
+                transaction.commit()?;
+                Ok::<_, ConfigError>(())
+            })
+            .await?
+    }
+
     /// Reads multiple entries within one SQLite read transaction.
     pub async fn read<R: Send + 'static>(
         &self,

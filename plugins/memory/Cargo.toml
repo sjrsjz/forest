@@ -1,0 +1,26 @@
+[package]
+name = "forest-memory-module"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+[lib]
+crate-type = ["cdylib", "rlib"]
+[[bin]]
+name = "package-memory"
+path = "src/bin/package.rs"
+[dependencies]
+forest-sdk = { path = "../../crates/forest-sdk" }
+forest-protocol = { path = "../../crates/forest-protocol" }
+forest-serde = { path = "../../crates/forest-serde" }
+forest-onebot = { path = "../../crates/forest-onebot", features = ["forest"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+base64 = "0.22.1"
+futures.workspace = true
+url = "2.5.7"
+[dev-dependencies]
+forest-runtime = { path = "../../crates/forest-runtime" }
+forest-config = { path = "../../crates/forest-config" }
+tokio.workspace = true
+tempfile = "3.23.0"

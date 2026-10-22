@@ -49,6 +49,8 @@ enum SubjectPattern {
 
 另行明确启用的[宿主调试台](14-inspection-webui.md)可以向受信管理员提供完整配置只读观测。这是宿主控制能力，不通过 Token 名称、普通模块配置接口或 AclTable::check 授予；不会将普通用户、管理员路径或模块隐式提升为 SelfModule。
 
+管理端配置写入不使用该只读观测例外：CLI 绑定 `/user/admin` 来源，经同一配置 set 路径检查声明 writers，再校验并原子写入当前值。浏览器不能提交来源，也不能编辑 Schema、默认值或 ACL；不存在资源规则仍拒绝。该用户来源命名空间禁止模块注册。
+
 ### 2.1 接口声明与调用
 
 每项 provides 携带 access: AccessPolicy。宿主以 `(对象 Token, 接口路径)` 查到提供方声明，再用可信直接调用主体检查 Access::Call；SelfModule 绑定提供方逻辑对象。普通模块调用的直接主体是实际发起 send/call 的模块，已认证用户直接调用则是该用户。原始发起者继续随请求保留，供明确的代用户管理操作使用，不能被调用主体覆盖。

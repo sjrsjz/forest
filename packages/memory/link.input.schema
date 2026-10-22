@@ -1,0 +1,2 @@
+schema T0 = [{recalled: {group: i64, sequence: i64}, trigger: {group: i64, sequence: i64}}];
+export T0;

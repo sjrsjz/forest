@@ -4,6 +4,8 @@ import { HttpError, query, request } from '../api'
 import type { ConfigEntry, ConfigKey, Loadable, Snapshot, Timed } from '../types'
 import { time } from '../types'
 import ValueTree from './ValueTree.vue'
+import ConfigEditor from './ConfigEditor.vue'
+import SplitPane from './SplitPane.vue'
 const props = defineProps<{ selected: string; snapshot: Snapshot }>()
 const emit = defineEmits<{ expired: [] }>()
 const entities = shallowRef<Loadable<Timed<string[]>>>({ status: 'loading' })
@@ -17,6 +19,7 @@ const refreshKeys = ref(0)
 const refreshEntry = ref(0)
 const activeTab = ref<'current' | 'default' | 'schema'>('current')
 const loadingEntry = ref(false)
+const editing = ref(false)
 const entityController = new AbortController()
 const loaded = computed(() => new Set(props.snapshot.modules.map((m) => m.object)))
 const filteredKeys = computed(() =>
@@ -34,6 +37,17 @@ const download = computed(() =>
   }),
 )
 const current = computed(() => (entry.value.status === 'ready' ? entry.value.value : null))
+watch([object, selectedKey], () => {
+  editing.value = false
+})
+function edit() {
+  follow.value = false
+  editing.value = true
+}
+function saved() {
+  editing.value = false
+  refreshEntry.value++
+}
 function failure<T>(error: unknown): Loadable<T> {
   if (error instanceof HttpError && error.status === 401) emit('expired')
   return {
@@ -155,39 +169,48 @@ onUnmounted(() => entityController.abort())
     <div v-if="entities.status === 'error'" class="notice danger" role="alert">
       {{ entities.message }}
     </div>
-    <div class="config-split">
-      <aside class="config-key-panel">
-        <div class="search-wrap">
-          <input v-model="search" placeholder="筛选配置路径…" aria-label="筛选配置路径" />
-        </div>
-        <div class="key-list scroll-area">
-          <p v-if="keys.status === 'loading'" class="muted inset">正在读取配置键…</p>
-          <div v-else-if="keys.status === 'error'" class="notice" role="status">
-            <template v-if="keys.httpStatus === 404">
-              <strong>暂无配置表</strong>
-            </template>
-            <template v-else>{{ keys.message }}</template>
+    <SplitPane
+      class="config-split"
+      storage-key="forest.layout.config-keys"
+      label="配置列表宽度"
+      :initial="230"
+      :min="150"
+      :max="520"
+      :min-main="320"
+    >
+      <template #side>
+        <aside class="config-key-panel">
+          <div class="search-wrap">
+            <input v-model="search" placeholder="筛选配置路径…" aria-label="筛选配置路径" />
           </div>
-          <template v-else-if="keys.status === 'ready'">
-            <button
-              v-for="item in filteredKeys"
-              :key="item.key"
-              class="config-key"
-              :class="{ active: selectedKey === item.key }"
-              @click="selectedKey = item.key"
-            >
-              <code>{{ item.key }}</code>
-              <span>{{ item.schema }}</span>
-            </button>
-            <p v-if="!keys.value.data.length" class="muted inset">暂无配置项</p>
-            <p v-else-if="!filteredKeys.length" class="muted inset">无匹配项</p>
-          </template>
-          <p v-else class="muted inset">选择配置对象</p>
-        </div>
-        <div v-if="keys.status === 'ready'" class="panel-footer">
-          {{ filteredKeys.length }} / {{ keys.value.data.length }} 项
-        </div>
-      </aside>
+          <div class="key-list scroll-area">
+            <p v-if="keys.status === 'loading'" class="muted inset">正在读取配置键…</p>
+            <div v-else-if="keys.status === 'error'" class="notice" role="status">
+              <template v-if="keys.httpStatus === 404">
+                <strong>暂无配置表</strong>
+              </template>
+              <template v-else>{{ keys.message }}</template>
+            </div>
+            <template v-else-if="keys.status === 'ready'">
+              <button
+                v-for="item in filteredKeys"
+                :key="item.key"
+                class="config-key"
+                :class="{ active: selectedKey === item.key }"
+                @click="selectedKey = item.key"
+              >
+                <code>{{ item.key }}</code>
+              </button>
+              <p v-if="!keys.value.data.length" class="muted inset">暂无配置项</p>
+              <p v-else-if="!filteredKeys.length" class="muted inset">无匹配项</p>
+            </template>
+            <p v-else class="muted inset">选择配置对象</p>
+          </div>
+          <div v-if="keys.status === 'ready'" class="panel-footer">
+            {{ filteredKeys.length }} / {{ keys.value.data.length }} 项
+          </div>
+        </aside>
+      </template>
       <div class="config-entry-panel">
         <template v-if="selectedKey">
           <div class="entry-toolbar">
@@ -198,6 +221,7 @@ onUnmounted(() => entityController.abort())
                 自动刷新
               </label>
               <button :disabled="loadingEntry" @click="refreshEntry++">刷新</button>
+              <button v-if="current?.data.writable && !editing" @click="edit">编辑</button>
             </div>
           </div>
           <div class="entry-meta">
@@ -207,7 +231,7 @@ onUnmounted(() => entityController.abort())
             <span v-if="current" class="muted">读取于 {{ time(current.read_at_ms) }}</span>
             <a :href="download" download="forest-value.txt">下载完整值 ↗</a>
           </div>
-          <div class="mini-tabs">
+          <div v-if="!editing" class="mini-tabs">
             <button :class="{ active: activeTab === 'current' }" @click="activeTab = 'current'">
               当前值
             </button>
@@ -219,7 +243,16 @@ onUnmounted(() => entityController.abort())
             </button>
           </div>
           <div class="entry-value scroll-area">
-            <div v-if="entry.status === 'loading'" class="muted">正在读取…</div>
+            <ConfigEditor
+              v-if="editing"
+              :key="`${object}:${selectedKey}`"
+              :object="object"
+              :key-path="selectedKey"
+              @saved="saved"
+              @close="editing = false"
+              @expired="emit('expired')"
+            />
+            <div v-else-if="entry.status === 'loading'" class="muted">正在读取…</div>
             <div v-else-if="entry.status === 'error'" class="notice danger" role="alert">
               {{ entry.message }}
             </div>
@@ -237,6 +270,6 @@ onUnmounted(() => entityController.abort())
           <strong>选择一个配置项</strong>
         </div>
       </div>
-    </div>
+    </SplitPane>
   </section>
 </template>

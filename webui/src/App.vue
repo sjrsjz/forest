@@ -7,6 +7,7 @@ import ModuleOverview from './components/ModuleOverview.vue'
 import DependencyGraph from './components/DependencyGraph.vue'
 import ConfigPanel from './components/ConfigPanel.vue'
 import ModuleManagement from './components/ModuleManagement.vue'
+import SplitPane from './components/SplitPane.vue'
 
 const session = ref<'checking' | 'out' | 'in'>('checking')
 const password = ref('')
@@ -181,117 +182,135 @@ onMounted(checkSession)
         <button class="text-button" @click="logout">退出</button>
       </div>
     </header>
-    <aside class="sidebar">
-      <div class="sidebar-search">
-        <input v-model="search" aria-label="搜索模块" placeholder="搜索名称或 Token…" />
-        <select v-model="phase" aria-label="生命周期筛选">
-          <option value="">全部生命周期</option>
-          <option v-for="(label, key) in phaseLabel" :key="key" :value="key">{{ label }}</option>
-        </select>
-        <button class="package-open" @click="manage('load')">本地包</button>
-      </div>
-      <div class="sidebar-objects scroll-area">
-        <div class="sidebar-heading">
-          WASM 模块
-          <span>{{ snapshot?.modules.length ?? 0 }}</span>
-        </div>
-        <button
-          v-for="m in modules"
-          :key="m.object"
-          class="object-button"
-          :class="{ selected: selected === m.object }"
-          @click="selected = m.object"
-        >
-          <div>
-            <strong>{{ m.published.name || m.object.split('/').at(-1) }}</strong>
-            <span
-              class="phase-dot"
-              :class="m.lifecycle.phase"
-              :title="phaseLabel[m.lifecycle.phase]"
+    <SplitPane
+      storage-key="forest.layout.modules"
+      label="模块侧栏宽度"
+      :initial="230"
+      :min="170"
+      :max="460"
+      :min-main="470"
+    >
+      <template #side>
+        <aside class="sidebar">
+          <div class="sidebar-search">
+            <input v-model="search" aria-label="搜索模块" placeholder="搜索名称或 Token…" />
+            <select v-model="phase" aria-label="生命周期筛选">
+              <option value="">全部生命周期</option>
+              <option v-for="(label, key) in phaseLabel" :key="key" :value="key">
+                {{ label }}
+              </option>
+            </select>
+            <button class="package-open" @click="manage('load')">本地包</button>
+          </div>
+          <div class="sidebar-objects scroll-area">
+            <div class="sidebar-heading">
+              WASM 模块
+              <span>{{ snapshot?.modules.length ?? 0 }}</span>
+            </div>
+            <button
+              v-for="m in modules"
+              :key="m.object"
+              class="object-button"
+              :class="{ selected: selected === m.object }"
+              @click="selected = m.object"
+            >
+              <div>
+                <strong>{{ m.published.name || m.object.split('/').at(-1) }}</strong>
+                <span
+                  class="phase-dot"
+                  :class="m.lifecycle.phase"
+                  :title="phaseLabel[m.lifecycle.phase]"
+                />
+              </div>
+              <code>{{ m.object }}</code>
+              <small>
+                {{ phaseLabel[m.lifecycle.phase] }}
+                <span>v{{ m.published.version }}</span>
+              </small>
+            </button>
+            <p v-if="snapshot && !modules.length" class="muted inset">没有匹配的模块。</p>
+            <details class="host-list" open>
+              <summary class="sidebar-heading">
+                宿主对象
+                <span>{{ snapshot?.hosts.length ?? 0 }}</span>
+              </summary>
+              <button
+                v-for="h in hosts"
+                :key="h.object"
+                class="object-button host-object"
+                :class="{ selected: selected === h.object }"
+                @click="selected = h.object"
+              >
+                <strong>{{ h.object.split('/').at(-1) }}</strong>
+                <code>{{ h.object }}</code>
+                <small>原生接口 / 事件源</small>
+              </button>
+            </details>
+          </div>
+          <footer class="sidebar-footer">
+            <span v-if="snapshot">并行推进 {{ snapshot.parallelism }}</span>
+          </footer>
+        </aside>
+      </template>
+      <main class="workspace">
+        <template v-if="snapshot">
+          <div class="workspace-heading">
+            <div>
+              <h1>{{ title }}</h1>
+              <code class="object-path">{{ selected || '尚无登记对象' }}</code>
+            </div>
+            <div v-if="selectedModule" class="module-actions">
+              <span class="phase-badge" :class="selectedModule.lifecycle.phase">
+                {{ phaseLabel[selectedModule.lifecycle.phase] }}
+              </span>
+              <button
+                :disabled="selectedModule.lifecycle.phase !== 'serving'"
+                @click="manage('reload')"
+              >
+                重载
+              </button>
+              <button @click="manage('unload')">
+                {{
+                  ['serving', 'failed'].includes(selectedModule.lifecycle.phase) ? '卸载' : '管理'
+                }}
+              </button>
+            </div>
+            <span v-else-if="selectedHost" class="phase-badge registered">已注册</span>
+          </div>
+          <nav class="tabs" aria-label="对象视图">
+            <button :class="{ active: tab === 'status' }" @click="tab = 'status'">运行状态</button>
+            <button :class="{ active: tab === 'graph' }" @click="tab = 'graph'">依赖关系</button>
+            <button :class="{ active: tab === 'config' }" @click="tab = 'config'">配置表</button>
+            <span class="tabs-tail">
+              {{ snapshot.modules.length }} 个模块 · {{ snapshot.hosts.length }} 个宿主对象
+            </span>
+          </nav>
+          <div class="workspace-content">
+            <ModuleOverview
+              v-if="tab === 'status'"
+              :module="selectedModule"
+              :host="selectedHost"
+              :snapshot="snapshot"
+            />
+            <DependencyGraph
+              v-else-if="tab === 'graph'"
+              :snapshot="snapshot"
+              :selected="selected"
+            />
+            <ConfigPanel
+              v-else
+              :snapshot="snapshot"
+              :selected="selected"
+              @expired="session = 'out'"
             />
           </div>
-          <code>{{ m.object }}</code>
-          <small>
-            {{ phaseLabel[m.lifecycle.phase] }}
-            <span>v{{ m.published.version }}</span>
-          </small>
-        </button>
-        <p v-if="snapshot && !modules.length" class="muted inset">没有匹配的模块。</p>
-        <details class="host-list" open>
-          <summary class="sidebar-heading">
-            宿主对象
-            <span>{{ snapshot?.hosts.length ?? 0 }}</span>
-          </summary>
-          <button
-            v-for="h in hosts"
-            :key="h.object"
-            class="object-button host-object"
-            :class="{ selected: selected === h.object }"
-            @click="selected = h.object"
-          >
-            <strong>{{ h.object.split('/').at(-1) }}</strong>
-            <code>{{ h.object }}</code>
-            <small>原生接口 / 事件源</small>
-          </button>
-        </details>
-      </div>
-      <footer class="sidebar-footer">
-        <span v-if="snapshot">并行推进 {{ snapshot.parallelism }}</span>
-      </footer>
-    </aside>
-    <main class="workspace">
-      <template v-if="snapshot">
-        <div class="workspace-heading">
-          <div>
-            <p class="eyebrow">{{ selectedHost ? 'HOST OBJECT' : 'WASM MODULE' }}</p>
-            <h1>{{ title }}</h1>
-            <code class="object-path">{{ selected || '尚无登记对象' }}</code>
-          </div>
-          <div v-if="selectedModule" class="module-actions">
-            <span class="phase-badge" :class="selectedModule.lifecycle.phase">
-              {{ phaseLabel[selectedModule.lifecycle.phase] }}
-            </span>
-            <button
-              :disabled="selectedModule.lifecycle.phase !== 'serving'"
-              @click="manage('reload')"
-            >
-              重载
-            </button>
-            <button @click="manage('unload')">
-              {{ ['serving', 'failed'].includes(selectedModule.lifecycle.phase) ? '卸载' : '管理' }}
-            </button>
-          </div>
-          <span v-else-if="selectedHost" class="phase-badge registered">已注册</span>
+        </template>
+        <div v-else class="empty-state">
+          <span class="loading-mark" />
+          <strong>等待宿主快照</strong>
         </div>
-        <nav class="tabs" aria-label="对象视图">
-          <button :class="{ active: tab === 'status' }" @click="tab = 'status'">运行状态</button>
-          <button :class="{ active: tab === 'graph' }" @click="tab = 'graph'">依赖关系</button>
-          <button :class="{ active: tab === 'config' }" @click="tab = 'config'">配置表</button>
-          <span class="tabs-tail">
-            {{ snapshot.modules.length }} 个模块 · {{ snapshot.hosts.length }} 个宿主对象
-          </span>
-        </nav>
-        <div class="workspace-content">
-          <ModuleOverview
-            v-if="tab === 'status'"
-            :module="selectedModule"
-            :host="selectedHost"
-            :snapshot="snapshot"
-          />
-          <DependencyGraph v-else-if="tab === 'graph'" :snapshot="snapshot" :selected="selected" />
-          <ConfigPanel
-            v-else
-            :snapshot="snapshot"
-            :selected="selected"
-            @expired="session = 'out'"
-          />
-        </div>
-      </template>
-      <div v-else class="empty-state">
-        <span class="loading-mark" />
-        <strong>等待宿主快照</strong>
-      </div>
-    </main>
+      </main>
+    </SplitPane>
     <ModuleManagement
       v-if="snapshot"
       :open="managementOpen"

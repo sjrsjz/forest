@@ -4,7 +4,7 @@ Rust + Wasm Bot 微内核。当前已实现调度器核心、基础 SDK、配置
 
 当前设计面向单个 Bot 账号，可处理多个群聊；不预设多 Bot 实体、账号路由或按 Bot 挂载配置。
 
-已提供 Vue + TypeScript [宿主调试台](doc/14-inspection-webui.md)：实时模块状态、声明依赖图、完整配置只读查看，以及本地包加载、热重载和卸载。构建与启动方法见该文档。
+已提供 Vue + TypeScript [宿主调试台](doc/14-inspection-webui.md)：实时模块状态、声明依赖图、完整配置查看与 ACL 鉴权编辑，以及本地包加载、热重载和卸载。构建与启动方法见该文档。
 
 ```text
 crates/
@@ -23,6 +23,10 @@ plugins/forest-test/     #forest-test 示例模块与打包程序
 plugins/qwen-vl-embedding/ 2048 维多模态向量供应 Wasm 模块
 plugins/openai-provider/  OpenAI 兼容 Chat Completions Wasm 模块
 plugins/context/          可配置 Agent 提示词的上下文格式化 Wasm 模块
+plugins/memory/           原文、媒体、跨群联想与派生向量索引 Wasm 模块
+plugins/agent/            每群工作循环、持续点与短期窗口 Wasm 模块
+plugins/agent-tools/      原生工具声明与显式模块调用网关 Wasm 模块
+plugins/deepseek-web/     DeepSeek 搜索与 Markdown 网页抓取 Wasm 插件
 packages/forest-test/    生成的外部 Manifest 与 module.wasm
 data/                   默认运行数据，不进入 Git
 ```
@@ -40,6 +44,8 @@ cargo test --workspace --all-features --locked
 
 地址与群号均为示例。网关需要令牌时，启动前设置 `FOREST_ONEBOT_TOKEN` 环境变量；凭据不放入命令行。模块 Serving 后，在允许群发送 `#forest-test`，回复 `hello world`。默认包和数据都位于仓库根目录下，不使用 `.local`。更多启动方式、SDK 和热重载 API 见[运行与 ABI](doc/13-runtime-and-sdk.md)。
 
+上述 `--allow-group` 是可选的宿主测试限制。正常 Agent 启动省略此参数，在 WebUI 的 Agent 配置表中管理 `allowed_groups`，保存并重载 Agent 即可生效。
+
 OneBot 使用方式见 [API 库说明](crates/forest-onebot/README.md)，选型和职责边界见 [OneBot v11 设计](doc/04-onebot-v11.md)。事件沿用 v11 原始结构，经 notifier 转发给模块；HTTP 与双向 WS 调用均可使用。
 
 配置表的声明、类型化访问、原子更新、SQLite 存储和序列化边界见 [配置表实现](doc/05-config-table.md)。
@@ -56,6 +62,6 @@ OneBot 使用方式见 [API 库说明](crates/forest-onebot/README.md)，选型�
 
 [宿主事件 notifier 与静态依赖设计](doc/11-notifier-and-dependencies.md)明确宿主产生事件，Manifest 只用 subscriptions 声明接收入口，调度器按注册表投递；模块没有事件发布接口。模块加载依赖与宿主事件支持分开检查，不提供运行时订阅增删接口。
 
-[调度器状态机与所有权](doc/12-scheduler-state-machine.md)细化六个模块阶段、Idle/Advancing 执行权、接口许可、请求额度、一次性结果出口及唤醒规则。不变量依靠状态构造和所有权转移保持；集成测试使用真实 Wasm 验证并发、抢占、热重载与 SQLite 写入交接。Agent、记忆系统尚未实现。
+[调度器状态机与所有权](doc/12-scheduler-state-machine.md)细化六个模块阶段、Idle/Advancing 执行权、接口许可、请求额度、一次性结果出口及唤醒规则。不变量依靠状态构造和所有权转移保持；集成测试使用真实 Wasm 验证并发、抢占、热重载与 SQLite 写入交接。Agent、Memory 与工具网关均为独立 Wasm 包，构建与使用见[Agent 实现与启动](doc/22-agent-implementation.md)。
 
 旧 Python 实现及旧设计文档位于 `archive/python-2026-10-19`，最后快照为 `2d560a69`。其他旧分支及 worktree 快照分别保存在 `archive/master-2026-10-19`、`archive/control-payloads-2026-10-19`、`archive/shell-contracts-2026-10-19`。旧文档不再指导新主线实现。

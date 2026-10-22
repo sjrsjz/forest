@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {Embedding(string), Host(string), Index(string), InvalidInput(string), Media(string), NotFound, Storage(string)}), Ok(string)};
+export T0;

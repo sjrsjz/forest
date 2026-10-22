@@ -1,12 +1,12 @@
 # 宿主调试台与模块管理
 
-状态：第一版已实现。控制台供受信管理员使用，可以查看完整配置，包括仅允许 SelfModule 读取的项；普通模块与用户的 ACL 语义保持不变。
+状态：已实现。控制台供受信管理员使用，可以查看完整配置，包括仅允许 SelfModule 读取的项；配置写入使用宿主绑定的 `/user/admin` 来源，按声明的 writers 鉴权，无管理员写入旁路。
 
 调试台展示模块实时状态、声明依赖关系、配置表内容，并提供本地包加载、重载和卸载入口。运行时仍是状态权威，WebUI 是可选的宿主适配层。
 
 ## 1. 边界
 
-采用独立 `forest-webui` crate，由 CLI 显式启用，与调度器运行在同一宿主进程。该 crate 提供静态页面、认证、HTTP 与 SSE；运行时只增加只读观测接口，不依赖前端、Mermaid 或 HTTP 服务端。
+采用独立 `forest-webui` crate，由 CLI 显式启用，与调度器运行在同一宿主进程。该 crate 提供静态页面、认证、HTTP 与 SSE；运行时提供独立的观测、模块管理和 ACL 配置写入能力，不依赖前端、Mermaid 或 HTTP 服务端。
 
 ```mermaid
 flowchart LR
@@ -16,11 +16,15 @@ flowchart LR
     Inspector --> Store[SQLite 只读事务]
     Directory --> Snapshot[不可变运行快照]
     Snapshot --> Web
+    Web --> Writer[绑定来源的 ConfigWriter]
+    Writer --> ACL[已发布配置 ACL]
+    Writer --> Set[共用 set 路径]
+    Set --> Store
 ```
 
-Web 层持有两个独立能力：Inspector 只读观测，ModuleManager 执行包读取、依赖规划及装卸；两者由宿主显式授予。Web 层不持有完整 Scheduler、模块调用能力或可写 ConfigStore。模块 SDK 不提供这两个管理能力，模块 send/call 不能寻址它们。
+Web 层持有三个由宿主显式授予的独立能力：Inspector 只读观测，ModuleManager 执行包读取、依赖规划及装卸，ConfigWriter 以绑定来源执行受 ACL 约束的配置 set。Web 层不持有完整 Scheduler、模块调用能力或可写 ConfigStore。模块 SDK 不提供这些宿主管理能力，模块 send/call 不能寻址它们。
 
-观测不执行来宾代码、不遍历来宾内存、不恢复任务。控制台连接、读取和关闭不改变模块生命周期。只有显式装卸请求可以执行生命周期代码。配置编辑、日志平台、模块自带 UI 和 Agent 页面另行设计。
+观测不执行来宾代码、不遍历来宾内存、不恢复任务。控制台连接、读取和关闭不改变模块生命周期。只有显式装卸请求可以执行生命周期代码。配置 set 只更新存储值，不执行来宾或自动重载。日志平台、模块自带 UI 和 Agent 页面另行设计。
 
 ## 2. 权限
 
@@ -31,14 +35,19 @@ Web 层持有两个独立能力：Inspector 只读观测，ModuleManager 执行�
 | Wasm 配置 get/set/reset | 原有真实来源、静态 ACL 与阶段限制 |
 | 普通代用户配置入口 | 原有用户来源与逐项 ACL |
 | 宿主调试台 | 明确授予的完整配置只读观测能力 |
+| 管理端配置 set | `/user/admin` 来源，逐项检查当前已发布配置 ACL 的 writers，校验 Schema 后原子写入 |
 
 第一版采用单个宿主管理口令和会话，不建用户数据库或角色系统。口令由宿主启动配置提供；认证后用同源 HttpOnly 会话 Cookie 访问 HTTP/SSE，不把口令放入 URL。默认回环监听，远程访问可由用户配置受保护的入口。
 
-运行状态、配置读取、本地包列表和模块管理均置于认证边界内。静态资源不嵌入运行数据；数据响应不缓存。模块管理请求与登录一样检查同源。管理端口不提供配置写入、重置或任意模块调用。
+运行状态、配置读取和写入、本地包列表和模块管理均置于认证边界内。静态资源不嵌入运行数据；数据响应不缓存。配置写入与模块管理请求和登录一样检查同源。管理端口不提供任意模块调用。
+
+CLI 在创建控制台时授予 `scheduler.config_writer("/user/admin")`；来源不接受浏览器参数，也不因目标对象变化而改成 SelfModule。不存在已发布声明或 writers 不匹配时拒绝写入，包括仅有落盘数据、没有加载模块的表。此令牌位于禁止模块注册的 `/user` 命名空间，不是可由插件自封的管理员标记。已接纳的写入不因随后 ACL 更新而追溯撤销，与模块宿主操作保持相同语义。
 
 ## 3. 页面
 
 按 PC 视口设计：固定顶栏，左侧模块列表，右侧主工作区。内容区各自滚动，不把全部详情和表单纵向堆在首页。
+
+模块侧栏与配置项列表的边界都可拖动，双击恢复默认宽度；分隔线支持左右方向键，Shift 加速，Home/End 到两端。宽度作为浏览器本地偏好保存，不写入框架配置。视口缩小时按剩余工作区约束展示宽度，不丢弃已保存偏好。配置列表默认使用紧凑宽度，不再固定占用工作区的 32%。
 
 ```text
 ┌ Forest · 宿主调试台     连接状态 / 最近采样时间 / 模块数量 ┐
@@ -95,13 +104,28 @@ flowchart LR
 
 ### 3.3 配置表
 
-按实体 Token 选择配置表，按配置键路径筛选。列表显示路径和类型，选择某项后展示完整 Schema、默认值、当前值，以及当前值是否等于默认值。
+按实体 Token 选择配置表，按配置键路径筛选。列表只显示路径；完整 Schema 放在详情页的 Schema 标签中。选择某项后展示默认值、当前值，以及当前值是否等于默认值。
 
-配置是 Forest Value，不将 Map、Variant、Tuple、Bytes 等强行压成普通 JSON 表单。使用结构树和现有规范文本展示；Bytes 首屏显示长度和短预览，完整内容按需读取。当前值、默认值与 Schema 从同一个 Entry 读取，不把部分字段缺失包装成 Option<Entry>。
+配置是 Forest Value，不将 Map、Variant、Tuple、Bytes 等强行压成普通 JSON 对象。使用结构树和现有规范文本展示；Bytes 首屏显示长度和短预览，完整内容按需读取。编辑控件由该条目的 Schema 生成，不按模块 Token 或字段名在宿主中硬编码 API 表单。当前值、默认值与 Schema 从同一个 Entry 读取，不把部分字段缺失包装成 Option<Entry>。
 
 初次加载和模块切换不读取全库的所有值。配置值不进入持续状态流；默认按需读取，可显式启用当前选中项的自动刷新。较大值采用折叠和独立滚动区域，列表不携带完整值。
 
 SQLite 中已保存但当前没有加载模块的实体仍可查看，标注为“仅持久化数据”。不因查看而加载模块、注册配置、补默认值或删除数据。Creating 尚未注册完成、实体不存在与空配置表分别表达，不将三者都显示为空表。
+
+有写权限的条目提供“编辑”：按需读取完整值与 Schema 的表单投影。字段纵向排列，名称与输入对齐；短字符串使用单行输入，长提示词和多行内容使用大编辑区，单行输入可切换为多行。布尔量使用开关，整数使用保留位宽的十进制文本，Option 的名称只显示一次，并在值区域切换是否自定义，枚举从声明分支中选择。Record 和 Tuple 按原结构组合。
+
+基本类型数组逐项编辑、添加和移除，不要求用户输入 i64 后缀；新项的位宽与类型取自元素 Schema。复杂容器或无法构造初始控件的递归类型直接保留 Forest 文本；未知额外字段同样保留，不丢弃或补造数据。表单完整值不使用展示树的截断内容，保存操作保持原有原子 set 语义。
+
+表单最终生成相同的 Forest 值文本，提交原有 set 接口，不引入第二条写入路径或 JavaScript 数字转换。也可点击“Forest 文本”，将当前表单草稿切换为完整文本继续编辑，支持结构键、大整数、Bytes 和 Variant。保存失败保留草稿并显示实际错误，成功后重新读取 Entry。自动刷新不会覆盖草稿；Schema 和默认值没有编辑入口。配置在 create 时读取的模块需要显式重载后使用新值，保存本身不隐式执行生命周期操作。
+
+现有 API 设置入口如下：
+
+| 模块 | 条目 | 表单内容 |
+|---|---|---|
+| `/module/openai-provider` | `/settings` | endpoint、API Key、model、multimodal、output_limit、reasoning_effort |
+| `/module/qwen-vl-embedding` | `/connection` | endpoint、API Key；模型与 2048 维向量空间由插件固定 |
+| `/module/deepseek-web` | `/connection` | 搜索/抓取 API 前缀、API Key |
+| `/module/memory` | `/settings` | Qdrant endpoint、API Key、collection、retrieval_json |
 
 ## 4. 观测接口
 
@@ -115,8 +139,12 @@ SQLite 中已保存但当前没有加载模块的实体仍可查看，标注为�
 | GET /api/inspect/config-keys?object=… | 指定表的键与类型信息，不加载完整值 |
 | GET /api/inspect/config-entry?object=…&key=… | 指定完整 Entry |
 | GET /api/inspect/config-value?object=…&key=…&value=current 或 default | 下载完整值的 Forest 文本 |
+| POST /api/config/set | `{object, key, value}`；value 为完整 Forest 文本，成功返回 204 |
+| GET /api/config/form?object=…&key=… | 从该条目 Schema 与完整当前值生成的表单控件树 |
 
-完整 Entry 以 Schema、当前值、默认值和是否等于默认值呈现；树为有界展示投影，最多 256 个节点、24 层深度，字符串预览 2048 字符，Bytes 预览 32 字节。需要更多内容时下载完整原值，预览限制不修改或拒绝存储数据。
+完整 Entry 以 Schema、当前值、默认值、是否等于默认值和当前管理来源的 writable 呈现；树为有界展示投影，最多 256 个节点、24 层深度，字符串预览 2048 字符，Bytes 预览 32 字节。需要更多内容时下载或编辑完整原值，预览限制不修改或拒绝存储数据。
+
+set 在运行时重查 ACL 后，进入 Wasm `config_set` 共用的写入路径，由 ConfigStore 执行原子校验与提交。未授权返回 403，Forest 文本解析失败返回 400，值不符合 Schema 返回 422；错误不改变当前值、Schema 或默认值。不提供身份字段、反射方法名、直接 SQL 或声明编辑。写请求体上限沿用 ABI 帧的 16 MiB，不沿用登录的小请求体限制。
 
 对象与配置键使用查询参数并按 Token 解析，避免把任意路径形状的 Token 与 HTTP 路由层级混用。响应采用明确的 Rust 结构和枚举，不设接受任意方法名的反射入口。
 
@@ -137,7 +165,7 @@ SQLite 中已保存但当前没有加载模块的实体仍可查看，标注为�
 ## 6. 实施范围
 
 1. 在 forest-runtime 增加 Inspector 与只读快照 DTO；复用现有 State、Manifest、Budget 和 ConfigStore，不引入调度控制副本。
-2. 增加可选 forest-webui，承载认证、固定查询、受限模块管理和 SSE，CLI 显式挂载。
+2. 增加可选 forest-webui，承载认证、固定查询、受限模块管理、ACL 配置编辑和 SSE，CLI 显式挂载。
 3. 实现 PC 页面与 Mermaid 依赖图，资源随程序分发。
 4. 验证读取不执行模块、不初始化数据；热重载时发布信息正确切换；慢客户端不积压；普通 Wasm 仍不能读取未授权配置。
 
@@ -195,9 +223,9 @@ cargo run -p forest-cli --locked -- --events-ws ws://127.0.0.1:8080 --allow-grou
 
 ## 8. 验证
 
-`forest-webui/tests/console.rs` 通过实际 HTTP 验证匿名拒绝、口令、会话、同源限制、私有配置读取、完整值下载、拒绝写方法、无来宾执行及 SSE 关闭收尾。运行时的真实 Wasm 测试核对 Inspector 在初始化和重载后的投影。
+`forest-webui/tests/console.rs` 通过实际 HTTP 验证匿名拒绝、口令、会话、同源限制、私有配置读取、完整值下载、无来宾执行及 SSE 关闭收尾。运行时的真实 Wasm 测试核对 Inspector 在初始化和重载后的投影。
 
-`forest-webui/tests/management.rs` 使用真实的两份 Wasm 工件，验证仅声明预览、依赖优先装载、无关坏包隔离、身份检查、存在使用者时拒绝卸载，以及三种重载方式。Drain 等待期间断开 HTTP 请求后，再由 Force 完成替换；新代码返回不同实现标识，持久计数继续累加。
+`forest-webui/tests/management.rs` 使用真实的两份 Wasm 工件，验证仅声明预览、依赖优先装载、无关坏包隔离、身份检查、存在使用者时拒绝卸载，以及三种重载方式。同时验证管理端配置 set 的鉴权、Schema 校验、来源不可伪造、私有状态写入拒绝和大于 4 KiB 的草稿。Drain 等待期间断开 HTTP 请求后，再由 Force 完成替换；新代码返回不同实现标识，持久计数继续累加。
 
 ```sh
 cargo test -p forest-config -p forest-runtime -p forest-cli -p forest-webui --tests --locked
@@ -205,3 +233,9 @@ pnpm --dir webui build
 ```
 
 浏览器验证连接一个已运行的测试宿主，默认 `http://127.0.0.1:3210`，可用 `FOREST_CONSOLE_URL` 修改。设置 `FOREST_TEST_WEB_PASSWORD` 为该实例的管理口令后执行 `pnpm --dir webui test:e2e`；使用已安装的 Edge、一个工作进程，不发送群消息。覆盖登录、实时采样、SVG 标签、配置查看、下载、登出及 1280×720 桌面布局；模块管理用例会对 forest-test 执行重载、卸载和重新加载，并核对实例替换及计数保留。截图输出到已忽略的 `webui/test-results`。
+
+运行 Agent 包的实例可单独执行 `pnpm --dir webui exec playwright test tests/configuration.spec.ts`，同样通过上述环境变量指定地址和口令。它验证提示词编辑、Schema 错误保留草稿、私有状态无写入口及桌面布局；临时修改的提示词在结束时恢复，不触发模型或群消息。没有 Context 包时此用例跳过。
+
+API 表单用例对聊天 Provider、嵌入、网页工具和 Memory 的实际配置执行编辑与保存，核对完整值未丢失、开关及枚举/Option 切换保留原值。用例不打印凭据、不重载连接配置、不调用外部模型；所有写入均在结束时恢复。
+
+`tests/layout.spec.ts` 验证两处分隔线的拖动、键盘操作、刷新后宽度保留和双击复位，以及数组项增删后保存保持完整值、1280×720 桌面无整页溢出。截图位于已忽略的 test-results。

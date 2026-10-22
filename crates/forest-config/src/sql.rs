@@ -230,3 +230,16 @@ pub(crate) fn write(
     )?;
     Ok(())
 }
+
+pub(crate) fn write_default(
+    connection: &Connection,
+    entity: &Token,
+    key: &Token,
+    default: &str,
+) -> Result<(), ConfigError> {
+    connection.execute(
+        "UPDATE config_entries SET default_json = ?3 WHERE entity = ?1 AND path = ?2",
+        params![entity.to_string(), key.to_string(), default],
+    )?;
+    Ok(())
+}

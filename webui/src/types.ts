@@ -92,6 +92,7 @@ export interface ConfigEntry {
   current: ValueTree
   default: ValueTree
   is_default: boolean
+  writable: boolean
 }
 export type Loadable<T> =
   | { status: 'idle' }

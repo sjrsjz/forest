@@ -30,6 +30,12 @@ async fn executable_receives_group_command_and_correlates_onebot_receipt() {
             .unwrap()
             .success()
     );
+    for restricted in [true, false] {
+        run(&root, restricted).await;
+    }
+}
+
+async fn run(root: &std::path::Path, restricted: bool) {
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("package");
     std::fs::create_dir(&package).unwrap();
@@ -57,8 +63,17 @@ async fn executable_receives_group_command_and_correlates_onebot_receipt() {
                 .await
                 .unwrap();
         }
-        let event = serde_json::json!({"time":1,"self_id":10,"post_type":"message","message_type":"group","sub_type":"normal","message_id":1,"group_id":42,"user_id":20,"anonymous":null,
+        let target = if restricted { 42 } else { 7 };
+        let event = serde_json::json!({"time":1,"self_id":10,"post_type":"message","message_type":"group","sub_type":"normal","message_id":1,"group_id":target,"user_id":20,"anonymous":null,
             "message":[{"type":"text","data":{"text":"#forest-test"}}],"raw_message":"#forest-test","sender":{"user_id":20,"nickname":"test"}});
+        if restricted {
+            let mut excluded = event.clone();
+            excluded["group_id"] = 7.into();
+            socket
+                .send(Message::Text(excluded.to_string().into()))
+                .await
+                .unwrap();
+        }
         socket
             .send(Message::Text(event.to_string().into()))
             .await
@@ -70,23 +85,26 @@ async fn executable_receives_group_command_and_correlates_onebot_receipt() {
             .unwrap();
         let action: serde_json::Value = serde_json::from_slice(&action.into_data()).unwrap();
         assert_eq!(action["action"], "send_group_msg");
-        assert_eq!(action["params"]["group_id"], 42);
+        assert_eq!(action["params"]["group_id"], target);
         assert_eq!(action["params"]["message"], "hello world");
         socket.send(Message::Text(serde_json::json!({"status":"ok","retcode":0,"data":{"message_id":123},"echo":action["echo"]}).to_string().into())).await.unwrap();
         socket.close(None).await.unwrap();
     });
-    let mut child = Command::new(env!("CARGO_BIN_EXE_forest"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_forest"));
+    command
         .current_dir(temp.path())
         .args(["--package"])
         .arg(&package)
         .args([
             "--events-ws",
             &format!("ws://{address}"),
-            "--allow-group",
-            "42",
             "--token-env",
             "FOREST_TEST_EMPTY_TOKEN",
-        ])
+        ]);
+    if restricted {
+        command.args(["--allow-group", "42"]);
+    }
+    let mut child = command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

@@ -99,10 +99,28 @@ async fn group_command_uses_real_wasm_native_acl_http_and_persistent_configurati
     let ingress = onebot::install(
         &scheduler,
         Client::new(HttpTransport::with_client(url, None, client).unwrap()),
-        vec![42],
+        onebot::GroupScope::only([42]),
         vec![SubjectPattern::Path("/module/forest-test".parse().unwrap())],
     )
     .unwrap();
+    // The optional test scope still blocks outgoing messages before transport.
+    let denied = scheduler
+        .call::<_, Result<forest_onebot::forest::SentMessage, forest_onebot::forest::OneBotError>>(
+            "/module/forest-test".parse().unwrap(),
+            "/core/onebot".parse().unwrap(),
+            "/send_group_message".parse().unwrap(),
+            &forest_onebot::forest::SendGroupMessage {
+                group_id: 7,
+                message: forest_onebot::message::Message::Cq("not sent".into()),
+                auto_escape: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        denied,
+        Err(forest_onebot::forest::OneBotError::GroupDenied)
+    ));
     scheduler
         .load(scheduler.package(&package).await.unwrap())
         .await

@@ -499,6 +499,108 @@ async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn reloading_defaults_preserves_destroyed_state_and_rejects_schema_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = forest_config::ConfigStore::open_in_memory().await.unwrap();
+    let scheduler = Scheduler::with_store(
+        store.clone(),
+        RuntimeOptions {
+            data_directory: temp.path().join("data"),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let _observations = observe(&scheduler);
+    let object = "/module/defaults";
+    let path = package(temp.path(), "defaults", object, false);
+    scheduler
+        .load(scheduler.package(&path).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/increment", &()).await,
+        1
+    );
+    let mut declaration: Manifest =
+        serde_json::from_slice(&std::fs::read(path.join("manifest.json")).unwrap()).unwrap();
+    let counter = declaration
+        .configs
+        .iter_mut()
+        .find(|c| c.key.to_string() == "/counter")
+        .unwrap();
+    counter.default = 99i64.as_value();
+    std::fs::write(
+        path.join("manifest.json"),
+        serde_json::to_vec(&declaration).unwrap(),
+    )
+    .unwrap();
+    let replacement = scheduler.package(&path).await.unwrap();
+    scheduler
+        .reload(replacement, StopMode::Drain)
+        .await
+        .unwrap();
+    let entry = store
+        .entry(&object.parse().unwrap(), &"/counter".parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(entry.default_value(), &99i64.as_value());
+    assert_eq!(entry.value(), &1i64.as_value()); // The outgoing destroy's write survived.
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/increment", &()).await,
+        2
+    );
+    let before = scheduler.inspector().snapshot().unwrap().modules[0]
+        .lifecycle
+        .clone();
+    let counter = declaration
+        .configs
+        .iter_mut()
+        .find(|c| c.key.to_string() == "/counter")
+        .unwrap();
+    counter.schema = bool::as_schema();
+    counter.default = true.as_value();
+    std::fs::write(
+        path.join("manifest.json"),
+        serde_json::to_vec(&declaration).unwrap(),
+    )
+    .unwrap();
+    let incompatible = scheduler.package(&path).await.unwrap();
+    assert!(
+        scheduler
+            .reload(incompatible, StopMode::Drain)
+            .await
+            .is_err()
+    );
+    let after = scheduler.inspector().snapshot().unwrap().modules[0]
+        .lifecycle
+        .clone();
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(after).unwrap()
+    );
+    scheduler
+        .unload(&object.parse().unwrap(), StopMode::Drain)
+        .await
+        .unwrap();
+    store
+        .reset(&object.parse().unwrap(), &"/counter".parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get(
+                &object.parse().unwrap(),
+                &forest_config::Key::<i64>::new("/counter".parse().unwrap())
+            )
+            .await
+            .unwrap(),
+        99
+    );
+    scheduler.shutdown(StopMode::Drain).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_instance() {
     let temp = tempfile::tempdir().unwrap();
     let scheduler = Scheduler::in_memory(RuntimeOptions {

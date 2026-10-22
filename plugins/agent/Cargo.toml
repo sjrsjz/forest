@@ -1,0 +1,30 @@
+[package]
+name = "forest-agent-module"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+[lib]
+crate-type = ["cdylib", "rlib"]
+[[bin]]
+name = "package-agent"
+path = "src/bin/package.rs"
+[dependencies]
+forest-sdk = { path = "../../crates/forest-sdk" }
+forest-protocol = { path = "../../crates/forest-protocol" }
+forest-serde = { path = "../../crates/forest-serde" }
+forest-onebot = { path = "../../crates/forest-onebot", features = ["forest"] }
+serde.workspace = true
+serde_json.workspace = true
+[dev-dependencies]
+forest-memory-module = { path = "../memory" }
+forest-context-module = { path = "../context" }
+forest-openai-provider = { path = "../openai-provider" }
+forest-qwen-vl-embedding = { path = "../qwen-vl-embedding" }
+forest-agent-tools = { path = "../agent-tools" }
+forest-deepseek-web = { path = "../deepseek-web" }
+axum = "0.8.8"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+forest-runtime = { path = "../../crates/forest-runtime" }
+forest-config = { path = "../../crates/forest-config" }
+tokio.workspace = true
+tempfile = "3.23.0"

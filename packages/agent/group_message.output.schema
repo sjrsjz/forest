@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {Context(variant {Cq(variant {InvalidParameter, InvalidValue(string), MissingParameter(string), UnknownType(string), Unterminated}), InlineMedia}), Delivery(string), Dispatch(string), InvalidConfiguration(string), Memory(variant {Embedding(string), Host(string), Index(string), InvalidInput(string), Media(string), NotFound, Storage(string)}), Protocol(string), Provider(variant {Host(string), Http {request_id: optional string, status: i32}, NotConfigured, Response(string), ToolSchema {name: string, reason: string}})}), Ok(())};
+export T0;

@@ -1,6 +1,6 @@
 # 多主干多模态记忆模型
 
-本文整理 Rust 主线记忆模块的数据模型与读写语义，设施选择见[Qwen VL 与存储选型](16-memory-infrastructure.md)。Context 中已实现对应 Schema 的本地 Rust 类型映射，位于 `plugins/context/src/memory.rs`；不是宿主的共享记忆库。接纳、存储、归档及检索仍待实现，不代表当前运行实例已有 Agent 或记忆功能。
+本文整理 Rust 主线记忆模块的数据模型与读写语义，设施选择见[Qwen VL 与存储选型](16-memory-infrastructure.md)。Context 中对应 Schema 的本地 Rust 类型映射位于 `plugins/context/src/memory.rs`。接纳、存储、归档及检索由独立的 `plugins/memory` 实现，它持有自己的类型映射、SQLite 表与 Qdrant 协议；宿主没有共享记忆库。部署与验证范围见[Agent 实现与启动](22-agent-implementation.md)。
 
 ## 1. 范围与所有权
 
@@ -38,7 +38,7 @@ enum MemoryContent {
 
 `MemoryId.group` 与群消息的 `group_id` 由接纳操作从同一个值构造，调用方不分别指定两份群身份。ModelTurn 和 ToolResult 的所属群来自其处理的群会话，不能在召回时改成查询所在群。
 
-ModelTurn 保存一次完整 Assistant 响应及 time，原生正文、tool_calls、refusal 和 reasoning_content 都保留；ToolResult 保存 time、tool_call_id 与结果正文。它们在归档和召回中保持类型，不能被呈现为群友发言。模型生成正文与平台实际送达的消息也不等同；实际发送记录应关联到生成它的回合，平台自回显不能再制造一份独立生成记录。稳定接纳身份及发送关联仍随后续 Agent 接入设计确定。
+ModelTurn 保存一次完整 Assistant 响应及 time，原生正文、tool_calls、refusal 和 reasoning_content 都保留；ToolResult 保存 time、tool_call_id 与结果正文。它们在归档和召回中保持类型，不能被呈现为群友发言。模型生成正文与平台实际送达的消息也不等同；实际发送记录关联到生成它的回合，平台自回显不再制造一份独立生成记录。稳定接纳身份及发送关联见[实现与启动](22-agent-implementation.md#2-实际会话流程)。
 
 ### 2.1 身份与顺序
 
@@ -228,4 +228,4 @@ SQLite 事务只覆盖本地事实，不横跨 HTTP 请求。嵌入和向量 ups
 
 Forest 明确变化为每群独立主干、接纳时固定位置、直接使用 OneBot 群消息、删除裁剪摘要、来源明确的全局召回，以及文本/图片独立表示。QiYu 的 VL 编码器会平均各模态向量；Forest 不把平均向量当作原生联合编码。
 
-内容的 Schema 映射和 Context 可见投影已实现，Rust 映射由模块各自持有，可复制源码，不要求其他模块依赖一份共享 crate。记忆读写及检索尚未实现；后续 Agent 设计仍需确定稳定接纳身份、群消息发送回显与生成回合的关联，不能由记忆模块临时猜测。当前宿主也尚未提供模块私有 SQLite 数据库能力。Agent 未归档窗口与排队消息可以作为配置表中的可恢复状态项保存，具体见[会话重载](20-agent-state-and-window.md#9-未归档会话的保存与重载)；长期记忆正文、关系和索引仍由 Memory 自己管理。
+内容的 Schema 映射和 Context 可见投影已实现，Rust 映射由模块各自持有，可复制源码，不要求其他模块依赖一份共享 crate。Memory 独立包现已实现记忆读写、媒体、归档及检索，使用通用宿主私有 SQLite。群消息以平台账号和消息 ID 去重，生成回合以工作锚点和回合位置去重，实际发送回执关联到生成回合。Agent 未归档窗口与排队消息作为配置表中的可恢复状态项保存，具体见[会话重载](20-agent-state-and-window.md#9-未归档会话的保存与重载)；长期记忆正文、关系和索引仍由 Memory 自己管理。

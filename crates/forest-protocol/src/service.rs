@@ -57,6 +57,27 @@ pub struct FileWrite {
     pub path: String,
     pub bytes: Vec<u8>,
 }
+
+/// SQLite's five storage classes. Floats belong to this I/O protocol, not Forest Value.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SqlValue {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SqlStatement {
+    pub sql: String,
+    pub parameters: Vec<SqlValue>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SqlRows {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<SqlValue>>,
+    pub changed: u64,
+}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum LogLevel {
     Error,
