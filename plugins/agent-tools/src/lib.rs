@@ -2,6 +2,7 @@
 pub mod content;
 pub mod contract;
 pub mod memory;
+pub mod onebot;
 pub mod openai;
 pub mod tools;
 use contract::{Catalog, Error, Invocation, OBJECT};
@@ -185,7 +186,7 @@ fn route(
 }
 
 pub fn default_routes() -> Vec<Route> {
-    vec![
+    let mut routes = vec![
         route(
             "web_search",
             "Default tool for web research and finding sources. Search with DeepSeek and return titles, URLs and query-relevant summaries. Search first, then use web_fetch to read selected pages. need_content defaults to false; request full content only when needed.",
@@ -264,7 +265,9 @@ pub fn default_routes() -> Vec<Route> {
             OBJECT,
             "/memory",
         ),
-    ]
+    ];
+    routes.extend(onebot::routes());
+    routes
 }
 
 pub fn manifest() -> Manifest {

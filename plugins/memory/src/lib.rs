@@ -7,6 +7,8 @@ pub mod managed;
 mod media;
 pub mod openai;
 mod projection;
+#[cfg(test)]
+mod projection_tests;
 mod store;
 pub mod types;
 use content::*;

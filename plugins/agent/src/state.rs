@@ -93,6 +93,16 @@ impl Session {
     pub fn has_trigger(&self) -> bool {
         self.data.pending.iter().any(|p| p.trigger)
     }
+    /// Settle this failed activation while preserving its messages as ordinary input.
+    pub fn fail_activation(&mut self) -> bool {
+        let report = self.working || self.has_trigger();
+        self.working = false;
+        self.error = None;
+        for queued in &mut self.data.pending {
+            queued.trigger = false;
+        }
+        report
+    }
     pub fn stage(&mut self) -> bool {
         assert!(self.data.staged.is_empty());
         let Some(last) = self
@@ -159,5 +169,61 @@ impl Drop for Owner {
         let mut s = self.0.borrow_mut();
         s.owned = false;
         s.working = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forest_onebot::{forest::GroupSender, message::Message};
+
+    fn queued(trigger: bool) -> Queued {
+        Queued {
+            message: GroupMessage {
+                time: 1,
+                self_id: 10,
+                post_type: "message".into(),
+                message_type: "group".into(),
+                sub_type: "normal".into(),
+                message_id: 1,
+                group_id: 42,
+                user_id: 20,
+                anonymous: None,
+                message: Message::Cq("retained input".into()),
+                raw_message: "retained input".into(),
+                sender: GroupSender::default(),
+            },
+            accepted: None,
+            trigger,
+            restored: false,
+        }
+    }
+
+    #[test]
+    fn silent_maintenance_failure_has_no_chat_report() {
+        let mut session = Session::new(42, 10);
+        session.data.pending.push(queued(false));
+        assert!(!session.fail_activation());
+        assert_eq!(session.data.pending.len(), 1);
+    }
+
+    #[test]
+    fn failed_activation_is_reported_once_and_new_triggers_are_independent() {
+        let mut session = Session::new(42, 10);
+        session.data.pending.push(queued(true));
+        assert!(session.fail_activation());
+        assert!(!session.has_trigger());
+        assert_eq!(
+            session.data.pending[0].message.raw_message,
+            "retained input"
+        );
+        assert!(!session.fail_activation());
+        session.data.pending.push(queued(true));
+        assert!(session.has_trigger());
+        assert!(session.fail_activation());
+        session.working = true;
+        assert!(session.fail_activation());
+        assert!(!session.working);
+        assert!(!session.fail_activation());
     }
 }

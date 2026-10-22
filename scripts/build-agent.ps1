@@ -10,6 +10,7 @@ $packages = @(
     @('forest-memory-module', 'package-memory'),
     @('forest-deepseek-web', 'package-deepseek-web'),
     @('forest-wolfram-alpha', 'package-wolfram-alpha'),
+    @('forest-onebot-tools', 'package-onebot-tools'),
     @('forest-agent-tools', 'package-agent-tools'),
     @('forest-agent-module', 'package-agent')
 )

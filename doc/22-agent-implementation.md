@@ -15,6 +15,7 @@ Agent、Memory、工具网关是三个独立 Wasm 包，分别位于 `plugins/ag
 | `/module/agent-tools` | `/describe`、`/invoke` | 原生工具声明与显式模块路由 |
 | `/module/deepseek-web` | `/search`、`/fetch` | 默认网页搜索与 Markdown 抓取 |
 | `/module/wolfram-alpha` | `/query` | 官方 LLM API 精确计算与科学知识查询 |
+| `/module/onebot-tools` | 账号、好友、群、成员查询与独立发送 | 无凭据 Wasm 工具，复用宿主 OneBot 连接 |
 | `/module/context` | `/format` | 人格提示词、账号身份、来源标记、CQ 和图片格式化 |
 | `/module/openai-provider` | `/complete`、`/capabilities` | 模型协议和多模态能力声明 |
 | `/module/qwen-vl-embedding` | `/embed` | 固定模型、2048 维文本或图片向量 |
@@ -32,6 +33,8 @@ Agent、Memory、工具网关是三个独立 Wasm 包，分别位于 `plugins/ag
 窗口按单元数计量，默认高水位 256、低水位 128。静默与首次请求冻结前可以归档并移除旧前缀；开始模型工作后只追加。原生 Assistant 与其工具结果是一个不可拆分块。RecallBatch 保存原记录引用、种子与图元数据，不再次归档或嵌入。每条触发点对应自己的召回批次，格式化时保持完整批次和来源。裁剪不调用摘要模型，没有估算 token 超限硬阻断。
 
 Provider 失败只记录一次；有新的 @ 则接入新输入、清除旧待报告错误并继续。无持续点时排空普通尾部并静默；仍有错误则用 `send` 提交错误报告。正常正文在工具执行前发送，支持文本、@、回复、表情和受管图片 CQ。图片引用由 Memory 解析为发送用数据，不让模型直接指定服务器文件。
+
+静默接纳与归档维护失败只记录诊断，不向群内发送错误。触发准备或工作失败才结算一次群错误通知，已结算的持续点保留消息并清除触发意图；报告期间新收到的 @ 属于下一次正常尝试。ModelTurn 与 ToolResult 是原始文本，Memory 按完整 `media:<sha256>` 提取图片关联，不要求它们整段符合 CQ 协议。CQ 语法校验属于发送路径，错误输出不会因归档或多模态投影而反复中断后续对话。
 
 正常 destroy 将窗口、staged、pending 和诊断写入自身配置项。新 create 清除旧触发意图并恢复静默；不重放 Provider 或工具副作用。不完整的旧工具块保留原始记录，但不作为下一次请求的顶层原生工具链。Force/trap 仍只能恢复此前成功保存的状态。
 
@@ -53,7 +56,7 @@ Qdrant 保存向量和原群、序号引用。查询采用 [Query API](https://a
 ./scripts/build-agent.ps1
 ```
 
-该脚本构建十个独立 Wasm 包及其外部 Manifest/Schema，每次编译并行数为 2。
+该脚本构建十三个独立 Wasm 包及其外部 Manifest/Schema，每次编译并行数为 2。
 
 配置项如下，修改后热重载所属模块生效：
 
@@ -88,6 +91,8 @@ cargo run --locked --offline -j 2 -p forest-cli -- --package packages/agent --ev
 ## 5. 工具扩展
 
 默认网关提供 `web_search`、`web_fetch`、`http_request`、`wolfram_alpha`、`typst_render` 和 `memory_read`。网页搜索及阅读优先使用独立 [DeepSeek Web 插件](23-deepseek-web.md)，返回搜索摘要和 Markdown；原始 HTTP 保留用于明确的 HTTP/API 操作。[Wolfram Alpha 插件](24-wolfram-alpha.md)提供精确计算，连接配置可通过管理端或配置辅助程序的 `FOREST_WOLFRAM_APP_ID`、`FOREST_WOLFRAM_ENDPOINT` 设置。记忆工具按原群和序号读取已归档资料，保留来源，不输出历史思考。
+
+默认路由还包含独立 [OneBot 工具包](28-onebot-agent-tools.md)的九个 `onebot_*` 工具，用于读取账号、好友、群与成员信息，以及立即发送独立群消息或私聊消息。普通 assistant 回复仍按原路径自动发送，工具发送成功后不重复发送同一正文。
 
 外部工具接口接受 `Invocation { group_id, bot_id, name, arguments_json }`，返回 `Result<String, Error>`。路由按工具名选择明确的 `(对象, 接口)`，调用仍经过 Manifest uses 和目标 ACL；参数不参与选择任意接口。把自定义路由列表交给打包程序，可同时生成静态依赖：
 

@@ -1108,6 +1108,7 @@ dependencies = [
  "forest-media",
  "forest-memory-module",
  "forest-onebot",
+ "forest-onebot-tools",
  "forest-openai-provider",
  "forest-protocol",
  "forest-qwen-vl-embedding",
@@ -1275,6 +1276,23 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "forest-onebot-tools"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "forest-media",
+ "forest-onebot",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub const OBJECT: &str = "/core/onebot";
 pub const GROUP_MESSAGE: &str = "/group_message";
 pub const SEND_GROUP_MESSAGE: &str = "/send_group_message";
+pub const SEND_PRIVATE_MESSAGE: &str = "/send_private_message";
+pub const QUERY: &str = "/query";
 
 #[derive(Clone, Debug, Serialize, Deserialize, DeriveSchema, DeriveValue)]
 pub struct GroupMessage {
@@ -48,6 +50,37 @@ pub struct SendGroupMessage {
     pub group_id: i64,
     pub message: Message,
     pub auto_escape: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, DeriveSchema, DeriveValue)]
+pub struct SendPrivateMessage {
+    pub user_id: i64,
+    pub message: Message,
+    pub auto_escape: Option<bool>,
+}
+
+/// Read-only v11 actions exposed to modules; responses are the action's JSON data.
+#[derive(Clone, Debug, DeriveSchema, DeriveValue)]
+pub enum Query {
+    LoginInfo,
+    FriendList,
+    GroupList,
+    GroupInfo {
+        group_id: i64,
+        no_cache: bool,
+    },
+    GroupMemberList {
+        group_id: i64,
+    },
+    GroupMemberInfo {
+        group_id: i64,
+        user_id: i64,
+        no_cache: bool,
+    },
+    StrangerInfo {
+        user_id: i64,
+        no_cache: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, DeriveSchema, DeriveValue)]

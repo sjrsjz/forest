@@ -164,4 +164,4 @@ cargo test --workspace --all-features --locked
 
 集成测试编译真实 Wasm，使用两个代码不同、契约相同的候选。覆盖类型化调用、ACL、非重入与重入交错、自唤醒和组合 Future、容量、三种卸载方式、代码替换、trap、单线程执行器下的抢占、配置恢复和延迟 SQLite 写入交接、文件隔离、HTTP/WS，以及实际 CLI 的群消息到 OneBot 回执。自动测试流量只进入本地模拟服务。
 
-宿主当前注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`；独立 API 库中的其他 action 尚未逐一映射为原生接口。CLI 的 OneBot callers 授权 `/module/**`，因此独立加载的回复插件可使用原生发送；可选 `--allow-group` 继续限制实际接收与发送的群。CLI 另安装 `/core/control` 管理适配器，仅授权 `/module/shell`，见[群聊 Shell](26-group-shell-and-school-help.md)。可选 WebUI 已提供观测和模块装卸。Agent、Memory 与工具网关已由独立 Wasm 包实现，见[实现与启动](22-agent-implementation.md)。热重载可更新同 Schema 的声明默认值并保留当前值；配置项集合或 Schema 变更仍拒绝。包分发与配置变更通知尚未实现。
+宿主注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`、`/send_private_message`、`/query`；查询入口接受固定的只读 action 枚举，Agent 工具封装位于独立 [OneBot 工具包](28-onebot-agent-tools.md)。CLI 的 OneBot callers 授权 `/module/**`，因此独立加载的插件可使用这些原生接口；可选 `--allow-group` 额外限制群接收、查询与发送，并禁止私聊发送。CLI 另安装 `/core/control` 管理适配器，仅授权 `/module/shell`，见[群聊 Shell](26-group-shell-and-school-help.md)。可选 WebUI 已提供观测和模块装卸。Agent、Memory 与工具网关已由独立 Wasm 包实现，见[实现与启动](22-agent-implementation.md)。热重载可更新同 Schema 的声明默认值并保留当前值；配置项集合或 Schema 变更仍拒绝。包分发与配置变更通知尚未实现。

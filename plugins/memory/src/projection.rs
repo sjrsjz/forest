@@ -90,15 +90,26 @@ pub fn image_references(unit: &MemoryUnit) -> Result<Vec<String>, Error> {
             }
         })?;
     }
-    if let MemoryContent::ModelTurn(turn) = &unit.content
-        && let Some(body) = &turn.assistant.content
-    {
-        for segment in cq::decode(body).map_err(cq_error)? {
-            if let Segment::Image(image) = segment {
-                result.push(image.file);
+    // Model and tool text are stored facts, not OneBot message envelopes.
+    // Managed references identify images independently of any surrounding syntax.
+    let text = match &unit.content {
+        MemoryContent::ModelTurn(turn) => turn.assistant.content.as_deref(),
+        MemoryContent::ToolResult(tool) => Some(tool.content.as_str()),
+        MemoryContent::GroupMessage(_) => None,
+    };
+    if let Some(text) = text {
+        for (start, _) in text.match_indices("media:") {
+            let tail = &text[start + "media:".len()..];
+            if let Some(hash) = tail.get(..64)
+                && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && !tail.as_bytes().get(64).is_some_and(u8::is_ascii_hexdigit)
+            {
+                result.push(format!("media:{hash}"));
             }
         }
     }
+    result.sort();
+    result.dedup();
     Ok(result)
 }
 pub fn representations(unit: &MemoryUnit) -> Result<Vec<Representation>, Error> {
@@ -192,4 +203,73 @@ fn map(
 }
 fn cq_error(error: cq::Error) -> Error {
     Error::InvalidInput(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::openai::Assistant;
+
+    #[test]
+    fn stored_model_and_tool_text_do_not_require_valid_cq() {
+        let reference = format!("media:{}", "a".repeat(64));
+        let body = format!("[CQ:image,file:{reference}] [CQ:at,qq=1,broken] [CQ:unfinished");
+        assert!(cq::decode(&body).is_err());
+        let model = MemoryUnit {
+            id: MemoryId {
+                group: 1,
+                sequence: 1,
+            },
+            content: MemoryContent::ModelTurn(ModelTurn {
+                time: 1,
+                assistant: Assistant {
+                    content: Some(body.clone()),
+                    ..Default::default()
+                },
+            }),
+        };
+        assert_eq!(image_references(&model).unwrap(), vec![reference.clone()]);
+        let views = representations(&model).unwrap();
+        assert!(matches!(&views[0], Representation::Text(text) if text==&body));
+        assert!(matches!(&views[1], Representation::Image(image) if image==&reference));
+        let tool = MemoryUnit {
+            id: MemoryId {
+                group: 1,
+                sequence: 2,
+            },
+            content: MemoryContent::ToolResult(ToolResult {
+                time: 2,
+                tool_call_id: "render".into(),
+                content: serde_json::json!({"reference":reference,"cq":body}).to_string(),
+            }),
+        };
+        assert_eq!(image_references(&tool).unwrap(), vec![reference]);
+        let MemoryContent::ModelTurn(turn) = model.content else {
+            unreachable!()
+        };
+        assert_eq!(turn.assistant.content.as_deref(), Some(body.as_str()));
+    }
+
+    #[test]
+    fn image_references_match_complete_managed_ids_without_parsing_surrounding_text() {
+        let reference = format!("media:{}", "b".repeat(64));
+        let body = format!(
+            "[CQ:bad,param] {reference}, {reference} media:{} media:短文本 media:not-an-id",
+            "c".repeat(65)
+        );
+        let unit = MemoryUnit {
+            id: MemoryId {
+                group: 1,
+                sequence: 1,
+            },
+            content: MemoryContent::ModelTurn(ModelTurn {
+                time: 1,
+                assistant: Assistant {
+                    content: Some(body),
+                    ..Default::default()
+                },
+            }),
+        };
+        assert_eq!(image_references(&unit).unwrap(), vec![reference]);
+    }
 }

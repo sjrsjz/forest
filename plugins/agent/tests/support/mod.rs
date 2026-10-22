@@ -5,12 +5,10 @@ use axum::{
     routing::{get, post, put},
 };
 use forest_config::{ConfigStore, Declaration, Key};
-use forest_onebot::forest::{
-    self as onebot, GroupMessage, GroupSender, OneBotError, SendGroupMessage, SentMessage,
-};
+use forest_onebot::forest::{self as onebot, GroupMessage, GroupSender, SendGroupMessage};
 use forest_onebot::message::{Message, Segment};
-use forest_protocol::{AsSchema, AsValue, SubjectPattern, manifest::callers};
-use forest_runtime::{EventDefinition, NativeInterface, Package, RuntimeOptions, Scheduler};
+use forest_protocol::{AsSchema, AsValue, SubjectPattern};
+use forest_runtime::{Package, RuntimeOptions, Scheduler};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -50,6 +48,24 @@ pub struct Remote {
     pub slow: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
 }
 pub type Shared = Arc<Mutex<Remote>>;
+
+struct OneBotTransport(mpsc::UnboundedSender<SendGroupMessage>);
+impl forest_onebot::Transport for OneBotTransport {
+    type Error = std::io::Error;
+    async fn request(&self, action: &str, params: Vec<u8>) -> Result<Vec<u8>, Self::Error> {
+        let data = match action {
+            "send_group_msg" => {
+                self.0
+                    .send(serde_json::from_slice(&params).unwrap())
+                    .unwrap();
+                json!({"message_id":999})
+            }
+            "get_login_info" => json!({"user_id":42,"nickname":"test bot"}),
+            _ => panic!("unexpected OneBot action: {action}"),
+        };
+        Ok(serde_json::to_vec(&json!({"status":"ok","retcode":0,"data":data})).unwrap())
+    }
+}
 async fn chat(State(remote): State<Shared>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
     let system = body["messages"][0]["content"].as_str().unwrap();
     let group = system
@@ -226,6 +242,7 @@ impl Harness {
             "forest-agent-tools",
             "forest-deepseek-web",
             "forest-wolfram-alpha",
+            "forest-onebot-tools",
             "forest-context-module",
             "forest-openai-provider",
             "forest-qwen-vl-embedding",
@@ -295,28 +312,13 @@ impl Harness {
         .await
         .unwrap();
         let (tx, sent) = mpsc::unbounded_channel();
-        scheduler
-            .register_native(NativeInterface::new(
-                onebot::OBJECT.parse().unwrap(),
-                onebot::SEND_GROUP_MESSAGE.parse().unwrap(),
-                true,
-                callers(vec![SubjectPattern::Path("/module/agent".parse().unwrap())]),
-                move |_, input: SendGroupMessage| {
-                    let tx = tx.clone();
-                    async move {
-                        tx.send(input).unwrap();
-                        Ok::<_, OneBotError>(SentMessage { message_id: 999 })
-                    }
-                },
-            ))
-            .unwrap();
-        scheduler
-            .register_event(EventDefinition {
-                source: onebot::OBJECT.parse().unwrap(),
-                event: onebot::GROUP_MESSAGE.parse().unwrap(),
-                input: GroupMessage::as_schema(),
-            })
-            .unwrap();
+        forest_runtime::onebot::install(
+            &scheduler,
+            forest_onebot::Client::new(OneBotTransport(tx)),
+            forest_runtime::onebot::GroupScope::All,
+            vec![SubjectPattern::Path("/module/**".parse().unwrap())],
+        )
+        .unwrap();
         let manifests = [
             forest_qwen_vl_embedding::manifest(),
             forest_openai_provider::manifest(),
@@ -327,6 +329,7 @@ impl Harness {
             forest_agent_tools::manifest(),
             forest_deepseek_web::manifest(),
             forest_wolfram_alpha::manifest(),
+            forest_onebot_tools::manifest(),
             forest_agent_module::manifest(),
         ];
         let mut packages = BTreeMap::new();
@@ -340,6 +343,7 @@ impl Harness {
             "forest_agent_tools",
             "forest_deepseek_web",
             "forest_wolfram_alpha",
+            "forest_onebot_tools",
             "forest_agent_module",
         ]) {
             let id = manifest.package.id.clone();

@@ -123,12 +123,21 @@ impl Agent {
             s.owned = true;
         }
         let _owner = Owner(session.clone());
-        let result = self.drive(&session).await;
-        if let Err(error) = &result {
-            self.note(&session, format!("{error:?}")).await;
-            self.report(&session, &format!("{error:?}")).await;
+        loop {
+            let result = self.drive(&session).await;
+            if let Err(error) = &result {
+                let report = session.borrow_mut().fail_activation();
+                self.note(&session, format!("{error:?}")).await;
+                if report {
+                    self.report(&session, &format!("{error:?}")).await;
+                }
+                // A new @ received while reporting owns a new attempt.
+                if session.borrow().has_trigger() {
+                    continue;
+                }
+            }
+            return result;
         }
-        result
     }
     async fn status(self: Rc<Self>, _: CallContext, _: ()) -> Result<Vec<Status>, Error> {
         Ok(self

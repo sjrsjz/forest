@@ -14,6 +14,22 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
     let mut h = Harness::new().await;
     deepseek_web_tools(&h).await;
     wolfram_tool(&h).await;
+    let login: Result<String, forest_agent_tools::contract::Error> = h
+        .call(
+            "/module/agent-tools",
+            "/invoke",
+            &forest_agent_tools::contract::Invocation {
+                group_id: 10,
+                bot_id: 42,
+                name: "onebot_get_login_info".into(),
+                arguments_json: "{}".into(),
+            },
+        )
+        .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&login.unwrap()).unwrap()["user_id"],
+        42
+    );
     // A cross-group archived source exists; storing and recalling it never loses origin.
     let seed: Result<memory::Accepted, memory::Error> = h
         .call(

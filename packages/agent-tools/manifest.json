@@ -188,6 +188,240 @@
                 }
               }
             }
+          },
+          {
+            "Record": {
+              "interface": {
+                "String": "/get_login_info"
+              },
+              "object": {
+                "String": "/module/onebot-tools"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "Query the connected bot's own QQ account ID and nickname."
+                    }
+                  },
+                  "name": {
+                    "String": "onebot_get_login_info"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{},\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
+                "String": "/get_friend_list"
+              },
+              "object": {
+                "String": "/module/onebot-tools"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "List the bot's QQ friends with account IDs, nicknames and remarks. Returns items, total and next_offset; paginate until next_offset is null when needed."
+                    }
+                  },
+                  "name": {
+                    "String": "onebot_get_friend_list"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"limit\":{\"default\":50,\"maximum\":100,\"minimum\":1,\"type\":\"integer\"},\"offset\":{\"default\":0,\"minimum\":0,\"type\":\"integer\"}},\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
+                "String": "/get_group_list"
+              },
+              "object": {
+                "String": "/module/onebot-tools"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "List QQ groups the bot has joined, with group IDs, names and membership counts. Returns items, total and next_offset; paginate as needed. Membership does not imply an Agent is enabled in that group."
+                    }
+                  },
+                  "name": {
+                    "String": "onebot_get_group_list"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"limit\":{\"default\":50,\"maximum\":100,\"minimum\":1,\"type\":\"integer\"},\"offset\":{\"default\":0,\"minimum\":0,\"type\":\"integer\"}},\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
+                "String": "/get_group_info"
+              },
+              "object": {
+                "String": "/module/onebot-tools"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "Query a QQ group's name, member count and capacity. Defaults to the current group."
+                    }
+                  },
+                  "name": {
+                    "String": "onebot_get_group_info"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"group_id\":{\"description\":\"QQ group ID. Omit to use the current conversation's group.\",\"type\":\"integer\"},\"no_cache\":{\"default\":false,\"description\":\"Request fresh information from the gateway rather than its cache.\",\"type\":\"boolean\"}},\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
+                "String": "/get_group_member_list"
+              },
+              "object": {
+                "String": "/module/onebot-tools"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "List QQ group members with account IDs, nicknames, group cards and owner/admin/member roles. Defaults to the current group. Returns items, total and next_offset; use pagination instead of assuming the first page is the entire group."
+                    }
+                  },
+                  "name": {
+                    "String": "onebot_get_group_member_list"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"group_id\":{\"description\":\"QQ group ID. Omit to use the current conversation's group.\",\"type\":\"integer\"},\"limit\":{\"default\":50,\"maximum\":100,\"minimum\":1,\"type\":\"integer\"},\"offset\":{\"default\":0,\"minimum\":0,\"type\":\"integer\"}},\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
+                "String": "/get_group_member_info"
+              },
+              "object": {
+                "String": "/module/onebot-tools"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "Query a particular member's group card, role, title, join time and other gateway-provided profile fields. Defaults to the current group; use the bot's account ID to inspect its own role."
+                    }
+                  },
+                  "name": {
+                    "String": "onebot_get_group_member_info"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"group_id\":{\"description\":\"QQ group ID. Omit to use the current conversation's group.\",\"type\":\"integer\"},\"no_cache\":{\"default\":false,\"description\":\"Request fresh information from the gateway rather than its cache.\",\"type\":\"boolean\"},\"user_id\":{\"description\":\"QQ account ID, not a nickname. Use sender IDs from the conversation or query group members.\",\"type\":\"integer\"}},\"required\":[\"user_id\"],\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
+                "String": "/get_stranger_info"
+              },
+              "object": {
+                "String": "/module/onebot-tools"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "Query a QQ user's public profile by account ID, including nickname, sex and age as provided by the gateway. This does not require assuming the user is a friend or belongs to the current group."
+                    }
+                  },
+                  "name": {
+                    "String": "onebot_get_stranger_info"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"no_cache\":{\"default\":false,\"description\":\"Request fresh information from the gateway rather than its cache.\",\"type\":\"boolean\"},\"user_id\":{\"description\":\"QQ account ID, not a nickname. Use sender IDs from the conversation or query group members.\",\"type\":\"integer\"}},\"required\":[\"user_id\"],\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
+                "String": "/send_group_message"
+              },
+              "object": {
+                "String": "/module/onebot-tools"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "Immediately send a separate QQ group message and return its actual message_id. Defaults to the current group; an explicit group_id can target another joined group. Supports text and CQ at/reply/face/managed-image codes. Successful calls have already sent the message: do not repeat that content in your assistant reply. Ordinary replies to the current conversation are sent automatically and do not require this tool."
+                    }
+                  },
+                  "name": {
+                    "String": "onebot_send_group_message"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"group_id\":{\"description\":\"QQ group ID. Omit to use the current conversation's group.\",\"type\":\"integer\"},\"message\":{\"description\":\"Message text with optional CQ at/reply/face/image codes. Images must use media:<sha256> references returned by tools; never supply base64, URLs or filesystem paths. Literal CQ brackets must be escaped as &#91; and &#93;.\",\"minLength\":1,\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
+                "String": "/send_private_message"
+              },
+              "object": {
+                "String": "/module/onebot-tools"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "Immediately send a separate private QQ message and return its actual message_id. The gateway determines whether the recipient can be reached; do not claim delivery if it fails. Supports text and CQ face/managed-image codes. A successful call has already sent the message; do not repeat it as an assistant reply."
+                    }
+                  },
+                  "name": {
+                    "String": "onebot_send_private_message"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"message\":{\"description\":\"Message text with optional CQ at/reply/face/image codes. Images must use media:<sha256> references returned by tools; never supply base64, URLs or filesystem paths. Literal CQ brackets must be escaped as &#91; and &#93;.\",\"minLength\":1,\"type\":\"string\"},\"user_id\":{\"description\":\"QQ account ID, not a nickname. Use sender IDs from the conversation or query group members.\",\"type\":\"integer\"}},\"required\":[\"user_id\",\"message\"],\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
           }
         ]
       },
@@ -592,6 +826,438 @@
     {
       "object": "/module/deepseek-web",
       "interface": "/search",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/onebot-tools",
+      "interface": "/get_friend_list",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/onebot-tools",
+      "interface": "/get_group_info",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/onebot-tools",
+      "interface": "/get_group_list",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/onebot-tools",
+      "interface": "/get_group_member_info",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/onebot-tools",
+      "interface": "/get_group_member_list",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/onebot-tools",
+      "interface": "/get_login_info",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/onebot-tools",
+      "interface": "/get_stranger_info",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/onebot-tools",
+      "interface": "/send_group_message",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/onebot-tools",
+      "interface": "/send_private_message",
       "input": [
         {
           "Record": {
