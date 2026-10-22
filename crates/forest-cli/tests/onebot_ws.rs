@@ -128,9 +128,17 @@ async fn run(root: &std::path::Path, restricted: bool) {
     let read = tokio::task::spawn_blocking(move || {
         use std::io::{BufRead, BufReader};
         let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        assert!(line.contains("is Serving"), "{line}");
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "host exited before Serving"
+            );
+            if line.contains("is Serving") {
+                break;
+            }
+        }
         reader
     });
     let _reader = tokio::time::timeout(Duration::from_secs(15), read)

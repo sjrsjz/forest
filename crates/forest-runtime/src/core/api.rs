@@ -24,8 +24,15 @@ impl Scheduler {
             options.max_input_bytes > 0 && options.max_input_bytes <= u32::MAX as usize,
             "invalid input capacity"
         );
+        let cache_directory = options.data_directory.join(".wasmtime-cache");
+        tokio::fs::create_dir_all(&cache_directory).await?;
+        let mut cache_config = wasmtime::CacheConfig::new();
+        cache_config.with_directory(tokio::fs::canonicalize(&cache_directory).await?);
         let mut config = wasmtime::Config::new();
-        config.async_support(true).epoch_interruption(true);
+        config
+            .async_support(true)
+            .epoch_interruption(true)
+            .cache(Some(wasmtime::Cache::new(cache_config)?));
         let engine = wasmtime::Engine::new(&config)?;
         let services = Services::new(
             store,
@@ -53,7 +60,18 @@ impl Scheduler {
         Ok(Self { core })
     }
     pub async fn package(&self, directory: impl AsRef<Path>) -> Result<Package> {
-        Package::read(&self.core.engine, directory.as_ref()).await
+        let started = std::time::Instant::now();
+        let package = Package::read(&self.core.engine, directory.as_ref()).await?;
+        self.core.logs.write(
+            forest_protocol::service::LogLevel::Info,
+            "/core/runtime".parse().unwrap(),
+            format!(
+                "Prepared {} in {:.3}s",
+                package.manifest().package.id,
+                started.elapsed().as_secs_f64()
+            ),
+        );
+        Ok(package)
     }
     pub fn logs(&self) -> crate::LogWriter {
         self.core.logs.clone()

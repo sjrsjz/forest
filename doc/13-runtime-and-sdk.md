@@ -74,6 +74,18 @@ Rust SDK 是可选的语言绑定。模块不链接调度器，也不链接被�
 
 宿主通过 `Scheduler::new` 或 `with_store` 创建调度器，先注册原生接口及事件定义，再读取包。`NativeInterface::new` 从具体 Rust 函数生成输入及 Result 输出契约。
 
+运行时默认启用 Wasmtime 的持久化编译缓存，位置为 `RuntimeOptions.data_directory/.wasmtime-cache`，CLI 中跟随 `--data-directory`。缓存只保存编译代码，不保存模块实例、配置或执行状态；普通加载与热重载使用相同路径。Wasmtime 按 Wasm 内容、编译设置、宿主目标与引擎构建信息区分缓存，更新代码或编译环境后自动重新编译。首次加载仍需编译，后续进程启动复用缓存；删除缓存目录只会使下次加载重新编译。目录由宿主维护，不向来宾开放。包准备完成后，运行日志记录模块 Token 和耗时。
+
+部署时可先准备缓存，不创建来宾实例、不连接 OneBot 或调用模型 API：
+
+```sh
+cargo run --release --locked -p forest-runtime --example prepare_packages -- data/modules packages/typst packages/agent
+```
+
+最后的包目录可继续追加；该命令只准备明确列出的包，不自动遍历依赖。应在目标机器上使用与正式宿主一致的 Wasmtime 构建与编译设置准备缓存。Debug 构建还以可执行文件修改时间区分缓存，独立示例程序不能替 Debug 宿主预热；同一个 Debug 宿主重启可以复用。缓存是宿主管理的本机数据，不作为跨 CPU 或跨平台插件工件分发。
+
+2026-10-22 在 Windows Debug 宿主上，以隔离数据目录启动完整 Agent 依赖闭包，测量进程启动至 OneBot 本地监听就绪：空缓存为 339.738 秒，同一可执行文件的第二次启动为 2.925 秒。其中 Typst 包准备耗时从 228.521 秒降为 1.939 秒。测量包含包准备和实例初始化，没有调用模型 API；这些数值不代表树莓派的实测性能。
+
 | 操作 | 行为 |
 |---|---|
 | package(directory) | 读取 Manifest、编译 Wasm、校验固定导出与私有内存 |
