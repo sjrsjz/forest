@@ -1,0 +1,29 @@
+[package]
+name = "forest-typst"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "package-typst"
+path = "src/bin/package.rs"
+
+[dependencies]
+forest-sdk = { path = "../../crates/forest-sdk" }
+forest-protocol = { path = "../../crates/forest-protocol" }
+forest-serde = { path = "../../crates/forest-serde" }
+serde.workspace = true
+serde_json.workspace = true
+typst = "=0.15.1"
+typst-render = "=0.15.1"
+typst-layout = "=0.15.1"
+typst-assets = { version = "=0.15.1", features = ["fonts"] }
+
+[dev-dependencies]
+forest-runtime = { path = "../../crates/forest-runtime" }
+forest-config = { path = "../../crates/forest-config" }
+tempfile = "3.23.0"
+tokio.workspace = true

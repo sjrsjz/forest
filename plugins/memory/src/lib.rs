@@ -3,6 +3,7 @@ pub mod content;
 mod embedding;
 mod graph;
 mod index;
+pub mod managed;
 mod media;
 pub mod openai;
 mod projection;
@@ -11,11 +12,7 @@ pub mod types;
 use content::*;
 use forest_protocol::{manifest::callers, *};
 use forest_sdk::{Handlers, Module, host};
-use std::{
-    cell::{Cell, RefCell},
-    collections::BTreeMap,
-    rc::Rc,
-};
+use std::{cell::Cell, collections::BTreeMap, rc::Rc};
 use store::*;
 use types::*;
 
@@ -25,7 +22,6 @@ pub struct Memory {
     retrieval: graph::Retrieval,
     wake_pending: Cell<bool>,
     index_ready: futures::lock::Mutex<bool>,
-    media_locks: RefCell<BTreeMap<String, Rc<futures::lock::Mutex<()>>>>,
 }
 impl Module for Memory {
     async fn create(context: CreateContext) -> Result<Self, String> {
@@ -50,7 +46,6 @@ impl Module for Memory {
             retrieval,
             wake_pending: Cell::new(false),
             index_ready: futures::lock::Mutex::new(false),
-            media_locks: RefCell::new(BTreeMap::new()),
         })
     }
     fn handlers() -> Handlers<Self> {
@@ -85,12 +80,6 @@ impl Module for Memory {
                 read.clone(),
                 Self::project,
             )
-            .with(
-                "/media/read".parse().unwrap(),
-                true,
-                read.clone(),
-                Self::read_media,
-            )
             .with("/recall".parse().unwrap(), true, read, Self::recall)
             .with(
                 "/index/advance".parse().unwrap(),
@@ -112,13 +101,6 @@ impl Module for Memory {
     }
 }
 impl Memory {
-    async fn read_media(
-        self: Rc<Self>,
-        _: CallContext,
-        reference: String,
-    ) -> Result<String, Error> {
-        self.image(&reference).await
-    }
     async fn accept(self: Rc<Self>, _: CallContext, input: Incoming) -> Result<Accepted, Error> {
         let accepted = store::accept(input).await?;
         // Also resumes durable index work left by a previous instance.
@@ -241,6 +223,18 @@ pub fn manifest() -> Manifest {
         }],
         provides: Memory::handlers().declarations(),
         uses: vec![
+            InterfaceUse {
+                object: managed::OBJECT.parse().unwrap(),
+                interface: "/register".parse().unwrap(),
+                input: managed::Source::as_schema(),
+                output: Result::<(), managed::Error>::as_schema(),
+            },
+            InterfaceUse {
+                object: managed::OBJECT.parse().unwrap(),
+                interface: "/get".parse().unwrap(),
+                input: String::as_schema(),
+                output: Result::<managed::Blob, managed::Error>::as_schema(),
+            },
             InterfaceUse {
                 object: embedding::OBJECT.parse().unwrap(),
                 interface: embedding::EMBED.parse().unwrap(),

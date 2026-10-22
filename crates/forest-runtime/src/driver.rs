@@ -1,6 +1,6 @@
 use crate::{
     core::{Core, Instance, Started, StopMode},
-    ready::{TaskSignal, Work},
+    ready::TaskSignal,
     services::Resources,
     wasm::{Begin, Frame, Wasm},
 };
@@ -15,7 +15,8 @@ use std::{
 };
 
 pub(crate) enum Turn {
-    Work(Work),
+    Start(Box<Started>),
+    Resume(u64),
     Wait,
     Stop(StopMode),
 }
@@ -114,24 +115,24 @@ async fn run_guest(
     let mut tasks: HashMap<u64, GuestTask> = HashMap::new();
     let stop = loop {
         let notified = instance.mailbox.changed.notified();
-        let work = match core.turn(instance, tasks.is_empty()) {
+        let (task, fresh) = match core.turn(instance, tasks.is_empty()) {
             Turn::Wait => {
                 notified.await;
                 continue;
             }
             Turn::Stop(mode) => break mode,
-            Turn::Work(work) => work,
-        };
-        let (task, fresh) = match work {
-            Work::Start(interface) => {
-                let Some(started) = core.begin(instance, &interface) else {
-                    continue;
-                };
+            Turn::Start(started) => {
                 let signal = instance.mailbox.register(next);
                 next = next.checked_add(1).expect("task id exhaustion");
-                (GuestTask { signal, started }, TaskEntry::New)
+                (
+                    GuestTask {
+                        signal,
+                        started: *started,
+                    },
+                    TaskEntry::New,
+                )
             }
-            Work::Resume(id) => {
+            Turn::Resume(id) => {
                 if !core.may_resume(instance) {
                     continue;
                 }

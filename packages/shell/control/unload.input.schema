@@ -1,0 +1,2 @@
+schema T0 = {mode: variant {AtYield, Drain, Force}, object: string};
+export T0;

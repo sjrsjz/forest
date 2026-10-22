@@ -105,29 +105,8 @@ impl Memory {
         // The interface is serial. A durable pending item is settled only after processing.
         self.wake_pending.set(false);
         loop {
-            let media = execute(vec![stmt(
-                "SELECT reference FROM media WHERE state='pending' ORDER BY rowid LIMIT 1",
-                vec![],
-            )])
-            .await?;
-            let have_media = !media[0].rows.is_empty();
-            if let Some(row) = media[0].rows.first() {
-                let reference = string(&row[0])?;
-                if let Err(error) = self.image(reference).await {
-                    let _ = host::log(
-                        LogLevel::Warn,
-                        format!("media acquisition {reference}: {error:?}"),
-                    )
-                    .await;
-                    // A storage failure must also settle this attempt instead of spinning.
-                    execute(vec![stmt("UPDATE media SET state='failed',error=? WHERE reference=? AND state='pending'",vec![text(format!("{error:?}")),text(reference)])]).await?;
-                }
-            }
             let pending=execute(vec![stmt("SELECT point_id,group_id,sequence,representation FROM vectors WHERE space=? AND state='pending' ORDER BY rowid LIMIT 1",vec![text(&self.settings.collection)])]).await?;
             let Some(row) = pending[0].rows.first() else {
-                if have_media {
-                    continue;
-                }
                 return Ok(());
             };
             let point = string(&row[0])?.to_owned();

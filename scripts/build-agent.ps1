@@ -1,5 +1,9 @@
 $ErrorActionPreference = 'Stop'
 $packages = @(
+    @('forest-shell', 'package-shell'),
+    @('forest-npucraft', 'package-npucraft'),
+    @('forest-media', 'package-media'),
+    @('forest-typst', 'package-typst'),
     @('forest-qwen-vl-embedding', 'package-qwen-vl-embedding'),
     @('forest-openai-provider', 'package-openai-provider'),
     @('forest-context-module', 'package-context'),

@@ -90,6 +90,15 @@ pub fn image_references(unit: &MemoryUnit) -> Result<Vec<String>, Error> {
             }
         })?;
     }
+    if let MemoryContent::ModelTurn(turn) = &unit.content
+        && let Some(body) = &turn.assistant.content
+    {
+        for segment in cq::decode(body).map_err(cq_error)? {
+            if let Segment::Image(image) = segment {
+                result.push(image.file);
+            }
+        }
+    }
     Ok(result)
 }
 pub fn representations(unit: &MemoryUnit) -> Result<Vec<Representation>, Error> {

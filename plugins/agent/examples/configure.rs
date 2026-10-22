@@ -46,6 +46,8 @@ async fn main() -> SetupResult<()> {
     let store = ConfigStore::open(database).await?;
     let entities = store.read(|view| view.entities()).await?;
     for name in [
+        "media",
+        "typst",
         "qwen-vl-embedding",
         "openai-provider",
         "context",

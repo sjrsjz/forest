@@ -1,4 +1,5 @@
-use crate::{Agent, content::MemoryId, memory, state::Shared, types::Error};
+use crate::{Agent, content::MemoryId, managed, memory, state::Shared, types::Error};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use forest_onebot::{
     cq,
     forest::{self as onebot, OneBotError, SendGroupMessage, SentMessage},
@@ -13,7 +14,7 @@ impl Agent {
         body: &str,
     ) -> Result<(), Error> {
         let segments = cq::decode(body).map_err(|e| Error::Delivery(e.to_string()))?;
-        // Images are resolved by Memory; the model cannot name a host path or arbitrary URL.
+        // Images are resolved by Media; the model cannot name a host path or arbitrary URL.
         for segment in &segments {
             if !matches!(
                 segment,
@@ -29,17 +30,14 @@ impl Agent {
         let mut segments = segments;
         for segment in &mut segments {
             if let Segment::Image(image) = segment {
-                let data: Result<String, memory::Error> = host::call(
-                    memory::OBJECT.parse().unwrap(),
-                    "/media/read".parse().unwrap(),
+                let data: Result<managed::Blob, managed::Error> = host::call(
+                    managed::OBJECT.parse().unwrap(),
+                    "/get".parse().unwrap(),
                     &image.file,
                 )
                 .await?;
-                let data = data.map_err(Error::Memory)?;
-                let (_, bytes) = data
-                    .split_once(";base64,")
-                    .ok_or_else(|| Error::Delivery("invalid managed image".into()))?;
-                image.file = format!("base64://{bytes}");
+                let data = data.map_err(|e| Error::Delivery(format!("{e:?}")))?;
+                image.file = format!("base64://{}", STANDARD.encode(data.bytes));
                 image.options = Default::default();
             }
         }

@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {CallingModule, Configuration(string), Inspection(string), Management(string)}), Ok({modules: [{dependencies: [{interface: string, object: string}], name: optional string, object: string, phase: variant {Creating, Destroying, Failed(string), Releasing, Serving, Stopping}, queued: i64, version: string}], parallelism: i64})};
+export T0;

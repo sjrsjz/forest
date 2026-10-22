@@ -5,6 +5,7 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
+forest-control = { path = "../forest-control" }
 forest-runtime = { path = "../forest-runtime" }
 forest-config = { path = "../forest-config" }
 forest-protocol = { path = "../forest-protocol" }

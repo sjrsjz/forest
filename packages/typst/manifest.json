@@ -1,0 +1,228 @@
+{
+  "package": {
+    "id": "/module/typst",
+    "version": "0.1.0",
+    "name": "Typst",
+    "description": "Typeset documents and equations into managed PNG references"
+  },
+  "module": "module.wasm",
+  "configs": [
+    {
+      "key": "/settings",
+      "schema": [
+        {
+          "Record": {
+            "font_size_pt": "I32",
+            "max_page_pixels": "I64",
+            "max_pages": "I32",
+            "page_width_pt": "I32",
+            "pixels_per_point": "I32"
+          }
+        }
+      ],
+      "default": {
+        "Record": {
+          "font_size_pt": {
+            "I32": 12
+          },
+          "max_page_pixels": {
+            "I64": 8000000
+          },
+          "max_pages": {
+            "I32": 8
+          },
+          "page_width_pt": {
+            "I32": 480
+          },
+          "pixels_per_point": {
+            "I32": 2
+          }
+        }
+      },
+      "access": {
+        "readers": [
+          "SelfModule"
+        ],
+        "writers": [
+          {
+            "Path": "/user/admin"
+          }
+        ],
+        "callers": []
+      }
+    }
+  ],
+  "provides": [
+    {
+      "path": "/render",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": false,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/agent-tools"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    }
+  ],
+  "uses": [
+    {
+      "object": "/module/media",
+      "interface": "/put",
+      "input": [
+        {
+          "Record": {
+            "bytes": "ByteBuffer",
+            "mime": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/media",
+      "interface": "/get",
+      "input": [
+        "String"
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "bytes": "ByteBuffer",
+                    "mime": "String"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "subscriptions": []
+}

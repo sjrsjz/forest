@@ -140,6 +140,32 @@
           {
             "Record": {
               "interface": {
+                "String": "/render"
+              },
+              "object": {
+                "String": "/module/typst"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "Render a Typst document, equations or tables into PNG pages. Use Typst syntax, not Markdown or LaTeX. Defaults: 480pt width, automatic height, 12pt Chinese text, 2 pixels/pt; source can override page/text settings. Chinese and mathematical fonts are included. Returns page dimensions, managed media references and ready-to-send CQ image codes; include the returned cq in your assistant reply to send the images. No image bytes appear in the tool result. Optional images maps relative virtual file names to existing media: references for image(\"name.png\"). File system, package downloads and current date are unavailable. Compilation diagnostics are returned for you to correct the source."
+                    }
+                  },
+                  "name": {
+                    "String": "typst_render"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"images\":{\"additionalProperties\":{\"type\":\"string\"},\"description\":\"Virtual relative image file names mapped to managed media references.\",\"type\":\"object\"},\"source\":{\"description\":\"Typst source, for example: = 积分结果\\n$ integral_0^pi x^2 sin(x) dif x = pi^2 - 4 $\",\"maxLength\":100000,\"minLength\":1,\"type\":\"string\"}},\"required\":[\"source\"],\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
                 "String": "/memory"
               },
               "object": {
@@ -566,6 +592,54 @@
     {
       "object": "/module/deepseek-web",
       "interface": "/search",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/typst",
+      "interface": "/render",
       "input": [
         {
           "Record": {

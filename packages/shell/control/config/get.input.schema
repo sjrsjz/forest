@@ -1,0 +1,2 @@
+schema T0 = {key: string, object: string};
+export T0;

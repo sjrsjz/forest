@@ -105,6 +105,12 @@ pub async fn accept(input: Incoming) -> Result<Accepted, Error> {
         ),
     ];
     for media in media {
+        crate::media::register(crate::projection::Source {
+            reference: media.reference.clone(),
+            path: media.path.clone(),
+            source: media.source.clone(),
+        })
+        .await?;
         statements.push(stmt("INSERT INTO media(reference,group_id,sequence,path,source) SELECT ?,group_id,sequence,?,? FROM units WHERE group_id=? AND source_key=? ON CONFLICT DO NOTHING",vec![text(media.reference),text(media.path),text(media.source),int(group),text(&key)]));
     }
     let result = execute(statements).await?;

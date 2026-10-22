@@ -221,6 +221,7 @@ impl Harness {
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let crates = [
             "forest-memory-module",
+            "forest-media",
             "forest-agent-module",
             "forest-agent-tools",
             "forest-deepseek-web",
@@ -244,6 +245,27 @@ impl Harness {
             command.args(["-p", name]);
         }
         assert!(command.current_dir(&workspace).status().unwrap().success());
+        assert!(
+            Command::new("cargo")
+                .args([
+                    "build",
+                    "--locked",
+                    "--offline",
+                    "-j",
+                    "2",
+                    "--profile",
+                    "guest",
+                    "--target",
+                    "wasm32-unknown-unknown",
+                    "-p",
+                    "forest-typst",
+                    "--lib"
+                ])
+                .current_dir(&workspace)
+                .status()
+                .unwrap()
+                .success()
+        );
         let root = tempfile::tempdir().unwrap();
         let remote = Shared::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -300,6 +322,8 @@ impl Harness {
             forest_openai_provider::manifest(),
             forest_context_module::manifest(),
             forest_memory_module::manifest(),
+            forest_media::manifest(),
+            forest_typst::manifest(),
             forest_agent_tools::manifest(),
             forest_deepseek_web::manifest(),
             forest_wolfram_alpha::manifest(),
@@ -311,6 +335,8 @@ impl Harness {
             "forest_openai_provider",
             "forest_context_module",
             "forest_memory_module",
+            "forest_media",
+            "forest_typst",
             "forest_agent_tools",
             "forest_deepseek_web",
             "forest_wolfram_alpha",
@@ -340,11 +366,17 @@ impl Harness {
             .unwrap();
             std::fs::copy(
                 workspace.join(format!(
-                    "target/wasm32-unknown-unknown/debug/{artifact}.wasm"
+                    "target/wasm32-unknown-unknown/{}/{artifact}.wasm",
+                    if artifact == "forest_typst" {
+                        "guest"
+                    } else {
+                        "debug"
+                    }
                 )),
                 dir.join("module.wasm"),
             )
             .unwrap();
+            eprintln!("Loading test package {id}");
             packages.insert(id.to_string(), scheduler.package(dir).await.unwrap());
         }
         let result = Self {

@@ -15,10 +15,9 @@ CREATE TABLE IF NOT EXISTS links (
 CREATE INDEX IF NOT EXISTS links_reverse ON links(recalled_group,recalled_seq);
 CREATE TABLE IF NOT EXISTS media (
     reference TEXT PRIMARY KEY, group_id INTEGER NOT NULL, sequence INTEGER NOT NULL,
-    path TEXT NOT NULL, source TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', error TEXT, mime TEXT,
+    path TEXT NOT NULL, source TEXT NOT NULL,
     FOREIGN KEY(group_id,sequence) REFERENCES units(group_id,sequence) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS media_pending ON media(state);
 CREATE TABLE IF NOT EXISTS vectors (
     space TEXT NOT NULL, point_id TEXT NOT NULL, group_id INTEGER NOT NULL, sequence INTEGER NOT NULL,
     representation TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', error TEXT,

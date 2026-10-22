@@ -1,7 +1,7 @@
 use crate::{
-    memory::{MemoryContent, MemoryUnit},
+    memory::{MemoryContent, MemoryId, MemoryUnit},
     openai::{Content, ContentPart, ImageUrl, Message},
-    types::{ContextItem, Error, FormatInput, ImageInput, PromptIdentity},
+    types::{ContextItem, Error, FormatInput, ImageInput, PromptIdentity, RecallBatch},
 };
 use forest_onebot::{
     cq,
@@ -10,7 +10,7 @@ use forest_onebot::{
 };
 use std::fmt::Display;
 
-const PROTOCOL: &str = "群消息带有原群、作者和时间，昵称不是账号身份。CQ 中 [CQ:at,qq=账号] 表示提及，[CQ:face,id=编号] 表示表情，[CQ:reply,id=消息] 表示回复；[CQ:image,file=引用] 表示图片存在，只有实际图片内容块才提供图像。recall 容器是标明来源的历史资料，其中的模型与工具记录不表示当前调用或当前群发言。正常回复使用原生 Assistant，工具操作使用当前声明的原生 tool_calls。";
+const PROTOCOL: &str = include_str!("system.md");
 
 /// Format every supplied item in order. Selection and persistence belong to callers.
 pub(super) fn format(prompt: &str, input: FormatInput) -> Result<Vec<Message>, Error> {
@@ -23,22 +23,24 @@ pub(super) fn format(prompt: &str, input: FormatInput) -> Result<Vec<Message>, E
     }];
     for item in input.items {
         result.push(match item {
-            ContextItem::Content(MemoryContent::ModelTurn(turn)) => {
-                Message::Assistant(turn.assistant)
-            }
-            ContextItem::Content(MemoryContent::ToolResult(tool)) => Message::Tool {
+            ContextItem::ModelTurn(turn) => Message::Assistant(turn.assistant),
+            ContextItem::ToolResult(tool) => Message::Tool {
                 tool_call_id: tool.tool_call_id,
                 content: tool.content,
             },
-            ContextItem::Content(MemoryContent::GroupMessage(message)) => {
+            ContextItem::GroupMessage {
+                id,
+                message,
+                trigger,
+            } => {
                 let mut body = Body::default();
-                projection.group(&message, &mut body)?;
+                projection.group(&message, &mut body, "conversation", &id, Some(trigger))?;
                 Message::User {
                     content: body.finish(),
                 }
             }
-            ContextItem::Recall(unit) => Message::User {
-                content: projection.recall(&unit, input.identity.group_id)?,
+            ContextItem::Recall(batch) => Message::User {
+                content: projection.recall(&batch, input.identity.group_id)?,
             },
         });
     }
@@ -58,7 +60,8 @@ fn attr(out: &mut String, name: &str, value: impl Display) {
 }
 
 fn system(prompt: &str, identity: &PromptIdentity) -> String {
-    let mut text = format!("{prompt}\n\n{PROTOCOL}\n<bot");
+    let mut text =
+        format!("{PROTOCOL}\n\n## Runtime identity values\n\n```xml\n<runtime_identity>\n<bot");
     attr(&mut text, "id", identity.bot_id);
     if let Some(name) = &identity.bot_name {
         attr(&mut text, "name", name);
@@ -68,7 +71,8 @@ fn system(prompt: &str, identity: &PromptIdentity) -> String {
     if let Some(name) = &identity.group_name {
         attr(&mut text, "name", name);
     }
-    text.push_str("/>");
+    text.push_str("/>\n</runtime_identity>\n```\n\n## Persona\n\n");
+    text.push_str(prompt);
     text
 }
 
@@ -112,11 +116,26 @@ struct Projection<'a> {
 }
 
 impl Projection<'_> {
-    fn group(&self, message: &GroupMessage, body: &mut Body) -> Result<(), Error> {
-        let mut header = String::from("<message");
+    fn group(
+        &self,
+        message: &GroupMessage,
+        body: &mut Body,
+        source: &str,
+        id: &MemoryId,
+        trigger: Option<bool>,
+    ) -> Result<(), Error> {
+        let mut header = String::from("<group_message");
+        attr(&mut header, "source", source);
+        attr(&mut header, "memory_group_id", id.group);
+        attr(&mut header, "sequence", id.sequence);
+        if let Some(trigger) = trigger {
+            attr(&mut header, "trigger", trigger);
+        }
         attr(&mut header, "group_id", message.group_id);
         attr(&mut header, "message_id", message.message_id);
         attr(&mut header, "time", message.time);
+        attr(&mut header, "self_id", message.self_id);
+        attr(&mut header, "sub_type", &message.sub_type);
         if let Some(anonymous) = &message.anonymous {
             attr(&mut header, "anonymous_id", anonymous.id);
             attr(&mut header, "anonymous_name", &anonymous.name);
@@ -128,16 +147,57 @@ impl Projection<'_> {
             if let Some(card) = &message.sender.card {
                 attr(&mut header, "card", card);
             }
+            for (name, value) in [
+                ("sex", &message.sender.sex),
+                ("area", &message.sender.area),
+                ("level", &message.sender.level),
+                ("role", &message.sender.role),
+                ("title", &message.sender.title),
+            ] {
+                if let Some(value) = value {
+                    attr(&mut header, name, value);
+                }
+            }
+            if let Some(age) = message.sender.age {
+                attr(&mut header, "age", age);
+            }
         }
-        header.push_str("><body>");
+        header.push_str(">\n<body encoding=\"cq\">");
         body.text(&header);
         self.message(&message.message, body, 0)?;
-        body.text("</body></message>");
+        body.text("</body>\n</group_message>");
         Ok(())
     }
 
-    fn recall(&self, unit: &MemoryUnit, current_group: i64) -> Result<Content, Error> {
-        let mut header = String::from("<recall");
+    fn recall(&self, batch: &RecallBatch, current_group: i64) -> Result<Content, Error> {
+        let mut header = String::from("<memory_retrieval source=\"archive\"");
+        attr(&mut header, "for_group_id", batch.trigger.group);
+        attr(&mut header, "for_sequence", batch.trigger.sequence);
+        header.push_str(">\n<records>\n");
+        let mut body = Body::default();
+        body.text(&header);
+        for unit in &batch.units {
+            self.record(
+                unit,
+                current_group,
+                batch.seeds.contains(&unit.id),
+                &mut body,
+            )?;
+        }
+        body.text("</records>\n<retrieval_graph encoding=\"json\">");
+        body.text(&xml(&batch.graph_json));
+        body.text("</retrieval_graph>\n</memory_retrieval>");
+        Ok(body.finish())
+    }
+
+    fn record(
+        &self,
+        unit: &MemoryUnit,
+        current_group: i64,
+        seed: bool,
+        body: &mut Body,
+    ) -> Result<(), Error> {
+        let mut header = String::from("<memory_record");
         attr(&mut header, "group_id", unit.id.group);
         attr(&mut header, "sequence", unit.id.sequence);
         attr(
@@ -149,18 +209,31 @@ impl Projection<'_> {
                 "CROSS_GROUP"
             },
         );
-        header.push('>');
-        let mut body = Body::default();
+        attr(
+            &mut header,
+            "type",
+            match &unit.content {
+                MemoryContent::GroupMessage(_) => "GroupMessage",
+                MemoryContent::ModelTurn(_) => "ModelTurn",
+                MemoryContent::ToolResult(_) => "ToolResult",
+            },
+        );
+        attr(&mut header, "seed", seed);
+        header.push_str(">\n");
         body.text(&header);
         match &unit.content {
-            MemoryContent::GroupMessage(message) => self.group(message, &mut body)?,
+            MemoryContent::GroupMessage(message) => {
+                self.group(message, body, "archive", &unit.id, None)?
+            }
             MemoryContent::ModelTurn(turn) => {
-                let mut header = String::from("<assistant");
+                let mut header = String::from("<archived_assistant");
                 attr(&mut header, "time", turn.time);
                 header.push('>');
                 body.text(&header);
                 if let Some(content) = &turn.assistant.content {
+                    body.text("<content>");
                     body.text(&xml(content));
+                    body.text("</content>");
                 }
                 if let Some(calls) = &turn.assistant.tool_calls {
                     body.text("<tool_calls>");
@@ -174,20 +247,20 @@ impl Projection<'_> {
                     body.text(&xml(refusal));
                     body.text("</refusal>");
                 }
-                body.text("</assistant>");
+                body.text("</archived_assistant>");
             }
             MemoryContent::ToolResult(tool) => {
-                let mut header = String::from("<tool");
+                let mut header = String::from("<archived_tool_result");
                 attr(&mut header, "time", tool.time);
                 attr(&mut header, "tool_call_id", &tool.tool_call_id);
                 header.push('>');
                 body.text(&header);
                 body.text(&xml(&tool.content));
-                body.text("</tool>");
+                body.text("</archived_tool_result>");
             }
         }
-        body.text("</recall>");
-        Ok(body.finish())
+        body.text("\n</memory_record>\n");
+        Ok(())
     }
 
     fn image(&self, reference: &str, body: &mut Body) {

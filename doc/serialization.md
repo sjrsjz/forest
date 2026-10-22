@@ -20,6 +20,8 @@ export Request;
 
 `DeriveSchema` 和 `DeriveValue` 是 Rust 的可选映射工具，从本地类型生成对应 Schema 与 Value 转换，包括泛型和递归类型；它们不是跨模块类型身份，也不要求调用双方依赖同一个 crate。
 
+`bytes` 表示变长不透明字节，对应 `Value::Bytes` 和 Rust `Vec<u8>`，二进制编码不会为每个字节建立一个 Value 节点。`bytes N` 仍表示长度固定为 N 的字节数组，且是 `bytes` 的子类型。媒体字节等载荷通过这一公开 Schema 传递，无需转为 base64 字符串。
+
 ```rust
 use forest_serde::{DeriveSchema, DeriveValue};
 use forest_serde::adt::{AsSchema, AsValue};

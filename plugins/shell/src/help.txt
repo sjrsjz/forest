@@ -1,0 +1,15 @@
+Forest 群聊管理
+#forest status
+#forest packages
+#forest module list
+#forest module show <对象>
+#forest module load <对象>
+#forest module reload <对象> [drain|yield|force]
+#forest module unload <对象> [drain|yield|force]
+#forest module force <对象>
+#forest config keys <对象>
+#forest config get <对象> <配置路径>
+#forest config set <对象> <配置路径> <Forest 值>
+
+对象示例：/module/agent
+配置示例：#forest config set /module/context /prompt/agent "You are Alice."

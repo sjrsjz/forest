@@ -22,7 +22,7 @@ flowchart LR
     Set --> Store
 ```
 
-Web 层持有三个由宿主显式授予的独立能力：Inspector 只读观测，ModuleManager 执行包读取、依赖规划及装卸，ConfigWriter 以绑定来源执行受 ACL 约束的配置 set。Web 层不持有完整 Scheduler、模块调用能力或可写 ConfigStore。模块 SDK 不提供这些宿主管理能力，模块 send/call 不能寻址它们。
+Web 层持有三个由宿主显式授予的独立能力：Inspector 只读观测，ModuleManager 执行包读取、依赖规划及装卸，ConfigWriter 以绑定来源执行受 ACL 约束的配置 set。Web 层不持有完整 Scheduler、模块调用能力或可写 ConfigStore。这些句柄不传入 Wasm；宿主可经独立 `/core/control` 适配器向特定管理插件开放类型化端口，静态 callers 仍控制可调用者，见[群聊 Shell](26-group-shell-and-school-help.md)。本地包目录的读取、规划及装卸实现由 `forest-control::packages` 共用。
 
 观测不执行来宾代码、不遍历来宾内存、不恢复任务。控制台连接、读取和关闭不改变模块生命周期。只有显式装卸请求可以执行生命周期代码。配置 set 只更新存储值，不执行来宾或自动重载。模块自带 UI 和 Agent 页面另行设计。
 

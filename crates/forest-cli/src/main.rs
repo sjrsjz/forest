@@ -119,6 +119,18 @@ async fn main() -> Result<()> {
     .await?;
     let logs = scheduler.logs();
     let _stderr = logs::Stderr::start(logs.reader());
+    tokio::fs::create_dir_all(&args.packages_directory).await?;
+    let catalog = forest_control::packages::Packages::new(
+        &args.packages_directory,
+        scheduler.module_manager(),
+    )
+    .await?;
+    forest_control::install(
+        &scheduler,
+        catalog,
+        scheduler.config_writer("/user/admin".parse()?),
+        vec![SubjectPattern::Path("/module/shell".parse()?)],
+    )?;
     #[cfg(feature = "webui")]
     let console = if let Some(address) = args.webui {
         let password = std::env::var(&args.web_password_env)
@@ -171,9 +183,7 @@ async fn main() -> Result<()> {
         } else {
             GroupScope::only(args.allow_group)
         },
-        vec![SubjectPattern::Path(forest_protocol::TokenPattern::exact(
-            object.clone(),
-        ))],
+        vec![SubjectPattern::Path("/module/**".parse()?)],
     )?;
     let mut declarations = vec![(args.package.clone(), package.manifest().clone())];
     let directories = match tokio::fs::read_dir(&args.packages_directory).await {

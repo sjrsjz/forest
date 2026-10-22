@@ -1,0 +1,328 @@
+{
+  "package": {
+    "id": "/module/media",
+    "version": "0.1.0",
+    "name": "Managed media",
+    "description": "Persistent image bytes and stable source references"
+  },
+  "module": "module.wasm",
+  "configs": [],
+  "provides": [
+    {
+      "path": "/acquire",
+      "input": [
+        {
+          "Tuple": []
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Tuple": []
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": false,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          "SelfModule"
+        ]
+      }
+    },
+    {
+      "path": "/get",
+      "input": [
+        "String"
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "bytes": "ByteBuffer",
+                    "mime": "String"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": true,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/**"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/put",
+      "input": [
+        {
+          "Record": {
+            "bytes": "ByteBuffer",
+            "mime": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": true,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/typst"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/register",
+      "input": [
+        {
+          "Record": {
+            "reference": "String",
+            "source": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Tuple": []
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": true,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/memory"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    }
+  ],
+  "uses": [
+    {
+      "object": "/module/media",
+      "interface": "/acquire",
+      "input": [
+        {
+          "Tuple": []
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Tuple": []
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "subscriptions": []
+}

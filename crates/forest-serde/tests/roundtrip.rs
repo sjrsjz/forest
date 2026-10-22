@@ -6,6 +6,25 @@ use forest_serde::adt::{
 use forest_serde::parser::{parse_schema, parse_value};
 use forest_serde::{DeriveSchema, DeriveValue};
 
+#[test]
+fn variable_bytes_keep_compact_binary_and_structural_contracts() {
+    let schema = Vec::<u8>::as_schema();
+    assert_eq!(
+        parse_schema(&schema.to_string()).unwrap().to_string(),
+        schema.to_string()
+    );
+    for bytes in [vec![], vec![0, 255, 1, 128], vec![42; 65536]] {
+        let value = bytes.as_value();
+        assert!(value.check(&schema, false));
+        assert_eq!(Vec::<u8>::from_value(value.clone()).unwrap(), bytes);
+        assert!(bincode::serialize(&value).unwrap().len() <= bytes.len() + 16);
+    }
+    let fixed: Schema = parse_schema("schema T = bytes 32; export T;").unwrap();
+    assert!(fixed.subof(&schema));
+    assert!(!schema.subof(&fixed));
+    assert!(!Value::String("bytes".into()).check(&schema, false));
+}
+
 #[derive(Debug, PartialEq, DeriveSchema, DeriveValue)]
 struct Node<T> {
     item: T,

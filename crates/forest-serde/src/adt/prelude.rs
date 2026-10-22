@@ -456,3 +456,25 @@ impl<K: AsValue + Ord + 'static, V: AsValue + 'static> AsValue for BTreeMap<K, V
         }
     }
 }
+
+/// Variable-size opaque bytes use Value::Bytes, without one ADT node per byte.
+impl AsSchema for Vec<u8> {
+    fn register_dependencies_and_self(
+        cache: &mut HashMap<TypeId, GlobalSchemaEnum>,
+        _: &mut Vec<TypeId>,
+    ) -> GlobalSchemaEnum {
+        GlobalSchemaEnum::alloc::<Self>(GlobalSchemaEnum::ByteBuffer, cache);
+        GlobalSchemaEnum::ByteBuffer
+    }
+}
+impl AsValue for Vec<u8> {
+    fn as_value(&self) -> Value {
+        Value::Bytes(self.clone())
+    }
+    fn from_value(value: Value) -> Result<Self, DecodeError> {
+        match value {
+            Value::Bytes(bytes) => Ok(bytes),
+            _ => Err(DecodeError::expected(ValueKind::Bytes, &value)),
+        }
+    }
+}

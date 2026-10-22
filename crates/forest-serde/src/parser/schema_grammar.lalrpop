@@ -59,6 +59,7 @@ TypeExpr: AstSchema = {
     "string" => AstSchema::String,
 
     "bytes" <s:"size"> => AstSchema::Bytes(s),
+    "bytes" => AstSchema::ByteBuffer,
 
     "optional" <t:TypeExpr> => AstSchema::Option(Box::new(t)),
     "map" <k:TypeExpr> "=>" <v:TypeExpr> => AstSchema::Map(Box::new(k), Box::new(v)),

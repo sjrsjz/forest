@@ -73,6 +73,7 @@ pub enum GlobalSchemaEnum {
     Variant(BTreeMap<String, VariantPayloadGlobal>),
     Record(BTreeMap<String, GlobalSchemaEnum>),
     Ref(TypeId),
+    ByteBuffer,
 }
 
 /// Global representation of variant payloads, distinguishing between unnamed (tuple-like)
@@ -112,6 +113,7 @@ impl GlobalSchemaEnum {
                     GlobalSchemaEnum::Bool => SchemaEnum::Bool,
                     GlobalSchemaEnum::String => SchemaEnum::String,
                     GlobalSchemaEnum::Bytes(len) => SchemaEnum::Bytes(*len),
+                    GlobalSchemaEnum::ByteBuffer => SchemaEnum::ByteBuffer,
                     GlobalSchemaEnum::Option(inner) => {
                         SchemaEnum::Option(Box::new(convert(inner, schemas, id2idx, cache)))
                     }
@@ -219,6 +221,7 @@ pub enum SchemaEnum {
     Variant(BTreeMap<String, VariantPayloadSchema>),
     Record(BTreeMap<String, SchemaEnum>),
     Ref(usize),
+    ByteBuffer,
 }
 
 /// Defines the schema for a variant's payload (the data associated with an enum arm).
@@ -246,7 +249,8 @@ impl SchemaEnum {
             | SchemaEnum::I64
             | SchemaEnum::Bool
             | SchemaEnum::String
-            | SchemaEnum::Bytes(_) => true,
+            | SchemaEnum::Bytes(_)
+            | SchemaEnum::ByteBuffer => true,
             SchemaEnum::Ref(idx) => *idx < schema.schemas.len(),
         }
     }
@@ -322,6 +326,7 @@ impl SchemaEnum {
                     (SchemaEnum::Bool, SchemaEnum::Bool) => true,
                     (SchemaEnum::String, SchemaEnum::String) => true,
                     (SchemaEnum::Bytes(ba), SchemaEnum::Bytes(bb)) => ba == bb,
+                    (SchemaEnum::Bytes(_) | SchemaEnum::ByteBuffer, SchemaEnum::ByteBuffer) => true,
 
                     (SchemaEnum::I32, SchemaEnum::I64) => true,
 
@@ -483,6 +488,7 @@ impl fmt::Display for SchemaEnum {
             SchemaEnum::Bool => write!(f, "bool"),
             SchemaEnum::String => write!(f, "string"),
             SchemaEnum::Bytes(size) => write!(f, "bytes {}", size),
+            SchemaEnum::ByteBuffer => write!(f, "bytes"),
             SchemaEnum::Option(inner) => write!(f, "optional {}", inner),
             SchemaEnum::Array(inner) => write!(f, "[{}]", inner),
             SchemaEnum::Map(k, v) => write!(f, "map {} => {}", k, v),
@@ -796,6 +802,7 @@ impl Value {
             (Value::Bool(_), SchemaEnum::Bool) => true,
             (Value::String(_), SchemaEnum::String) => true,
             (Value::Bytes(a), SchemaEnum::Bytes(b)) => a.len() == *b,
+            (Value::Bytes(_), SchemaEnum::ByteBuffer) => true,
 
             (Value::Some(inner), SchemaEnum::Option(sch)) => {
                 inner._check(sch, schema_ctx, assumptions, loose_match)

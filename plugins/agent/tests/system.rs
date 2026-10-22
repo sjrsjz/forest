@@ -125,13 +125,26 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
             .collect::<Vec<_>>();
         let b = bodies.iter().position(|s| s.contains("B_TRIGGER")).unwrap();
         let c = bodies.iter().position(|s| s.contains("C_TRIGGER")).unwrap();
-        assert!(bodies[b - 1].contains("<recall group_id=\"20\""));
-        assert!(bodies[c - 1].contains("<recall group_id=\"20\""));
-        assert!(
-            bodies
-                .iter()
-                .any(|s| s.contains("B_ORDINARY") && s.contains("user_id=\"2\""))
-        );
+        for position in [b, c] {
+            let retrieval = bodies[position - 1];
+            assert!(
+                retrieval.starts_with("<memory_retrieval source=\"archive\" for_group_id=\"10\"")
+            );
+            assert!(retrieval.contains("<memory_record group_id=\"20\""));
+            assert!(retrieval.contains("<retrieval_graph encoding=\"json\">"));
+            assert!(bodies[position].contains("trigger=\"true\""));
+            let sequence = bodies[position]
+                .split("sequence=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            assert!(retrieval.contains(&format!("for_sequence=\"{sequence}\"")));
+        }
+        assert!(bodies.iter().any(|s| s.contains("B_ORDINARY")
+            && s.contains("user_id=\"2\"")
+            && s.contains("trigger=\"false\"")));
         assert!(
             bodies
                 .iter()
@@ -300,7 +313,126 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
 
     memory_index_and_media(&mut h).await;
     bounded_graph(&h).await;
+    typst_render_and_delivery(&mut h).await;
     h.finish().await;
+}
+
+async fn typst_render_and_delivery(h: &mut Harness) {
+    use forest_agent_module::{managed, tools};
+    let source = "= Forest 排版测试\n\n中文、数学与表格。\n$ integral_0^pi x^2 sin(x) dif x = pi^2 - 4 $\n#table(columns: 2, [项目], [数值], [结果], [$pi^2 - 4$])\n#pagebreak()\n= 第二页\n媒体引用在渲染模块重载后仍然有效。";
+    let invocation = tools::Invocation {
+        group_id: 20,
+        bot_id: 42,
+        name: "typst_render".into(),
+        arguments_json: json!({"source":source}).to_string(),
+    };
+    let started = std::time::Instant::now();
+    let answer: Result<String, tools::Error> =
+        h.call("/module/agent-tools", "/invoke", &invocation).await;
+    let answer = answer.unwrap();
+    assert!(!answer.contains("base64"));
+    let answer: Value = serde_json::from_str(&answer).unwrap();
+    assert_eq!(answer["pages"].as_array().unwrap().len(), 2);
+    assert_eq!(answer["warnings"], json!([]));
+    let reference = answer["pages"][0]["reference"].as_str().unwrap().to_owned();
+    let blob: Result<managed::Blob, managed::Error> =
+        h.call(managed::OBJECT, "/get", &reference).await;
+    let blob = blob.unwrap();
+    assert_eq!(blob.mime, "image/png");
+    assert!(blob.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert_eq!(
+        u32::from_be_bytes(blob.bytes[16..20].try_into().unwrap()),
+        answer["pages"][0]["width"].as_u64().unwrap() as u32
+    );
+    println!(
+        "Typst Wasm: 2 pages in {:?}, first PNG {} bytes",
+        started.elapsed(),
+        blob.bytes.len()
+    );
+    if let Ok(path) = std::env::var("FOREST_TYPST_PREVIEW") {
+        std::fs::write(path, &blob.bytes).unwrap();
+    }
+
+    let bad = tools::Invocation {
+        arguments_json: json!({"source":"#let x ="}).to_string(),
+        ..invocation.clone()
+    };
+    let error: Result<String, tools::Error> = h.call("/module/agent-tools", "/invoke", &bad).await;
+    let tools::Error::Execution(diagnostics) = error.unwrap_err() else {
+        panic!("expected compile diagnostics")
+    };
+    assert!(diagnostics.contains("diagnostics"));
+    assert!(diagnostics.contains("\"line\":1"));
+    let oversized = tools::Invocation {
+        arguments_json: json!({"source":"#set page(width: 100000pt, height: 100000pt)\nX"})
+            .to_string(),
+        ..invocation.clone()
+    };
+    let error: Result<String, tools::Error> =
+        h.call("/module/agent-tools", "/invoke", &oversized).await;
+    assert!(matches!(error, Err(tools::Error::Execution(message)) if message.contains("pixels")));
+
+    for object in ["/module/typst", managed::OBJECT] {
+        h.scheduler
+            .reload(h.packages[object].clone(), StopMode::Drain)
+            .await
+            .unwrap();
+    }
+    let reread: Result<managed::Blob, managed::Error> =
+        h.call(managed::OBJECT, "/get", &reference).await;
+    assert_eq!(reread.unwrap(), blob);
+    // Explicit managed input images are loaded before compiling in the virtual World.
+    let embedded = tools::Invocation {
+        arguments_json:
+            json!({"source":"#image(\"plot.png\", width: 100pt)", "images":{"plot.png":reference}})
+                .to_string(),
+        ..invocation.clone()
+    };
+    let output: Result<String, tools::Error> =
+        h.call("/module/agent-tools", "/invoke", &embedded).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&output.unwrap()).unwrap()["pages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let mut tool_reply = Reply::text("我把结果排版成图片。");
+    tool_reply.body["choices"][0]["finish_reason"] = json!("tool_calls");
+    tool_reply.body["choices"][0]["message"]["tool_calls"] = json!([{"id":"render-1","type":"function","function":{"name":"typst_render","arguments":invocation.arguments_json}}]);
+    h.reply(20, tool_reply);
+    h.reply(20, Reply::text(answer["pages"][0]["cq"].as_str().unwrap()));
+    h.input(&message(20, 9000, 9, "请排版积分结果", true))
+        .await
+        .unwrap();
+    let announcement = bounded(h.sent.recv()).await.unwrap();
+    assert_eq!(
+        cq::encode(&announcement.message).unwrap(),
+        "我把结果排版成图片。"
+    );
+    let delivery = bounded(h.sent.recv()).await.unwrap();
+    let segments = cq::segments(&delivery.message).unwrap();
+    let Segment::Image(image) = &segments[0] else {
+        panic!("expected rendered image")
+    };
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    assert_eq!(
+        STANDARD
+            .decode(image.file.strip_prefix("base64://").unwrap())
+            .unwrap(),
+        blob.bytes
+    );
+    let request = h.remote.lock().unwrap().requests.last().unwrap().1.clone();
+    let tool = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool" && m["tool_call_id"] == "render-1")
+        .unwrap();
+    assert!(tool["content"].as_str().unwrap().contains(&reference));
+    assert!(!tool["content"].as_str().unwrap().contains("base64"));
+    assert!(h.sent.try_recv().is_err());
 }
 
 async fn deepseek_web_tools(h: &Harness) {
@@ -632,7 +764,17 @@ async fn memory_index_and_media(h: &mut Harness) {
     h.input(&incoming).await.unwrap();
     bounded(h.sent.recv()).await.unwrap();
     let request = h.remote.lock().unwrap().requests.last().unwrap().1.clone();
-    assert!(!request["messages"].to_string().contains("image_url"));
+    assert!(
+        request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| {
+                message["content"]
+                    .as_array()
+                    .is_none_or(|parts| parts.iter().all(|part| part["type"] != "image_url"))
+            })
+    );
     assert!(
         request["messages"]
             .to_string()

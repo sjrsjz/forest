@@ -51,7 +51,8 @@ impl Agent {
                     for p in staged {
                         s.data.window.push(Block::Message {
                             unit: p.accepted.unwrap(),
-                            recalls: vec![],
+                            trigger: p.trigger,
+                            recall: None,
                         });
                     }
                     s.error = Some(message);
@@ -143,24 +144,32 @@ impl Agent {
                 break;
             };
             let unit = p.accepted.unwrap();
-            let recalls = if p.trigger {
+            let recall = if p.trigger {
                 match memory_call::<_, memory::Region>("/recall", &unit.id).await {
                     Ok(region) => {
-                        links.extend(Session::links_for(&unit.id, region.seeds));
-                        region.units.into_iter().map(|u| u.id).collect()
+                        links.extend(Session::links_for(&unit.id, region.seeds.clone()));
+                        (!region.units.is_empty()).then(|| Recall {
+                            ids: region.units.into_iter().map(|u| u.id).collect(),
+                            seeds: region.seeds,
+                            graph_json: region.graph_json,
+                        })
                     }
                     // Unavailable RAG is observable; it doesn't erase the actual conversation.
                     Err(error) => {
                         self.note(session, format!("recall {:?}: {error:?}", unit.id))
                             .await;
-                        vec![]
+                        None
                     }
                 }
             } else {
-                vec![]
+                None
             };
             let mut s = session.borrow_mut();
-            s.data.window.push(Block::Message { unit, recalls });
+            s.data.window.push(Block::Message {
+                unit,
+                trigger: p.trigger,
+                recall,
+            });
             s.data.staged.remove(0);
         }
         Ok(links)
@@ -171,39 +180,63 @@ impl Agent {
         blocks: &[Block],
         multimodal: bool,
     ) -> Result<Vec<provider::Message>, Error> {
-        let mut order = Vec::new();
+        let mut ids = Vec::new();
         for block in blocks {
             match block {
-                Block::Message { unit, recalls } => {
-                    order.extend(recalls.iter().map(|id| (true, id.clone())));
-                    order.push((false, unit.id.clone()));
+                Block::Message { unit, recall, .. } => {
+                    if let Some(recall) = recall {
+                        ids.extend(recall.ids.iter().cloned());
+                    }
+                    ids.push(unit.id.clone());
                 }
                 Block::Step {
                     units,
                     closed: true,
-                } => order.extend(units.iter().map(|unit| (false, unit.id.clone()))),
+                } => ids.extend(units.iter().map(|unit| unit.id.clone())),
                 Block::Step { closed: false, .. } => {} // Kept as raw facts after interrupted reload.
             }
         }
         let projection: memory::Projection = memory_call(
             "/project",
             &memory::Project {
-                ids: order.iter().map(|(_, id)| id.clone()).collect(),
+                ids,
                 images: multimodal,
             },
         )
         .await?;
-        let items = order
-            .into_iter()
-            .zip(projection.units)
-            .map(|((recall, _), unit)| {
-                if recall {
-                    ContextItem::Recall(unit)
-                } else {
-                    ContextItem::Content(unit.content)
+        let mut projected = projection.units.into_iter();
+        let mut items = Vec::new();
+        for block in blocks {
+            match block {
+                Block::Message {
+                    unit,
+                    trigger,
+                    recall,
+                } => {
+                    if let Some(recall) = recall {
+                        items.push(ContextItem::Recall(context::RecallBatch {
+                            trigger: unit.id.clone(),
+                            units: projected.by_ref().take(recall.ids.len()).collect(),
+                            seeds: recall.seeds.clone(),
+                            graph_json: recall.graph_json.clone(),
+                        }));
+                    }
+                    items.push(context_item(projected.next().unwrap(), *trigger));
                 }
-            })
-            .collect();
+                Block::Step {
+                    units,
+                    closed: true,
+                } => {
+                    items.extend(
+                        projected
+                            .by_ref()
+                            .take(units.len())
+                            .map(|unit| context_item(unit, false)),
+                    );
+                }
+                Block::Step { closed: false, .. } => {}
+            }
+        }
         let identity = {
             let s = session.borrow();
             context::PromptIdentity {
@@ -433,5 +466,17 @@ impl Agent {
                 }
             }
         }
+    }
+}
+
+fn context_item(unit: MemoryUnit, trigger: bool) -> ContextItem {
+    match unit.content {
+        MemoryContent::GroupMessage(message) => ContextItem::GroupMessage {
+            id: unit.id,
+            message,
+            trigger,
+        },
+        MemoryContent::ModelTurn(turn) => ContextItem::ModelTurn(turn),
+        MemoryContent::ToolResult(tool) => ContextItem::ToolResult(tool),
     }
 }

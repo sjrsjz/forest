@@ -9,12 +9,19 @@ use std::{cell::RefCell, rc::Rc};
 pub enum Block {
     Message {
         unit: MemoryUnit,
-        recalls: Vec<MemoryId>,
+        trigger: bool,
+        recall: Option<Recall>,
     },
     Step {
         units: Vec<MemoryUnit>,
         closed: bool,
     },
+}
+#[derive(Clone, Debug, Serialize, Deserialize, DeriveSchema, DeriveValue)]
+pub struct Recall {
+    pub ids: Vec<MemoryId>,
+    pub seeds: Vec<MemoryId>,
+    pub graph_json: String,
 }
 impl Block {
     pub fn units(&self) -> Vec<&MemoryUnit> {
@@ -25,7 +32,7 @@ impl Block {
     }
     pub fn size(&self) -> usize {
         match self {
-            Self::Message { recalls, .. } => 1 + recalls.len(),
+            Self::Message { recall, .. } => 1 + recall.as_ref().map_or(0, |r| r.ids.len()),
             Self::Step { units, .. } => units.len(),
         }
     }
@@ -111,7 +118,8 @@ impl Session {
         for p in self.data.pending.drain(..split) {
             self.data.window.push(Block::Message {
                 unit: p.accepted.unwrap(),
-                recalls: vec![],
+                trigger: false,
+                recall: None,
             });
         }
     }

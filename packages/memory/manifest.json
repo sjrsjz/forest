@@ -3434,77 +3434,6 @@
       }
     },
     {
-      "path": "/media/read",
-      "input": [
-        "String"
-      ],
-      "output": [
-        {
-          "Variant": {
-            "Err": {
-              "Unnamed": [
-                {
-                  "Variant": {
-                    "Embedding": {
-                      "Unnamed": [
-                        "String"
-                      ]
-                    },
-                    "Host": {
-                      "Unnamed": [
-                        "String"
-                      ]
-                    },
-                    "Index": {
-                      "Unnamed": [
-                        "String"
-                      ]
-                    },
-                    "InvalidInput": {
-                      "Unnamed": [
-                        "String"
-                      ]
-                    },
-                    "Media": {
-                      "Unnamed": [
-                        "String"
-                      ]
-                    },
-                    "NotFound": {
-                      "Unnamed": []
-                    },
-                    "Storage": {
-                      "Unnamed": [
-                        "String"
-                      ]
-                    }
-                  }
-                }
-              ]
-            },
-            "Ok": {
-              "Unnamed": [
-                "String"
-              ]
-            }
-          }
-        }
-      ],
-      "reentrant": true,
-      "access": {
-        "readers": [],
-        "writers": [],
-        "callers": [
-          {
-            "Path": "/module/**"
-          },
-          {
-            "Path": "/user/admin"
-          }
-        ]
-      }
-    },
-    {
       "path": "/project",
       "input": [
         {
@@ -7355,6 +7284,116 @@
     }
   ],
   "uses": [
+    {
+      "object": "/module/media",
+      "interface": "/register",
+      "input": [
+        {
+          "Record": {
+            "reference": "String",
+            "source": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Tuple": []
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/media",
+      "interface": "/get",
+      "input": [
+        "String"
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "bytes": "ByteBuffer",
+                    "mime": "String"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
     {
       "object": "/module/qwen-vl-embedding",
       "interface": "/embed",

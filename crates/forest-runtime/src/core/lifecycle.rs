@@ -200,8 +200,8 @@ impl Core {
         Ok(())
     }
     pub(crate) fn turn(&self, instance: &Instance, tasks_empty: bool) -> crate::driver::Turn {
-        let directory = self.directory.lock().unwrap();
-        let slot = &directory.slots[&instance.object];
+        let mut directory = self.directory.lock().unwrap();
+        let slot = directory.slots.get_mut(&instance.object).unwrap();
         match &slot.state {
             State::Serving(_) => {}
             State::Stopping {
@@ -218,23 +218,18 @@ impl Core {
             State::Stopping { mode, .. } => return crate::driver::Turn::Stop(*mode),
             _ => unreachable!("ordinary scheduler phase"),
         }
-        instance
-            .mailbox
-            .pop()
-            .map(crate::driver::Turn::Work)
-            .unwrap_or(crate::driver::Turn::Wait)
-    }
-    pub(crate) fn begin(&self, instance: &Instance, interface: &Token) -> Option<Started> {
-        let mut directory = self.directory.lock().unwrap();
-        match &mut directory.slots.get_mut(&instance.object).unwrap().state {
-            State::Serving(live)
-            | State::Stopping {
-                live,
-                mode: StopMode::Drain,
-                ..
-            } => Some(live.begin(interface)),
-            State::Stopping { .. } => None,
-            _ => unreachable!(),
+        match instance.mailbox.pop() {
+            Some(crate::ready::Work::Start(interface)) => {
+                let live = match &mut slot.state {
+                    State::Serving(live) | State::Stopping { live, .. } => live,
+                    _ => unreachable!("schedulable phase"),
+                };
+                // Remove readiness, take the request and transfer its interface permit
+                // under the same lock used by enqueue/complete.
+                crate::driver::Turn::Start(Box::new(live.begin(&interface)))
+            }
+            Some(crate::ready::Work::Resume(id)) => crate::driver::Turn::Resume(id),
+            None => crate::driver::Turn::Wait,
         }
     }
     pub(crate) fn may_resume(&self, instance: &Instance) -> bool {
@@ -416,5 +411,84 @@ impl Core {
         if let Some(next) = next {
             crate::driver::spawn(self.clone(), next);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::Turn;
+
+    #[tokio::test]
+    async fn selecting_serial_work_transfers_its_permit_before_new_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let scheduler = Scheduler::in_memory(RuntimeOptions {
+            data_directory: root.path().into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let core = &scheduler.core;
+        let object: Token = "/module/serial-test".parse().unwrap();
+        let interface: Token = "/serial".parse().unwrap();
+        let caller: Token = "/user/test".parse().unwrap();
+        let manifest = Arc::new(Manifest {
+            package: PackageInfo {
+                id: object.clone(),
+                version: "test".into(),
+                name: None,
+                description: None,
+            },
+            module: "module.wasm".into(),
+            configs: vec![],
+            uses: vec![],
+            subscriptions: vec![],
+            provides: vec![InterfaceDeclaration {
+                path: interface.clone(),
+                input: i64::as_schema(),
+                output: Result::<i64, String>::as_schema(),
+                reentrant: false,
+                access: manifest::callers(vec![SubjectPattern::Path(
+                    "/user/test".parse().unwrap(),
+                )]),
+            }],
+        });
+        let access = Arc::new(AccessTables::compile(&manifest).unwrap());
+        let instance = core
+            .instance(Package {
+                manifest: manifest.clone(),
+                access: access.clone(),
+                // This test exercises admission and ownership; it never executes guest code.
+                module: wasmtime::Module::new(&core.engine, "(module)").unwrap(),
+            })
+            .unwrap();
+        core.directory.lock().unwrap().slots.insert(
+            object.clone(),
+            Slot {
+                published: manifest,
+                access,
+                budget: Arc::new(Budget::new(&core.options)),
+                state: State::Serving(Live::new(instance.clone())),
+            },
+        );
+        scheduler
+            .send(caller.clone(), object.clone(), interface.clone(), &1i64)
+            .unwrap();
+        let Turn::Start(first) = core.turn(&instance, true) else {
+            panic!("first request")
+        };
+        // Reproduce arrival after selecting work, before the driver enters Wasm.
+        scheduler
+            .send(caller, object.clone(), interface, &2i64)
+            .unwrap();
+        assert!(matches!(core.turn(&instance, false), Turn::Wait));
+        core.complete(&instance, *first, Ok(Ok::<i64, String>(1).as_value()));
+        let Turn::Start(second) = core.turn(&instance, true) else {
+            panic!("second request after release")
+        };
+        assert_eq!(second.request.invocation.input, 2i64.as_value());
+        core.complete(&instance, *second, Ok(Ok::<i64, String>(2).as_value()));
+        assert!(matches!(core.turn(&instance, true), Turn::Wait));
+        core.directory.lock().unwrap().slots.clear();
     }
 }

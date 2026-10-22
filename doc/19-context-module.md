@@ -26,8 +26,21 @@ struct FormatInput {
 }
 
 enum ContextItem {
-    Content(MemoryContent),
-    Recall(MemoryUnit),
+    GroupMessage {
+        id: MemoryId,
+        message: Box<GroupMessage>,
+        trigger: bool,
+    },
+    ModelTurn(ModelTurn),
+    ToolResult(ToolResult),
+    Recall(RecallBatch),
+}
+
+struct RecallBatch {
+    trigger: MemoryId,
+    units: Vec<MemoryUnit>,
+    seeds: Vec<MemoryId>,
+    graph_json: String,
 }
 ```
 
@@ -36,11 +49,11 @@ enum ContextItem {
 - images 将内容中的受管媒体引用映射到本次可用的图片 URL/data URL；由调用方取得资源。
 - multimodal 来自 Provider 的能力声明，只控制输出是否包含图片块。
 
-Recall 只是给已有内容加上“这是召回资料”的标记。这里复用 `MemoryUnit { id: MemoryId, content: MemoryContent }`，保留原群与记录引用；作者、时间等继续从原内容取得，不再声明一套召回正文类型或重复来源字段。普通 Content 不要求已经入库，不强制为未提交的模型回合分配 MemoryId。
+群消息带有稳定的 MemoryId 和显式 trigger 标记，由 Agent 决定它属于触发消息还是普通聊天。Context 不扫描 CQ 来重新推断触发条件。模型回合与工具结果沿用原始类型，不额外要求为未提交的模型回合分配 MemoryId。
 
-Context 不接收 RecallRegion、图、分数或种子标记。检索侧在自己的结果中保留这些信息，调用方选好单元后逐项包成 Recall，按希望发送的次序交付。召回标记属于格式化输入，不加入持久 MemoryContent 枚举，也不使召回结果变成新的记忆单元。
+RecallBatch 表示一次召回操作，保留触发消息引用、完整来源单元、种子和图信息。每个来源单元仍复用 `MemoryUnit { id: MemoryId, content: MemoryContent }`；作者、时间等从原内容取得。graph_json 保留检索节点、浮点分数和关联边，作为 XML 转义后的 JSON 证据元数据输出；Context 不解析分数、不扩散图，也不重新选择种子。召回包装不加入持久 MemoryContent 枚举，不产生新的记忆单元。
 
-Agent 对每条 @ 分别召回，把其 Recall 项放在对应 GroupMessage 前，例如 `Content(普通消息) → Recall(历史资料) → Content(@消息)`。同一输入批次可以包含多组这样的项。Context 仅按传入顺序格式化，不扫描 @、合并召回或把它们集中移动到上下文开头；触发与位置规则见[Agent 设计](20-agent-state-and-window.md#21-每条触发消息的召回位置)。
+Agent 对每条 @ 分别召回，把整个 RecallBatch 放在对应触发 GroupMessage 前，例如 `GroupMessage(trigger=false) → RecallBatch(for=12) → GroupMessage(sequence=12, trigger=true)`。同一输入批次可以包含多组这样的项。Context 仅按传入顺序格式化，不把它们集中移动到上下文开头；触发与位置规则见[Agent 设计](20-agent-state-and-window.md#21-每条触发消息的召回位置)。
 
 返回值就是 messages，不附带裁剪方案、召回种子集合或 ContextView。调用方使用现有 Provider 请求类型：
 
@@ -56,11 +69,17 @@ let request = Request {
 
 ## 3. Agent 提示词
 
-模块声明 `/prompt/agent: String`，提供默认值。例如：
+模块声明 `/prompt/agent: String`，存放可配置人格，提供英文默认值：
 
-> 你是一个在群聊中协助参与者的机器人。根据当前对话自然回应；需要外部信息或操作时，使用当前提供的工具。清楚区分已知信息、历史记录和推测。
+> Be helpful, natural, and attentive to the participants in the conversation. Clearly distinguish established information, historical evidence, and uncertainty.
 
-格式化时，将该配置与简短的输入格式说明、identity 合成开头的 System 消息，再依次转换 items。输入格式说明解释来源标签、召回资料和图片引用；Assistant 输出及工具调用继续使用原生协议。
+开头的 System 消息严格按以下顺序拼接：
+
+1. 包内英文 Markdown 系统提示词 [system.md](../plugins/context/src/system.md)，详细定义请求顺序、群消息、触发点、召回批次、来源与图关系、原生工具序列、CQ 和多模态内容。
+2. `## Runtime identity values`：在 `runtime_identity` 中注入 Bot 账号和当前群。
+3. `## Persona`：原样附加 `/prompt/agent`，不翻译或改写用户的人格配置。
+
+人格负责角色和语气，输入契约负责来源解释。提示词明确说明召回只为对应触发点提供候选证据、跨群来源不能改写为本群发言、关联边不等于事实或同一话题、检索排列不一定是时间顺序。当前会话与实际问题决定回答目标。输入标签不约束模型的输出；Assistant、thinking 和 tool_calls 均沿用原生协议。
 
 提示词在 create 读取为实例内不可变值，修改配置并热重载后用于新的 format 调用。配置读权限为 SelfModule，写权限为 `/user/admin`；format 通过静态 callers 授权给调用模块。Context 的长期配置只有提示词，没有预算、保留数量或会话状态。
 
@@ -68,16 +87,18 @@ let request = Request {
 
 | 输入 | 输出 |
 |---|---|
-| 普通群消息 | User：来源头、规范 CQ 正文及可用图片块 |
+| 群消息 | User：group_message，含稳定引用、trigger、原始来源与规范 CQ 正文 |
 | 模型回合 | 原生 Assistant，保留正文、tool_calls、refusal、reasoning_content |
 | 工具结果 | 原生 Tool，保留 tool_call_id 与结果正文 |
-| Recall 包装的内容 | User 中明确标为历史证据的容器，保留原来源与内容类型 |
+| RecallBatch | 一个 User 中的 memory_retrieval，包含 records 和 retrieval_graph |
 
-群消息来源包括原群、作者账号、消息时间及可用昵称/群名片。匿名来源单独标识，不输出匿名 flag 或将占位账号作为真实用户。当前实现每条群消息输出一个 User，保持输入次序。
+群消息使用 `<group_message source="conversation" ...><body encoding="cq">...</body></group_message>`。保留原群、消息 ID、时间、Bot 账号、消息子类型、作者账号及可用昵称、群名片、群角色、头衔等发送者信息。匿名来源单独标识，不输出匿名 flag 或将占位账号作为真实用户。每条群消息输出一个 User，保持输入次序。
+
+召回使用 `<memory_retrieval source="archive" for_group_id="..." for_sequence="...">` 标明服务的触发点。每个 `<memory_record>` 保留原群、序号、SAME_GROUP/CROSS_GROUP、来源类型和 seed 标记；来源群消息使用 `source="archive"`，模型与工具来源分别使用 `archived_assistant` 和 `archived_tool_result`。`retrieval_graph` 保留 JSON 图及其原引用。Context 不把激活度排序伪装为对话时间顺序。
 
 CQ 来自类型化消息段；字符串、数组和单段输入都通过 `forest_onebot::cq` 转换，不读取可能过时的 raw_message。CQ 转义后再作 XML 转义，字面 CQ 文本与真实消息段保持区别。嵌套转发递归保留 CQ 参数层次及图片位置。规则依据 [OneBot CQ 字符串格式](https://github.com/botuniverse/onebot-11/blob/master/message/string.md)与[消息段定义](https://github.com/botuniverse/onebot-11/blob/master/message/segment.md)。
 
-召回中的 ModelTurn/ToolResult 标记其 assistant/tool 来源，作为历史资料展示；不作为本轮顶层工具调用或工具结果回放。历史 reasoning 不进入召回正文，当前工作中的 reasoning_content 保持原值。原群身份始终保留，跨群资料不改写成当前群消息。Context 只格式化传入的完整内容，不处理检索图或重新选择种子；检索命中的文本跨度由调用方用于定位并回读对应单元。
+召回中的 ModelTurn/ToolResult 作为历史资料展示，不作为本轮顶层工具调用或工具结果回放。历史 reasoning 不进入召回正文，当前工作中的 reasoning_content 保持原值。原群身份始终保留，跨群资料不改写成当前群消息。检索命中的文本跨度由调用方用于定位并回读对应完整单元。CQ reply 保留目标 ID；格式化本身不联网获取目标正文，提示词明确 ID 不代表已经拿到被引用内容。
 
 工具调用及其结果的完整性、次序由调用方构造。Context 按类型转换，不修补缺失结果、不生成调用 ID，也不重排工具链。
 
@@ -104,4 +125,4 @@ cargo test --offline --locked -p forest-context-module --test wasm -j 2
 
 生成包位于 `packages/context`，包含 Wasm、Manifest 和 `format.input.schema`、`format.output.schema`。两个 Schema 语言文件可由其他语言的模块作者独立读取；Manifest 中保存等价的类型图，宿主据此检查输入、输出及热重载兼容性。配置和热重载继续使用已有管理能力。
 
-实际 Wasm 验证了来源转义、输入顺序、原生工具与 reasoning 保留、跨群召回、匿名来源、同批多图及嵌套转发、关闭多模态后的文字一致性、配置跨重载生效和不同群调用之间无状态串扰。还使用不构造本插件 Rust 类型的 Value DSL 输入完成调用，并依据 Schema 语言验证输入输出。测试使用隔离调度器与临时配置库，没有接入 OneBot 或调用在线模型。
+实际 Wasm 验证了英文契约与人格顺序、触发点与整批召回的对应关系、图信息保留、来源转义、原生工具与 reasoning 保留、跨群召回、匿名来源、同批多图及嵌套转发、关闭多模态后的文字一致性、配置跨重载生效和不同群调用之间无状态串扰。还使用不构造本插件 Rust 类型的 Value DSL 输入完成调用，并依据 Schema 语言验证输入输出。测试使用隔离调度器与临时配置库，没有接入 OneBot 或调用在线模型；这些检查验证协议结构，不代替真实模型对提示词的行为验证。

@@ -29,7 +29,8 @@
 | [Agent 实现与启动](22-agent-implementation.md) | 包构建、配置、工具路由、启动命令及实际验证范围 |
 | [DeepSeek 网页工具](23-deepseek-web.md) | 独立 Wasm 搜索/抓取插件，默认联网工具与原始 HTTP 分工 |
 | [Wolfram Alpha 工具](24-wolfram-alpha.md) | 独立 Wasm 计算插件、连接配置与工具网关路由 |
-| [文档渲染方案讨论](25-document-rendering-proposal.md) | 待实施建议；Typst Wasm、浏览器服务及受管媒体边界 |
+| [文档渲染与受管媒体](25-document-rendering-proposal.md) | 独立 Typst/Media Wasm 包、PNG 引用、CQ 发送及媒体持久化 |
+| [群聊 Shell 与学校帮助](26-group-shell-and-school-help.md) | 授权管理 Wasm 包、共享宿主管理端口与 NPUCraft 帮助回复 |
 
 文档中的“待定”表示尚未形成决定。编写对应实现前应继续讨论，不能把示例名称或先前提案直接固定为接口。
 

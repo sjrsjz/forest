@@ -1,6 +1,7 @@
 pub mod content;
 pub mod context;
 mod delivery;
+pub mod managed;
 pub mod memory;
 pub mod provider;
 mod state;
@@ -214,7 +215,7 @@ pub fn manifest() -> Manifest {
                 memory::OBJECT,
                 "/project",
             ),
-            dependency::<String, Result<String, memory::Error>>(memory::OBJECT, "/media/read"),
+            dependency::<String, Result<managed::Blob, managed::Error>>(managed::OBJECT, "/get"),
             dependency::<context::FormatInput, Result<Vec<provider::Message>, context::Error>>(
                 context::OBJECT,
                 context::FORMAT,

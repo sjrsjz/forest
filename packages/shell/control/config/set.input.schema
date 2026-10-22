@@ -1,0 +1,2 @@
+schema T0 = {target: {key: string, object: string}, value: string};
+export T0;

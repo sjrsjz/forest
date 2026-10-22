@@ -17,6 +17,7 @@ crates/
   forest-sdk/            类型化处理器、来宾 Future 与固定导出
   forest-runtime/        Wasmtime、调度、生命周期、ACL、I/O、notifier
   forest-webui/          可选 Inspector HTTP/SSE、受限模块管理与管理员会话
+  forest-control/        WebUI 共用包目录与显式授权的宿主管理端口
   forest-cli/            可执行宿主与 OneBot HTTP/WebSocket 接入
 webui/                  Vue、TypeScript、Mermaid 前端，构建产物为 dist
 plugins/forest-test/     #forest-test 示例模块与打包程序
@@ -28,6 +29,10 @@ plugins/agent/            每群工作循环、持续点与短期窗口 Wasm 模
 plugins/agent-tools/      原生工具声明与显式模块调用网关 Wasm 模块
 plugins/deepseek-web/     DeepSeek 搜索与 Markdown 网页抓取 Wasm 插件
 plugins/wolfram-alpha/    Wolfram Alpha LLM API 精确计算 Wasm 插件
+plugins/typst/            中文、公式与文档排版 Wasm 插件
+plugins/media/            独立受管图片存储 Wasm 插件
+plugins/shell/            按用户与群授权的 Forest 管理命令 Wasm 插件
+plugins/npucraft/         学校 MC 服务器地图与帮助回复 Wasm 插件
 packages/forest-test/    生成的外部 Manifest 与 module.wasm
 data/                   默认运行数据，不进入 Git
 ```
@@ -66,3 +71,7 @@ OneBot 使用方式见 [API 库说明](crates/forest-onebot/README.md)，选型�
 [调度器状态机与所有权](doc/12-scheduler-state-machine.md)细化六个模块阶段、Idle/Advancing 执行权、接口许可、请求额度、一次性结果出口及唤醒规则。不变量依靠状态构造和所有权转移保持；集成测试使用真实 Wasm 验证并发、抢占、热重载与 SQLite 写入交接。Agent、Memory 与工具网关均为独立 Wasm 包，构建与使用见[Agent 实现与启动](doc/22-agent-implementation.md)。
 
 旧 Python 实现及旧设计文档位于 `archive/python-2026-10-19`，最后快照为 `2d560a69`。其他旧分支及 worktree 快照分别保存在 `archive/master-2026-10-19`、`archive/control-payloads-2026-10-19`、`archive/shell-contracts-2026-10-19`。旧文档不再指导新主线实现。
+
+文档与公式可通过 `typst_render` 工具生成 PNG；工具只返回受管媒体引用，Agent 在正文中使用返回的 CQ 图片码发送。见 [文档渲染与受管媒体](doc/25-document-rendering-proposal.md)。
+
+群聊管理命令以 `#forest` 开头，授权与命令见[群聊 Shell 与学校帮助](doc/26-group-shell-and-school-help.md)。Shell 与 NPUCraft 为独立可热重载的 Wasm 包，可在 WebUI 本地包页面加载。

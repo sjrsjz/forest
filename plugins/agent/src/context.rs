@@ -1,8 +1,9 @@
 //! Local interface mapping. Other modules use the Schema/Value contract.
 use crate::{
-    content::{MemoryContent, MemoryUnit},
+    content::{MemoryId, MemoryUnit, ModelTurn, ToolResult},
     provider::ImageUrl,
 };
+use forest_onebot::forest::GroupMessage;
 use forest_serde::{DeriveSchema, DeriveValue};
 
 pub const OBJECT: &str = "/module/context";
@@ -27,8 +28,23 @@ pub struct PromptIdentity {
 
 #[derive(Clone, Debug, DeriveSchema, DeriveValue)]
 pub enum ContextItem {
-    Content(MemoryContent),
-    Recall(MemoryUnit),
+    GroupMessage {
+        id: MemoryId,
+        message: Box<GroupMessage>,
+        trigger: bool,
+    },
+    ModelTurn(ModelTurn),
+    ToolResult(ToolResult),
+    Recall(RecallBatch),
+}
+
+/// One retrieval operation, immediately before the group message that requested it.
+#[derive(Clone, Debug, DeriveSchema, DeriveValue)]
+pub struct RecallBatch {
+    pub trigger: MemoryId,
+    pub units: Vec<MemoryUnit>,
+    pub seeds: Vec<MemoryId>,
+    pub graph_json: String,
 }
 
 /// One mapping per managed media reference. No resource is fetched by Context.

@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {CallingModule, Configuration(string), Inspection(string), Management(string)}), Ok([variant {Invalid {directory: string, message: string}, Ready {directory: string, object: string, version: string}}])};
+export T0;

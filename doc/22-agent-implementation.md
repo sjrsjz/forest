@@ -8,7 +8,9 @@ Agent、Memory、工具网关是三个独立 Wasm 包，分别位于 `plugins/ag
 |---|---|---|
 | `/module/agent` | `/group_message`、`/status` | 接收全部允许群消息、每群一个工作循环、持续点、窗口和诊断 |
 | `/module/memory` | `/accept`、`/archive`、`/link`、`/delivery` | 不可变原文、群内位置、归档集合、实际种子联想和发送回执关联 |
-| `/module/memory` | `/read`、`/recall`、`/project`、`/media/read` | 已归档原文读取、全局召回、受管媒体和格式化用投影 |
+| `/module/memory` | `/read`、`/recall`、`/project` | 已归档原文读取、全局召回和格式化用投影 |
+| `/module/media` | `/put`、`/register`、`/get` | 受管图片与入站附件持久化 |
+| `/module/typst` | `/render` | 中文、公式与文档渲染为受管 PNG 引用 |
 | `/module/memory` | `/index/advance`、`/index/rebuild`、`/status` | 持久索引待办、显式重建和索引状态 |
 | `/module/agent-tools` | `/describe`、`/invoke` | 原生工具声明与显式模块路由 |
 | `/module/deepseek-web` | `/search`、`/fetch` | 默认网页搜索与 Markdown 抓取 |
@@ -27,7 +29,7 @@ Agent、Memory、工具网关是三个独立 Wasm 包，分别位于 `plugins/ag
 
 每轮选取截至最后一条已接纳 @ 的前缀，保存在会话的 staged 队列中，然后逐条 @ 查询。等待期间的新消息不扩张该批次。召回分别放在各自 @ 之前；所有工具结果闭合后，才将下一批群消息接入标准 API 请求。请求头、工具声明和已发送 messages 在同一次工作内保持原值，仅追加新内容。
 
-窗口按单元数计量，默认高水位 256、低水位 128。静默与首次请求冻结前可以归档并移除旧前缀；开始模型工作后只追加。原生 Assistant 与其工具结果是一个不可拆分块。Recall 只保存引用，不再次归档或嵌入。裁剪不调用摘要模型，没有估算 token 超限硬阻断。
+窗口按单元数计量，默认高水位 256、低水位 128。静默与首次请求冻结前可以归档并移除旧前缀；开始模型工作后只追加。原生 Assistant 与其工具结果是一个不可拆分块。RecallBatch 保存原记录引用、种子与图元数据，不再次归档或嵌入。每条触发点对应自己的召回批次，格式化时保持完整批次和来源。裁剪不调用摘要模型，没有估算 token 超限硬阻断。
 
 Provider 失败只记录一次；有新的 @ 则接入新输入、清除旧待报告错误并继续。无持续点时排空普通尾部并静默；仍有错误则用 `send` 提交错误报告。正常正文在工具执行前发送，支持文本、@、回复、表情和受管图片 CQ。图片引用由 Memory 解析为发送用数据，不让模型直接指定服务器文件。
 
@@ -51,7 +53,7 @@ Qdrant 保存向量和原群、序号引用。查询采用 [Query API](https://a
 ./scripts/build-agent.ps1
 ```
 
-该脚本构建八个独立 Wasm 包及其外部 Manifest/Schema，编译并行数为 2。
+该脚本构建十个独立 Wasm 包及其外部 Manifest/Schema，每次编译并行数为 2。
 
 配置项如下，修改后热重载所属模块生效：
 
@@ -85,7 +87,7 @@ cargo run --locked --offline -j 2 -p forest-cli -- --package packages/agent --ev
 
 ## 5. 工具扩展
 
-默认网关提供 `web_search`、`web_fetch`、`http_request`、`wolfram_alpha` 和 `memory_read`。网页搜索及阅读优先使用独立 [DeepSeek Web 插件](23-deepseek-web.md)，返回搜索摘要和 Markdown；原始 HTTP 保留用于明确的 HTTP/API 操作。[Wolfram Alpha 插件](24-wolfram-alpha.md)提供精确计算，连接配置可通过管理端或配置辅助程序的 `FOREST_WOLFRAM_APP_ID`、`FOREST_WOLFRAM_ENDPOINT` 设置。记忆工具按原群和序号读取已归档资料，保留来源，不输出历史思考。
+默认网关提供 `web_search`、`web_fetch`、`http_request`、`wolfram_alpha`、`typst_render` 和 `memory_read`。网页搜索及阅读优先使用独立 [DeepSeek Web 插件](23-deepseek-web.md)，返回搜索摘要和 Markdown；原始 HTTP 保留用于明确的 HTTP/API 操作。[Wolfram Alpha 插件](24-wolfram-alpha.md)提供精确计算，连接配置可通过管理端或配置辅助程序的 `FOREST_WOLFRAM_APP_ID`、`FOREST_WOLFRAM_ENDPOINT` 设置。记忆工具按原群和序号读取已归档资料，保留来源，不输出历史思考。
 
 外部工具接口接受 `Invocation { group_id, bot_id, name, arguments_json }`，返回 `Result<String, Error>`。路由按工具名选择明确的 `(对象, 接口)`，调用仍经过 Manifest uses 和目标 ACL；参数不参与选择任意接口。把自定义路由列表交给打包程序，可同时生成静态依赖：
 
@@ -109,3 +111,5 @@ cargo test --locked --offline -j 2 -p forest-runtime --lib sqlite_tests
 这组模拟服务测试不衡量真实模型相关性、供应商延迟或十万/百万向量容量。首次实现验证时 Docker 引擎未运行，未连接真实 Qdrant 或发送真实群消息。现有 Vue 控制台提供模块观测和加载/重载；专门的 Agent 配置表单与记忆浏览页面尚未增加。
 
 2026-10-22 的真实启动观察已连接 Qdrant v1.19.2、固定 Qwen VL 模型、配置的 Chat Completions 模型与 OneBot 网关。用户在授权测试群发送 @ 后，实际完成了图片能力查询、文本向量化、Qdrant 查询、模型响应和发送回执；原始群消息与带 reasoning_content 的模型回合各保存一条，随后回到静默，六个模块仍为 Serving。新库尚无归档单元，此次召回为空；未声称验证了真实记忆命中质量或工具执行。原有 AliceBot 服务保留运行。
+
+`typst_render` 通过独立排版包与 Media 包产生受管图片；将返回的 `cq` 放进 assistant 正文即可发送，见 [文档渲染与受管媒体](25-document-rendering-proposal.md)。

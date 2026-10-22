@@ -240,6 +240,20 @@ pub fn default_routes() -> Vec<Route> {
             "/query",
         ),
         route(
+            "typst_render",
+            "Render a Typst document, equations or tables into PNG pages. Use Typst syntax, not Markdown or LaTeX. Defaults: 480pt width, automatic height, 12pt Chinese text, 2 pixels/pt; source can override page/text settings. Chinese and mathematical fonts are included. Returns page dimensions, managed media references and ready-to-send CQ image codes; include the returned cq in your assistant reply to send the images. No image bytes appear in the tool result. Optional images maps relative virtual file names to existing media: references for image(\"name.png\"). File system, package downloads and current date are unavailable. Compilation diagnostics are returned for you to correct the source.",
+            serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "source":{"type":"string","minLength":1,"maxLength":100000,"description":"Typst source, for example: = 积分结果\n$ integral_0^pi x^2 sin(x) dif x = pi^2 - 4 $"},
+                    "images":{"type":"object","additionalProperties":{"type":"string"},"description":"Virtual relative image file names mapped to managed media references."}
+                },
+                "required":["source"],"additionalProperties":false
+            }),
+            "/module/typst",
+            "/render",
+        ),
+        route(
             "memory_read",
             "Read up to 16 archived memory units by original group and sequence. Original source is preserved.",
             serde_json::json!({

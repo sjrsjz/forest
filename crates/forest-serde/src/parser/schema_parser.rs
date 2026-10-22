@@ -13,6 +13,7 @@ pub enum AstSchema {
     Bool,
     String,
     Bytes(usize),
+    ByteBuffer,
     Option(Box<AstSchema>),
     Map(Box<AstSchema>, Box<AstSchema>),
     Array(Box<AstSchema>),
@@ -107,6 +108,7 @@ fn resolve_type(
         AstSchema::Bool => Ok(SchemaEnum::Bool),
         AstSchema::String => Ok(SchemaEnum::String),
         AstSchema::Bytes(n) => Ok(SchemaEnum::Bytes(*n)),
+        AstSchema::ByteBuffer => Ok(SchemaEnum::ByteBuffer),
         AstSchema::Option(inner) => Ok(SchemaEnum::Option(Box::new(resolve_type(
             inner,
             name_to_index,

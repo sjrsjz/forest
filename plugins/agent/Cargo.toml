@@ -15,7 +15,10 @@ forest-serde = { path = "../../crates/forest-serde" }
 forest-onebot = { path = "../../crates/forest-onebot", features = ["forest"] }
 serde.workspace = true
 serde_json.workspace = true
+base64 = "0.22.1"
 [dev-dependencies]
+forest-media = { path = "../media" }
+forest-typst = { path = "../typst" }
 forest-memory-module = { path = "../memory" }
 forest-context-module = { path = "../context" }
 forest-openai-provider = { path = "../openai-provider" }

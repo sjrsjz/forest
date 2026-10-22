@@ -12,7 +12,7 @@ use forest_protocol::{manifest::callers, *};
 use forest_sdk::{Handlers, Module, host};
 use std::rc::Rc;
 
-const DEFAULT_PROMPT: &str = "你是一个在群聊中协助参与者的机器人。根据当前对话自然回应；需要外部信息或操作时，使用当前提供的工具。清楚区分已知信息、历史记录和推测。";
+const DEFAULT_PROMPT: &str = "Be helpful, natural, and attentive to the participants in the conversation. Clearly distinguish established information, historical evidence, and uncertainty.";
 
 pub struct Context {
     prompt: String,
