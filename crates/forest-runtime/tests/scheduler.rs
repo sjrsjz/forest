@@ -224,7 +224,7 @@ async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
     );
     let inspected = scheduler.inspector().snapshot().unwrap();
     assert_eq!(inspected.modules.len(), 2);
-    assert_eq!(inspected.hosts.len(), 1);
+    assert_eq!(inspected.hosts.len(), 2);
     assert_eq!(inspected.modules[0].published.version, "1");
     assert!(matches!(
         inspected.modules[0].lifecycle,
@@ -925,4 +925,52 @@ async fn force_waits_for_submitted_sqlite_write_before_recreating_instance() {
     );
     scheduler.shutdown(StopMode::Drain).await.unwrap();
     store.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn large_frames_cross_guest_and_host_boundaries_without_trapping() {
+    let temp = tempfile::tempdir().unwrap();
+    let scheduler = Scheduler::new(
+        temp.path().join("config.sqlite3"),
+        RuntimeOptions {
+            data_directory: temp.path().join("data"),
+            ..RuntimeOptions::default()
+        },
+    )
+    .await
+    .unwrap();
+    observe(&scheduler);
+    let package = scheduler
+        .package(package(temp.path(), "large", "/module/probe-a", false))
+        .await
+        .unwrap();
+    scheduler.load(package).await.unwrap();
+    // The old 16 MiB ceiling failed in SDK input, host results and exported output.
+    let input = vec![0x5au8; 24 * 1024 * 1024];
+    let output = scheduler
+        .call::<_, Result<Vec<u8>, String>>(
+            "/user/test".parse().unwrap(),
+            "/module/probe-a".parse().unwrap(),
+            "/payload".parse().unwrap(),
+            &input,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output, input);
+    assert_eq!(
+        scheduler.phase(&"/module/probe-a".parse().unwrap()),
+        Some(ModulePhase::Serving)
+    );
+    assert_eq!(
+        call::<_, String>(
+            &scheduler,
+            "/module/probe-a",
+            "/echo",
+            &"still serving".to_owned()
+        )
+        .await,
+        "still serving"
+    );
+    scheduler.shutdown(StopMode::Drain).await.unwrap();
 }

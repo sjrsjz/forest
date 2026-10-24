@@ -15,8 +15,9 @@ forest-serde = { path = "../../crates/forest-serde" }
 forest-onebot = { path = "../../crates/forest-onebot", features = ["forest"] }
 serde.workspace = true
 serde_json.workspace = true
-base64 = "0.22.1"
 [dev-dependencies]
+base64 = "0.22.1"
+forest-message-output = { path = "../message-output" }
 forest-media = { path = "../media" }
 forest-typst = { path = "../typst" }
 forest-memory-module = { path = "../memory" }
@@ -27,6 +28,7 @@ forest-agent-tools = { path = "../agent-tools" }
 forest-deepseek-web = { path = "../deepseek-web" }
 forest-wolfram-alpha = { path = "../wolfram-alpha" }
 forest-onebot-tools = { path = "../onebot-tools" }
+forest-ai-paint = { path = "../ai-paint" }
 axum = "0.8.8"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 forest-runtime = { path = "../../crates/forest-runtime" }

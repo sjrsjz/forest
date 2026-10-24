@@ -117,6 +117,8 @@ async fn wasm_tools_query_native_onebot_and_send_managed_cq_with_real_receipts()
                 "forest-onebot-tools",
                 "-p",
                 "forest-media",
+                "-p",
+                "forest-message-output",
                 "--lib"
             ])
             .current_dir(&root)
@@ -127,7 +129,14 @@ async fn wasm_tools_query_native_onebot_and_send_managed_cq_with_real_receipts()
     let temp = tempfile::tempdir().unwrap();
     let media = temp.path().join("media");
     let tools = temp.path().join("tools");
+    let output = temp.path().join("output");
     package(&root, &media, "forest_media", forest_media::manifest());
+    package(
+        &root,
+        &output,
+        "forest_message_output",
+        forest_message_output::manifest(),
+    );
     package(
         &root,
         &tools,
@@ -156,6 +165,7 @@ async fn wasm_tools_query_native_onebot_and_send_managed_cq_with_real_receipts()
             vec![
                 scheduler.package(&media).await.unwrap(),
                 scheduler.package(&tools).await.unwrap(),
+                scheduler.package(&output).await.unwrap(),
             ],
             &["/module/onebot-tools".parse().unwrap()],
         )

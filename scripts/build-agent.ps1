@@ -11,6 +11,8 @@ $packages = @(
     @('forest-deepseek-web', 'package-deepseek-web'),
     @('forest-wolfram-alpha', 'package-wolfram-alpha'),
     @('forest-onebot-tools', 'package-onebot-tools'),
+    @('forest-message-output', 'package-message-output'),
+    @('forest-ai-paint', 'package-ai-paint'),
     @('forest-agent-tools', 'package-agent-tools'),
     @('forest-agent-module', 'package-agent')
 )

@@ -121,9 +121,11 @@ trap 后保留 Failed 槽位，回收实例，不自动重启；外部可 load �
 
 buffer 低 32 位为指针，高 32 位为长度。输入由宿主经 guest alloc 分配、复制、传入入口、guest free 归还；输出由 SDK 分配，宿主复制解码后 guest free。Force/trap 后不得再执行 free 等任何来宾辅助函数。
 
-create 输入为 CreateContext，invoke 为 Invocation，两者只建立任务。poll 推进 Future，返回 `Pending`、`Output(Value)` 或 `Lifecycle(Result<(), String>)`。参数和结果收尾均属于同一次独占推进。
+create 输入为 CreateContext，invoke 为 Invocation，两者只建立任务。poll 推进 Future，返回 `Pending`、`Output(Value)`、`Lifecycle(Result<(), String>)` 或 `FrameTooLarge`。最后一种表示结果无法用 wasm32 帧长度表达，调度器仅以 `DispatchError::FrameTooLarge` 结束该调用，不把它视为模块 trap。参数和结果收尾均属于同一次独占推进。
 
-ABI 结构与操作结构采用 `forest_protocol::abi` 固定小端、定长整数 bincode 编码；接口值和配置值仍是 Forest Schema/Value。单帧最多 16 MiB，拒绝尾随字节。此边界没有版本协商。
+ABI 结构与操作结构采用 `forest_protocol::abi` 固定小端、定长整数 bincode 编码；接口值和配置值仍是 Forest Schema/Value。帧长度按 wasm32 的 `u32` 表达，不另设 16 MiB 的固定传输上限。解码受实际输入字节长度约束并拒绝尾随字节，指针与长度必须对应实例线性内存中的有效范围；实例内存与待处理请求仍分别受运行时内存配额、队列字节配额约束。编码长度无法表达时返回调度错误，不能由 SDK `expect` 引发模块 panic。此边界没有版本协商。
+
+宿主 I/O 上限保存在配置对象 `/core/runtime` 的 `/io` 中，HTTP 响应、WebSocket 单条消息与帧、受管文件读取分别使用 `http_response_mib`、`websocket_message_mib`、`file_read_mib`，默认各 64 MiB。每项以 MiB 为单位，允许 1 至 4095；最大值来自 wasm32 帧长度表示能力。新 HTTP 请求和文件读取在操作开始时读取设置，已有操作保留开始时的上限；WebSocket 在建连时固定消息与帧上限，现有连接不被设置写入打断。配置持久化，管理端写入沿用配置 set 和 `/user/admin` ACL；Wasm 模块不能修改宿主上限。管理端配置写请求本身保持独立的 16 MiB 请求体限制。I/O 设置不用于判断模型上下文预算。
 
 这里描述的是字节协议，不是 Rust 对象内存布局。非 Rust 模块无须导入 Rust trait、crate 或 TypeId；需要实现相同的字节编码、任务推进和资源所有权约定。模块间调用按对象与接口地址派发，双方分别以自己的类型表示相同 Schema，在线性内存之间传递编码后的 Value。Manifest 的类型图和打包附带的 `.schema` 文本均可在不执行 Wasm、不读取 Rust 源码的情况下取得。
 

@@ -1,5 +1,5 @@
 use crate::host::imports;
-use forest_protocol::abi;
+use forest_protocol::{DispatchError, DispatchResult, abi};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     cell::{Cell, RefCell},
@@ -14,6 +14,7 @@ pub(crate) type Start = unsafe extern "C" fn(u32, u32) -> u64;
 
 enum State {
     New(Start, Vec<u8>),
+    Rejected(DispatchError),
     Pending { id: u64, task: u64 },
     Done,
 }
@@ -74,15 +75,18 @@ pub struct Operation<T> {
 impl<T> Operation<T> {
     pub(crate) fn new(start: Start, input: &impl Serialize) -> Self {
         Self {
-            state: State::New(start, abi::encode(input).expect("host input encoding")),
+            state: match abi::encode(input) {
+                Ok(bytes) => State::New(start, bytes),
+                Err(_) => State::Rejected(DispatchError::FrameTooLarge),
+            },
             result: PhantomData,
         }
     }
 }
 
-impl<T: DeserializeOwned> Future for Operation<T> {
-    type Output = T;
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<T> {
+impl<T: DeserializeOwned> Future for Operation<DispatchResult<T>> {
+    type Output = DispatchResult<T>;
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         let (id, task) = match &this.state {
             State::New(start, bytes) => {
@@ -94,6 +98,11 @@ impl<T: DeserializeOwned> Future for Operation<T> {
                 )
             }
             State::Pending { id, task } => (*id, *task),
+            State::Rejected(error) => {
+                let error = error.clone();
+                this.state = State::Done;
+                return Poll::Ready(Err(error));
+            }
             State::Done => panic!("completed host operation polled"),
         };
         this.state = State::Pending { id, task };

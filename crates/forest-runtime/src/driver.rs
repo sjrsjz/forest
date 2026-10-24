@@ -161,6 +161,11 @@ async fn run_guest(
                 instance.mailbox.retire(task.signal.id);
                 core.complete(instance, task.started, Ok(value));
             }
+            Ok(Step::FrameTooLarge) => {
+                instance.operations.finish_task(task.signal.id).await;
+                instance.mailbox.retire(task.signal.id);
+                core.complete(instance, task.started, Err(DispatchError::FrameTooLarge));
+            }
             other => {
                 let error = if instance.force.load(Ordering::Acquire) {
                     DispatchError::Interrupted
@@ -239,6 +244,7 @@ async fn lifecycle(
         match step {
             Step::Lifecycle(result) => return result.map_err(anyhow::Error::msg),
             Step::Output(_) => bail!("lifecycle returned ordinary interface output"),
+            Step::FrameTooLarge => return Err(DispatchError::FrameTooLarge.into()),
             Step::Pending => {}
         }
         loop {

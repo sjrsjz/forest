@@ -1,8 +1,8 @@
 pub mod content;
 pub mod context;
 mod delivery;
-pub mod managed;
 pub mod memory;
+pub mod output;
 pub mod provider;
 mod state;
 pub mod tools;
@@ -224,7 +224,6 @@ pub fn manifest() -> Manifest {
                 memory::OBJECT,
                 "/project",
             ),
-            dependency::<String, Result<managed::Blob, managed::Error>>(managed::OBJECT, "/get"),
             dependency::<context::FormatInput, Result<Vec<provider::Message>, context::Error>>(
                 context::OBJECT,
                 context::FORMAT,
@@ -239,9 +238,9 @@ pub fn manifest() -> Manifest {
             ),
             dependency::<(), Result<tools::Catalog, tools::Error>>(tools::OBJECT, "/describe"),
             dependency::<tools::Invocation, Result<String, tools::Error>>(tools::OBJECT, "/invoke"),
-            dependency::<onebot::SendGroupMessage, Result<onebot::SentMessage, onebot::OneBotError>>(
-                onebot::OBJECT,
-                onebot::SEND_GROUP_MESSAGE,
+            dependency::<output::GroupOutput, Result<onebot::SentMessage, output::Error>>(
+                output::OBJECT,
+                output::SEND,
             ),
         ],
         subscriptions: vec![EventSubscription {

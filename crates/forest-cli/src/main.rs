@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, ensure};
 use clap::{ArgGroup, Parser, ValueEnum};
 use forest_onebot::{Client, http::HttpTransport};
-use forest_protocol::{SubjectPattern, abi, service::LogLevel};
+use forest_protocol::{SubjectPattern, service::LogLevel};
 use forest_runtime::{
-    LogWriter, RuntimeOptions, Scheduler, StopMode,
+    IoSettings, LogWriter, RuntimeOptions, Scheduler, StopMode,
     onebot::{self, GroupScope, OneBotIngress},
 };
 use futures::{SinkExt, StreamExt};
@@ -226,9 +226,12 @@ async fn main() -> Result<()> {
     }
     scheduler.load_roots(available, &roots).await?;
     let connection = async {
+        let settings = scheduler.io_settings();
         match (args.reverse_ws, args.events_ws) {
-            (Some(address), _) => reverse(address, ingress, event_token, logs).await,
-            (_, Some(url)) => connection::forward(url, event_token, ingress, actions, logs).await,
+            (Some(address), _) => reverse(address, ingress, event_token, logs, settings).await,
+            (_, Some(url)) => {
+                connection::forward(url, event_token, ingress, actions, logs, settings).await
+            }
             _ => unreachable!("CLI validates ingress selection"),
         }
     };
@@ -282,6 +285,7 @@ async fn reverse(
     ingress: OneBotIngress,
     token: Option<String>,
     logs: LogWriter,
+    settings: IoSettings,
 ) -> Result<()> {
     use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -316,7 +320,10 @@ async fn reverse(
             }
             Ok(response)
         };
-        let config = WebSocketConfig::default().max_message_size(Some(abi::MAX_FRAME_BYTES));
+        let limit = settings.get().await?.websocket_message_bytes();
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(limit))
+            .max_frame_size(Some(limit));
         match tokio_tungstenite::accept_hdr_async_with_config(stream, handshake, Some(config)).await
         {
             Ok(socket) => {

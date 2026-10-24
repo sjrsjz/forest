@@ -298,6 +298,15 @@ impl Inspector {
             .collect();
         modules.sort_by(|a, b| a.object.cmp(&b.object));
         let mut hosts = BTreeMap::new();
+        let runtime = crate::io_settings::RUNTIME_OBJECT.parse().unwrap();
+        hosts.insert(
+            runtime,
+            HostSnapshot {
+                object: crate::io_settings::RUNTIME_OBJECT.parse().unwrap(),
+                interfaces: vec![],
+                events: vec![],
+            },
+        );
         for (object, path, reentrant) in natives {
             hosts
                 .entry(object.clone())

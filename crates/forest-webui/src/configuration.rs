@@ -9,18 +9,20 @@ use axum::{
 };
 use forest_config::ConfigError;
 use forest_protocol::{
-    DispatchError, Token, abi,
+    DispatchError, Token,
     service::{ConfigKey, ConfigSet},
 };
 use forest_runtime::ConfigWriteError;
 use serde::Deserialize;
 use std::sync::Arc;
 
+const MAX_CONFIG_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 pub(crate) fn routes(auth: Arc<auth::Auth>) -> Router<App> {
     Router::new()
         .route("/form", get(form))
         .route("/set", post(set))
-        .layer(DefaultBodyLimit::max(abi::MAX_FRAME_BYTES))
+        .layer(DefaultBodyLimit::max(MAX_CONFIG_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(auth, auth::protect))
 }
 
@@ -66,11 +68,12 @@ async fn set(State(app): State<App>, Json(input): Json<SetValue>) -> Result<Stat
 
 fn write_error(error: ConfigWriteError) -> Error {
     let status = match &error {
+        ConfigWriteError::InvalidSetting(_) => StatusCode::UNPROCESSABLE_ENTITY,
         ConfigWriteError::Dispatch(DispatchError::Denied) => StatusCode::FORBIDDEN,
         ConfigWriteError::Dispatch(DispatchError::HostStopped) => StatusCode::SERVICE_UNAVAILABLE,
-        ConfigWriteError::Configuration(ConfigError::InvalidValue { .. }) => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
+        ConfigWriteError::Configuration(
+            ConfigError::InvalidValue { .. } | ConfigError::Decode(_),
+        ) => StatusCode::UNPROCESSABLE_ENTITY,
         ConfigWriteError::Configuration(
             ConfigError::UnknownEntity { .. } | ConfigError::UnknownKey { .. },
         ) => StatusCode::NOT_FOUND,

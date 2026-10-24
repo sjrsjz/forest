@@ -1,4 +1,5 @@
 use crate::core::{Core, Directory, Instance, State};
+use crate::{ConfigWriteError, IoSettings};
 use anyhow::Result;
 use cap_std::fs::Dir;
 use forest_protocol::{service::*, *};
@@ -22,6 +23,7 @@ use tokio_tungstenite::{
 };
 
 pub(crate) struct Services {
+    pub io: IoSettings,
     pub config: forest_config::ConfigStore,
     pub http: reqwest::Client,
     root: Arc<Dir>,
@@ -33,6 +35,7 @@ struct Socket {
     receive: tokio::sync::Mutex<SplitStream<SocketStream>>,
 }
 pub(crate) struct Resources {
+    io: IoSettings,
     pub files: Arc<Dir>,
     pub database: Arc<crate::sqlite::Database>,
     sockets: Mutex<HashMap<u64, Arc<Socket>>>,
@@ -40,17 +43,16 @@ pub(crate) struct Resources {
 }
 
 impl Services {
-    pub(crate) async fn config_set(
-        &self,
-        input: ConfigSet,
-    ) -> Result<(), forest_config::ConfigError> {
+    pub(crate) async fn config_set(&self, input: ConfigSet) -> Result<(), ConfigWriteError> {
+        IoSettings::validate_set(&input)?;
         self.config
             .apply([forest_config::Change::set(
                 input.target.object,
                 input.target.key,
                 input.value,
             )])
-            .await
+            .await?;
+        Ok(())
     }
     pub async fn new(
         config: forest_config::ConfigStore,
@@ -68,6 +70,7 @@ impl Services {
             http = http.proxy(reqwest::Proxy::all(proxy)?);
         }
         Ok(Self {
+            io: IoSettings::initialize(config.clone()).await?,
             config,
             http: http.build()?,
             root,
@@ -108,6 +111,7 @@ impl Services {
         })
         .await??;
         Ok(Arc::new(Resources {
+            io: self.io.clone(),
             files: Arc::new(files),
             database,
             sockets: Mutex::new(HashMap::new()),
@@ -118,6 +122,7 @@ impl Services {
         &self,
         request: HttpRequest,
     ) -> std::result::Result<HttpResponse, ServiceError> {
+        let limit = self.io.get().await.map_err(storage)?.http_response_bytes();
         let method = reqwest::Method::from_bytes(request.method.as_bytes())
             .map_err(|e| ServiceError::InvalidInput(e.to_string()))?;
         let mut builder = self.http.request(method, &request.url).body(request.body);
@@ -141,10 +146,10 @@ impl Services {
             .collect::<std::result::Result<Vec<_>, ServiceError>>()?;
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(transport)? {
-            if body.len() + chunk.len() > abi::MAX_FRAME_BYTES {
-                return Err(ServiceError::Transport(
-                    "HTTP response exceeds ABI frame limit".into(),
-                ));
+            if chunk.len() > limit - body.len() {
+                return Err(ServiceError::Transport(format!(
+                    "HTTP response exceeds configured limit of {limit} bytes"
+                )));
             }
             body.extend_from_slice(&chunk);
         }
@@ -163,11 +168,12 @@ impl Core {
         target: &ConfigKey,
         access: Access,
     ) -> DispatchResult<()> {
-        if directory.slots.get(&target.object).is_some_and(|slot| {
-            slot.access
-                .config
-                .check(subject, &target.object, &target.key, access)
-        }) {
+        let table = directory
+            .slots
+            .get(&target.object)
+            .map(|slot| &slot.access.config)
+            .unwrap_or(&directory.host_config);
+        if table.check(subject, &target.object, &target.key, access) {
             Ok(())
         } else {
             Err(DispatchError::Denied)
@@ -180,12 +186,13 @@ impl Core {
         target: &ConfigKey,
         access: Access,
     ) -> DispatchResult<()> {
-        let target_slot = directory
-            .slots
-            .get(&target.object)
-            .ok_or(DispatchError::Denied)?;
         let owner = &target.object;
-        if owner == &instance.object && matches!(target_slot.state, State::Creating { .. }) {
+        if owner == &instance.object
+            && directory
+                .slots
+                .get(owner)
+                .is_some_and(|slot| matches!(slot.state, State::Creating { .. }))
+        {
             return instance
                 .package
                 .access
@@ -207,6 +214,12 @@ impl Resources {
         &self,
         request: WebSocketRequest,
     ) -> std::result::Result<u64, ServiceError> {
+        let limit = self
+            .io
+            .get()
+            .await
+            .map_err(storage)?
+            .websocket_message_bytes();
         let mut wire = request.url.into_client_request().map_err(transport)?;
         for (name, value) in request.headers {
             wire.headers_mut().append(
@@ -216,7 +229,8 @@ impl Resources {
             );
         }
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_message_size(Some(abi::MAX_FRAME_BYTES));
+            .max_message_size(Some(limit))
+            .max_frame_size(Some(limit));
         let (stream, _) = tokio_tungstenite::connect_async_with_config(wire, Some(config), false)
             .await
             .map_err(transport)?;
@@ -288,15 +302,18 @@ impl Resources {
     }
     pub async fn file_read(&self, path: String) -> std::result::Result<Vec<u8>, ServiceError> {
         validate_path(&path)?;
+        let limit = self.io.get().await.map_err(storage)?.file_read_bytes();
         let root = self.files.clone();
         tokio::task::spawn_blocking(move || {
             use std::io::Read;
             let mut bytes = Vec::new();
             root.open(path)?
-                .take(abi::MAX_FRAME_BYTES as u64 + 1)
+                .take(limit as u64 + 1)
                 .read_to_end(&mut bytes)?;
-            if bytes.len() > abi::MAX_FRAME_BYTES {
-                return Err(std::io::Error::other("file exceeds ABI frame limit"));
+            if bytes.len() > limit {
+                return Err(std::io::Error::other(format!(
+                    "file exceeds configured read limit of {limit} bytes"
+                )));
             }
             Ok(bytes)
         })

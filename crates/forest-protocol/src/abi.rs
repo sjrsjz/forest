@@ -2,7 +2,8 @@ use crate::Value;
 use bincode::Options;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// A frame length is represented by a wasm32 `u32`, not a model/context budget.
+pub const MAX_FRAME_BYTES: usize = u32::MAX as usize;
 pub const PENDING: i64 = -1;
 
 /// ABI control integers; these never grant identity or survive an instance.
@@ -22,7 +23,7 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, bincode::Error> {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .with_little_endian()
-        .with_limit(MAX_FRAME_BYTES as u64)
+        .with_limit(bytes.len() as u64)
         .reject_trailing_bytes()
         .deserialize(bytes)
 }
@@ -40,4 +41,5 @@ pub enum Step {
     Pending,
     Output(Value),
     Lifecycle(Result<(), String>),
+    FrameTooLarge,
 }

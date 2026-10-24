@@ -21,6 +21,7 @@ serde_json.workspace = true
 base64 = "0.22.1"
 
 [dev-dependencies]
+forest-message-output = { path = "../message-output" }
 forest-runtime = { path = "../../crates/forest-runtime" }
 forest-media = { path = "../media" }
 tokio.workspace = true

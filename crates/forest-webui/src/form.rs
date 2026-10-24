@@ -65,13 +65,29 @@ fn resolve<'a>(schema: &'a Schema, mut node: &'a SchemaEnum) -> Option<&'a Schem
 }
 
 // New optional values and unselected enum payloads need an initial widget value.
-// Composite or recursive cases stay editable as Forest text instead of guessing.
+// Flat records of primitive fields also seed list items. Recursive/composite
+// fields stay editable as Forest text rather than inventing a default.
 fn initial(schema: &Schema, node: &SchemaEnum) -> Option<Value> {
     Some(match resolve(schema, node)? {
         SchemaEnum::String => Value::String(String::new()),
         SchemaEnum::Bool => Value::Bool(false),
         SchemaEnum::I32 => Value::I32(0),
         SchemaEnum::I64 => Value::I64(0),
+        SchemaEnum::Record(fields) => Value::Record(
+            fields
+                .iter()
+                .map(|(name, node)| {
+                    let node = resolve(schema, node)?;
+                    match node {
+                        SchemaEnum::String
+                        | SchemaEnum::Bool
+                        | SchemaEnum::I32
+                        | SchemaEnum::I64 => Some((name.clone(), initial(schema, node)?)),
+                        _ => None,
+                    }
+                })
+                .collect::<Option<_>>()?,
+        ),
         _ => return None,
     })
 }
@@ -218,11 +234,17 @@ mod tests {
         Count(i64),
     }
     #[derive(DeriveSchema, DeriveValue)]
+    struct GroupOverride {
+        group_id: i64,
+        enabled: bool,
+    }
+    #[derive(DeriveSchema, DeriveValue)]
     struct Example {
         label: String,
         enabled: bool,
         count: i64,
         items: Vec<i64>,
+        groups: Vec<GroupOverride>,
         note: Option<String>,
         selection: Selection,
     }
@@ -234,6 +256,7 @@ mod tests {
             enabled: true,
             count: i64::MAX,
             items: vec![i64::MAX],
+            groups: vec![],
             note: None,
             selection: Selection::Count(16384),
         }
@@ -251,6 +274,16 @@ mod tests {
         assert_eq!(field("items")["kind"], "list");
         assert_eq!(field("items")["items"][0]["value"], i64::MAX.to_string());
         assert_eq!(field("items")["template"]["bits"], 64);
+        assert_eq!(field("groups")["kind"], "list");
+        assert_eq!(field("groups")["template"]["kind"], "record");
+        assert_eq!(
+            field("groups")["template"]["fields"][0]["control"]["kind"],
+            "bool"
+        );
+        assert_eq!(
+            field("groups")["template"]["fields"][1]["control"]["bits"],
+            64
+        );
         assert_eq!(field("note")["enabled"], false);
         assert_eq!(field("note")["inner"]["kind"], "string");
         let selection = field("selection");

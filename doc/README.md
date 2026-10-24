@@ -33,6 +33,8 @@
 | [群聊 Shell 与学校帮助](26-group-shell-and-school-help.md) | 授权管理 Wasm 包、共享宿主管理端口与 NPUCraft 帮助回复 |
 | [Linux ARM64 部署](27-linux-deployment.md) | 交叉构建、编译预热、systemd、WebUI 监听与数据搬迁 |
 | [Agent OneBot 工具](28-onebot-agent-tools.md) | 独立 Wasm 查询与发送工具、CQ、受管图片及原生接口边界 |
+| [AI 绘画](29-ai-paint.md) | 独立 Wasm 绘图包，SwarmUI/Nano-Banana/SiliconFlow 与受管图片发送 |
+| [群消息输出](30-message-output.md) | 独立输出包、逐群长消息转发与发送回执 |
 
 文档中的“待定”表示尚未形成决定。编写对应实现前应继续讨论，不能把示例名称或先前提案直接固定为接口。
 

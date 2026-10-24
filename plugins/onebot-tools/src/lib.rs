@@ -2,11 +2,10 @@
 pub mod contract;
 pub mod managed;
 mod message;
+pub mod output;
 
 use contract::{Error, Invocation};
-use forest_onebot::forest::{
-    self as onebot, OneBotError, Query, SendGroupMessage, SendPrivateMessage, SentMessage,
-};
+use forest_onebot::forest::{self as onebot, OneBotError, Query, SendPrivateMessage, SentMessage};
 use forest_protocol::{manifest::callers, *};
 use forest_sdk::{Handlers, Module, host};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -242,14 +241,14 @@ impl OneBotTools {
     ) -> Result<String, Error> {
         let args: GroupMessage = arguments(&input)?;
         let group_id = args.group_id.unwrap_or(input.group_id);
-        let message = message::resolve(&args.message).await?;
-        let sent: Result<SentMessage, OneBotError> = host::call(
-            onebot::OBJECT.parse().unwrap(),
-            onebot::SEND_GROUP_MESSAGE.parse().unwrap(),
-            &SendGroupMessage {
+        let sent: Result<SentMessage, output::Error> = host::call(
+            output::OBJECT.parse().unwrap(),
+            output::SEND.parse().unwrap(),
+            &output::GroupOutput {
                 group_id,
-                message,
-                auto_escape: Some(false),
+                bot_id: input.bot_id,
+                bot_name: None,
+                message: forest_onebot::message::Message::Cq(args.message.clone()),
             },
         )
         .await
@@ -304,9 +303,9 @@ pub fn manifest() -> Manifest {
         provides: OneBotTools::handlers().declarations(),
         uses: vec![
             dependency::<Query, Result<String, OneBotError>>(onebot::OBJECT, onebot::QUERY),
-            dependency::<SendGroupMessage, Result<SentMessage, OneBotError>>(
-                onebot::OBJECT,
-                onebot::SEND_GROUP_MESSAGE,
+            dependency::<output::GroupOutput, Result<SentMessage, output::Error>>(
+                output::OBJECT,
+                output::SEND,
             ),
             dependency::<SendPrivateMessage, Result<SentMessage, OneBotError>>(
                 onebot::OBJECT,

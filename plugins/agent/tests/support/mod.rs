@@ -243,6 +243,8 @@ impl Harness {
             "forest-deepseek-web",
             "forest-wolfram-alpha",
             "forest-onebot-tools",
+            "forest-ai-paint",
+            "forest-message-output",
             "forest-context-module",
             "forest-openai-provider",
             "forest-qwen-vl-embedding",
@@ -330,6 +332,8 @@ impl Harness {
             forest_deepseek_web::manifest(),
             forest_wolfram_alpha::manifest(),
             forest_onebot_tools::manifest(),
+            forest_ai_paint::manifest(),
+            forest_message_output::manifest(),
             forest_agent_module::manifest(),
         ];
         let mut packages = BTreeMap::new();
@@ -344,6 +348,8 @@ impl Harness {
             "forest_deepseek_web",
             "forest_wolfram_alpha",
             "forest_onebot_tools",
+            "forest_ai_paint",
+            "forest_message_output",
             "forest_agent_module",
         ]) {
             let id = manifest.package.id.clone();

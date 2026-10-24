@@ -3,7 +3,7 @@ use crate::{Handlers, Module};
 use forest_protocol::abi;
 use forest_protocol::{CreateContext, Invocation, Value, abi::Step};
 #[cfg(target_arch = "wasm32")]
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -107,10 +107,6 @@ pub fn leave_task(id: u64, complete: bool) {
 
 #[cfg(target_arch = "wasm32")]
 pub fn allocate(len: u32) -> u32 {
-    assert!(
-        len as usize <= abi::MAX_FRAME_BYTES,
-        "ABI allocation too large"
-    );
     Box::into_raw(vec![0u8; len as usize].into_boxed_slice()) as *mut u8 as u32
 }
 
@@ -135,9 +131,9 @@ pub unsafe fn read_input<T: DeserializeOwned>(ptr: u32, len: u32) -> T {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn encode_buffer<T: Serialize>(value: &T) -> u64 {
-    let bytes = abi::encode(value)
-        .expect("ABI result encoding")
+pub fn encode_buffer(step: &Step) -> u64 {
+    let bytes = abi::encode(step)
+        .unwrap_or_else(|_| abi::encode(&Step::FrameTooLarge).expect("fixed ABI control frame"))
         .into_boxed_slice();
     let len = bytes.len() as u32;
     abi::buffer(Box::into_raw(bytes) as *mut u8 as u32, len)

@@ -144,10 +144,13 @@ impl Wasm {
         let output = self.poll.call_async(&mut self.store, task).await?;
         self.check_force()?;
         let (ptr, len) = abi::split_buffer(output);
-        ensure!(len as usize <= abi::MAX_FRAME_BYTES, "ABI output too large");
-        let mut bytes = vec![0; len as usize];
-        self.memory.read(&self.store, ptr as usize, &mut bytes)?;
-        let step = abi::decode(&bytes)?;
+        let bytes = self
+            .memory
+            .data(&self.store)
+            .get(ptr as usize..)
+            .and_then(|tail| tail.get(..len as usize))
+            .context("ABI output memory range")?;
+        let step = abi::decode(bytes)?;
         self.check_force()?;
         self.free.call_async(&mut self.store, (ptr, len)).await?;
         self.check_force()?;
@@ -280,14 +283,16 @@ fn operation_release(caller: Caller<'_, HostState>, id: u64) -> Result<()> {
 }
 
 fn read<T: DeserializeOwned>(caller: &mut Caller<'_, HostState>, ptr: u32, len: u32) -> Result<T> {
-    ensure!(len as usize <= abi::MAX_FRAME_BYTES, "ABI input too large");
     let memory = caller
         .get_export("memory")
         .and_then(|e| e.into_memory())
         .context("ABI memory")?;
-    let mut bytes = vec![0; len as usize];
-    memory.read(&*caller, ptr as usize, &mut bytes)?;
-    Ok(abi::decode(&bytes)?)
+    let bytes = memory
+        .data(&*caller)
+        .get(ptr as usize..)
+        .and_then(|tail| tail.get(..len as usize))
+        .context("ABI input memory range")?;
+    Ok(abi::decode(bytes)?)
 }
 
 fn submit(

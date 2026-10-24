@@ -1,8 +1,8 @@
 //! Reconnect only the transport. Module instances and submitted actions are not replayed.
 use crate::{receive, websocket};
 use anyhow::Result;
-use forest_protocol::{abi, service::LogLevel};
-use forest_runtime::{LogWriter, onebot::OneBotIngress};
+use forest_protocol::service::LogLevel;
+use forest_runtime::{IoSettings, LogWriter, onebot::OneBotIngress};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, protocol::WebSocketConfig};
 
@@ -12,6 +12,7 @@ pub async fn forward(
     ingress: OneBotIngress,
     mut actions: Option<websocket::Connections>,
     logs: LogWriter,
+    settings: IoSettings,
 ) -> Result<()> {
     let source: forest_protocol::Token = "/core/onebot".parse().unwrap();
     let mut delay = Duration::from_secs(1);
@@ -23,7 +24,10 @@ pub async fn forward(
                 .headers_mut()
                 .insert("authorization", format!("Bearer {token}").parse()?);
         }
-        let config = WebSocketConfig::default().max_message_size(Some(abi::MAX_FRAME_BYTES));
+        let limit = settings.get().await?.websocket_message_bytes();
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(limit))
+            .max_frame_size(Some(limit));
         match tokio_tungstenite::connect_async_with_config(request, Some(config), false).await {
             Ok((socket, _)) => {
                 delay = Duration::from_secs(1);

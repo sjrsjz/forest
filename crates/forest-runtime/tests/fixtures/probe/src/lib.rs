@@ -43,6 +43,7 @@ impl Module for Probe {
         }
         Handlers::new()
             .with("/echo".parse().unwrap(), true, policy(), Self::echo)
+            .with("/payload".parse().unwrap(), true, policy(), Self::payload)
             .with("/serial".parse().unwrap(), false, policy(), Self::serial)
             .with("/parallel".parse().unwrap(), true, policy(), Self::parallel)
             .with("/nested".parse().unwrap(), true, policy(), Self::nested)
@@ -117,6 +118,22 @@ impl Module for Probe {
 forest_sdk::export_module!(super::Probe);
 
 impl Probe {
+    async fn payload(self: Rc<Self>, _: CallContext, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+        // Exercise guest -> host input and host -> guest output as well as the
+        // exported result. SQLite remains local to this fixture's private DB.
+        let rows = flatten(
+            host::sqlite(vec![SqlStatement {
+                sql: "SELECT ?".into(),
+                parameters: vec![SqlValue::Blob(bytes)],
+            }])
+            .await,
+        )?;
+        let SqlValue::Blob(bytes) = rows.into_iter().next().unwrap().rows.remove(0).remove(0)
+        else {
+            unreachable!("SELECT blob parameter")
+        };
+        Ok(bytes)
+    }
     async fn variance(self: Rc<Self>, _: CallContext, input: i64) -> Result<i32, i32> {
         if input < 0 { Err(9) } else { Ok(7) }
     }

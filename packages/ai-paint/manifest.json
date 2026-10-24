@@ -1,0 +1,363 @@
+{
+  "package": {
+    "id": "/module/ai-paint",
+    "version": "0.1.0",
+    "name": "AI painting",
+    "description": "SwarmUI, Nano-Banana-compatible and SiliconFlow image generation into managed media"
+  },
+  "module": "module.wasm",
+  "configs": [
+    {
+      "key": "/backend",
+      "schema": [
+        {
+          "Variant": {
+            "OpenAiImages": {
+              "Unnamed": []
+            },
+            "SiliconFlow": {
+              "Unnamed": []
+            },
+            "SwarmUi": {
+              "Unnamed": []
+            }
+          }
+        }
+      ],
+      "default": {
+        "Variant": [
+          "SiliconFlow",
+          {
+            "Unnamed": []
+          }
+        ]
+      },
+      "access": {
+        "readers": [
+          "SelfModule"
+        ],
+        "writers": [
+          {
+            "Path": "/user/admin"
+          }
+        ],
+        "callers": []
+      }
+    },
+    {
+      "key": "/openai-images",
+      "schema": [
+        {
+          "Record": {
+            "api_key": "String",
+            "endpoint": "String",
+            "model": "String",
+            "quality": "String",
+            "sizes": {
+              "Record": {
+                "landscape": "String",
+                "portrait": "String",
+                "square": "String"
+              }
+            }
+          }
+        }
+      ],
+      "default": {
+        "Record": {
+          "api_key": {
+            "String": ""
+          },
+          "endpoint": {
+            "String": "https://api.openai-hk.com/v1/images/generations"
+          },
+          "model": {
+            "String": "nano-banana-2"
+          },
+          "quality": {
+            "String": "high"
+          },
+          "sizes": {
+            "Record": {
+              "landscape": {
+                "String": "16x9"
+              },
+              "portrait": {
+                "String": "9x16"
+              },
+              "square": {
+                "String": "1x1"
+              }
+            }
+          }
+        }
+      },
+      "access": {
+        "readers": [
+          "SelfModule"
+        ],
+        "writers": [
+          {
+            "Path": "/user/admin"
+          }
+        ],
+        "callers": []
+      }
+    },
+    {
+      "key": "/siliconflow",
+      "schema": [
+        {
+          "Record": {
+            "api_key": "String",
+            "endpoint": "String",
+            "model": "String",
+            "sizes": {
+              "Record": {
+                "landscape": "String",
+                "portrait": "String",
+                "square": "String"
+              }
+            },
+            "steps": "I32"
+          }
+        }
+      ],
+      "default": {
+        "Record": {
+          "api_key": {
+            "String": ""
+          },
+          "endpoint": {
+            "String": "https://api.siliconflow.cn/v1/images/generations"
+          },
+          "model": {
+            "String": "Kwai-Kolors/Kolors"
+          },
+          "sizes": {
+            "Record": {
+              "landscape": {
+                "String": "1440x720"
+              },
+              "portrait": {
+                "String": "720x1440"
+              },
+              "square": {
+                "String": "1024x1024"
+              }
+            }
+          },
+          "steps": {
+            "I32": 20
+          }
+        }
+      },
+      "access": {
+        "readers": [
+          "SelfModule"
+        ],
+        "writers": [
+          {
+            "Path": "/user/admin"
+          }
+        ],
+        "callers": []
+      }
+    },
+    {
+      "key": "/swarm-ui",
+      "schema": [
+        {
+          "Record": {
+            "anime_model": "String",
+            "anime_negative_prompt": "String",
+            "auth_token": "String",
+            "default_model": "String",
+            "endpoint": "String",
+            "photo_model": "String",
+            "photo_negative_prompt": "String",
+            "sizes": {
+              "Record": {
+                "landscape": "String",
+                "portrait": "String",
+                "square": "String"
+              }
+            },
+            "steps": "I32"
+          }
+        }
+      ],
+      "default": {
+        "Record": {
+          "anime_model": {
+            "String": "text-to-image-anime"
+          },
+          "anime_negative_prompt": {
+            "String": ""
+          },
+          "auth_token": {
+            "String": ""
+          },
+          "default_model": {
+            "String": "text-to-image"
+          },
+          "endpoint": {
+            "String": "http://127.0.0.1:7801"
+          },
+          "photo_model": {
+            "String": "text-to-image-photo"
+          },
+          "photo_negative_prompt": {
+            "String": ""
+          },
+          "sizes": {
+            "Record": {
+              "landscape": {
+                "String": "1440x720"
+              },
+              "portrait": {
+                "String": "720x1440"
+              },
+              "square": {
+                "String": "1024x1024"
+              }
+            }
+          },
+          "steps": {
+            "I32": 30
+          }
+        }
+      },
+      "access": {
+        "readers": [
+          "SelfModule"
+        ],
+        "writers": [
+          {
+            "Path": "/user/admin"
+          }
+        ],
+        "callers": []
+      }
+    }
+  ],
+  "provides": [
+    {
+      "path": "/generate",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": true,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/agent-tools"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    }
+  ],
+  "uses": [
+    {
+      "object": "/module/media",
+      "interface": "/put",
+      "input": [
+        {
+          "Record": {
+            "bytes": "ByteBuffer",
+            "mime": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "subscriptions": []
+}

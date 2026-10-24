@@ -10,11 +10,13 @@ Agent、Memory、工具网关是三个独立 Wasm 包，分别位于 `plugins/ag
 | `/module/memory` | `/accept`、`/archive`、`/link`、`/delivery` | 不可变原文、群内位置、归档集合、实际种子联想和发送回执关联 |
 | `/module/memory` | `/read`、`/recall`、`/project` | 已归档原文读取、全局召回和格式化用投影 |
 | `/module/media` | `/put`、`/register`、`/get` | 受管图片与入站附件持久化 |
+| `/module/message-output` | `/send` | 群输出、CQ 与图片解析、逐群长消息转发 |
 | `/module/typst` | `/render` | 中文、公式与文档渲染为受管 PNG 引用 |
 | `/module/memory` | `/index/advance`、`/index/rebuild`、`/status` | 持久索引待办、显式重建和索引状态 |
 | `/module/agent-tools` | `/describe`、`/invoke` | 原生工具声明与显式模块路由 |
 | `/module/deepseek-web` | `/search`、`/fetch` | 默认网页搜索与 Markdown 抓取 |
 | `/module/wolfram-alpha` | `/query` | 官方 LLM API 精确计算与科学知识查询 |
+| `/module/ai-paint` | `/generate` | 三种绘图后端、受管图片与可发送 CQ |
 | `/module/onebot-tools` | 账号、好友、群、成员查询与独立发送 | 无凭据 Wasm 工具，复用宿主 OneBot 连接 |
 | `/module/context` | `/format` | 人格提示词、账号身份、来源标记、CQ 和图片格式化 |
 | `/module/openai-provider` | `/complete`、`/capabilities` | 模型协议和多模态能力声明 |
@@ -32,7 +34,7 @@ Agent、Memory、工具网关是三个独立 Wasm 包，分别位于 `plugins/ag
 
 窗口按单元数计量，默认高水位 256、低水位 128。静默与首次请求冻结前可以归档并移除旧前缀；开始模型工作后只追加。原生 Assistant 与其工具结果是一个不可拆分块。RecallBatch 保存原记录引用、种子与图元数据，不再次归档或嵌入。每条触发点对应自己的召回批次，格式化时保持完整批次和来源。裁剪不调用摘要模型，没有估算 token 超限硬阻断。
 
-Provider 失败只记录一次；有新的 @ 则接入新输入、清除旧待报告错误并继续。无持续点时排空普通尾部并静默；仍有错误则用 `send` 提交错误报告。正常正文在工具执行前发送，支持文本、@、回复、表情和受管图片 CQ。图片引用由 Memory 解析为发送用数据，不让模型直接指定服务器文件。
+Provider 失败只记录一次；有新的 @ 则接入新输入、清除旧待报告错误并继续。无持续点时排空普通尾部并静默；仍有错误则用 `send` 提交错误报告。正常正文在工具执行前交给独立 Message Output 包发送，支持文本、@、回复、表情和受管图片 CQ。输出包从 Media 解析发送所需的图片，按群设置将长消息转换为合并转发，并返回实际回执，详见[群消息输出](30-message-output.md)。
 
 静默接纳与归档维护失败只记录诊断，不向群内发送错误。触发准备或工作失败才结算一次群错误通知，已结算的持续点保留消息并清除触发意图；报告期间新收到的 @ 属于下一次正常尝试。ModelTurn 与 ToolResult 是原始文本，Memory 按完整 `media:<sha256>` 提取图片关联，不要求它们整段符合 CQ 协议。CQ 语法校验属于发送路径，错误输出不会因归档或多模态投影而反复中断后续对话。
 
@@ -56,13 +58,14 @@ Qdrant 保存向量和原群、序号引用。查询采用 [Query API](https://a
 ./scripts/build-agent.ps1
 ```
 
-该脚本构建十三个独立 Wasm 包及其外部 Manifest/Schema，每次编译并行数为 2。
+该脚本构建十五个独立 Wasm 包及其外部 Manifest/Schema，每次编译并行数为 2。
 
 配置项如下，修改后热重载所属模块生效：
 
 | 模块配置 | 内容 |
 |---|---|
 | Agent `/settings` | `allowed_groups`、`bot_name`、`high_water`、`low_water` |
+| Message Output `/settings` | 默认启用、逐群开关、字符与行数阈值；保存后下次输出生效 |
 | Context `/prompt/agent` | 此 Bot 的人格与行动提示词 |
 | Provider `/settings` | endpoint、model、api_key、multimodal、output_limit、reasoning_effort |
 | Embedding `/connection` | 同一 Qwen VL 模型的 endpoint、api_key |
@@ -93,6 +96,8 @@ cargo run --locked --offline -j 2 -p forest-cli -- --package packages/agent --ev
 默认网关提供 `web_search`、`web_fetch`、`http_request`、`wolfram_alpha`、`typst_render` 和 `memory_read`。网页搜索及阅读优先使用独立 [DeepSeek Web 插件](23-deepseek-web.md)，返回搜索摘要和 Markdown；原始 HTTP 保留用于明确的 HTTP/API 操作。[Wolfram Alpha 插件](24-wolfram-alpha.md)提供精确计算，连接配置可通过管理端或配置辅助程序的 `FOREST_WOLFRAM_APP_ID`、`FOREST_WOLFRAM_ENDPOINT` 设置。记忆工具按原群和序号读取已归档资料，保留来源，不输出历史思考。
 
 默认路由还包含独立 [OneBot 工具包](28-onebot-agent-tools.md)的九个 `onebot_*` 工具，用于读取账号、好友、群与成员信息，以及立即发送独立群消息或私聊消息。普通 assistant 回复仍按原路径自动发送，工具发送成功后不重复发送同一正文。
+
+`image_generate` 通过独立 [AI 绘画包](29-ai-paint.md)生成一张图片，返回受管引用与现成 CQ。绘图供应商、模型、凭据和生成参数由该包的配置表管理，生成失败不自动重试或切换供应商。
 
 外部工具接口接受 `Invocation { group_id, bot_id, name, arguments_json }`，返回 `Result<String, Error>`。路由按工具名选择明确的 `(对象, 接口)`，调用仍经过 Manifest uses 和目标 ACL；参数不参与选择任意接口。把自定义路由列表交给打包程序，可同时生成静态依赖：
 

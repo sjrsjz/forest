@@ -61,7 +61,7 @@ impl Operations {
         let abort = jobs.spawn(async move {
             let output = future.await;
             let bytes = abi::encode(&output).unwrap_or_else(|_| {
-                abi::encode(&Err::<(), _>(DispatchError::OutputContract)).unwrap()
+                abi::encode(&Err::<(), _>(DispatchError::FrameTooLarge)).unwrap()
             });
             let mut state = result.state.lock().unwrap();
             if matches!(*state, CompletionState::Closed) {

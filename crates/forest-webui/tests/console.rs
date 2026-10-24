@@ -162,7 +162,41 @@ async fn authenticated_inspection_is_read_only_and_stream_closes_on_shutdown() {
         .await
         .unwrap();
     assert!(snapshot["modules"].as_array().unwrap().is_empty());
-    assert_eq!(snapshot["hosts"][0]["object"], "/core/test");
+    assert_eq!(snapshot["hosts"][0]["object"], "/core/runtime");
+    assert_eq!(snapshot["hosts"][1]["object"], "/core/test");
+    let host_entry: serde_json::Value = client
+        .get(format!("{base}/api/inspect/config-entry"))
+        .query(&[("object", "/core/runtime"), ("key", "/io")])
+        .header("Cookie", cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(host_entry["data"]["writable"], true);
+    for (http, status) in [(96, 204), (0, 422)] {
+        let value = format!(
+            "{{\"http_response_mib\": {http}i64, \"websocket_message_mib\": 64i64, \"file_read_mib\": 64i64}}"
+        );
+        let response = client
+            .post(format!("{base}/api/config/set"))
+            .header("Cookie", cookie)
+            .json(&json!({"object":"/core/runtime", "key":"/io", "value":value}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            scheduler
+                .io_settings()
+                .get()
+                .await
+                .unwrap()
+                .http_response_mib,
+            96
+        );
+    }
     let headers: serde_json::Value = client
         .get(format!("{base}/api/inspect/config-keys"))
         .query(&[("object", object.to_string())])

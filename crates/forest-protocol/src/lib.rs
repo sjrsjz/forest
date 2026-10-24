@@ -36,6 +36,8 @@ pub enum DispatchError {
     Interrupted,
     #[error("host has stopped")]
     HostStopped,
+    #[error("encoded data exceeds the wasm32 frame length")]
+    FrameTooLarge,
 }
 
 pub type DispatchResult<T> = Result<T, DispatchError>;

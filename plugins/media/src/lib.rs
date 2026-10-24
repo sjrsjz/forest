@@ -33,6 +33,7 @@ impl Module for Media {
         ]);
         let producers = callers(vec![
             SubjectPattern::Path("/module/typst".parse().unwrap()),
+            SubjectPattern::Path("/module/ai-paint".parse().unwrap()),
             SubjectPattern::Path("/user/admin".parse().unwrap()),
         ]);
         let memory = callers(vec![

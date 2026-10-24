@@ -195,6 +195,9 @@
             "Path": "/module/typst"
           },
           {
+            "Path": "/module/ai-paint"
+          },
+          {
             "Path": "/user/admin"
           }
         ]

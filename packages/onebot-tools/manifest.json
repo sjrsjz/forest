@@ -650,13 +650,14 @@
       ]
     },
     {
-      "object": "/core/onebot",
-      "interface": "/send_group_message",
+      "object": "/module/message-output",
+      "interface": "/send",
       "input": [
         {
           "Record": {
-            "auto_escape": {
-              "Option": "Bool"
+            "bot_id": "I64",
+            "bot_name": {
+              "Option": "String"
             },
             "group_id": "I64",
             "message": {
@@ -1711,41 +1712,69 @@
               "Unnamed": [
                 {
                   "Variant": {
-                    "Api": {
-                      "Named": {
-                        "message": {
-                          "Option": "String"
-                        },
-                        "retcode": "I32",
-                        "wording": {
-                          "Option": "String"
+                    "Dispatch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidConfiguration": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidMessage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Media": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "OneBot": {
+                      "Unnamed": [
+                        {
+                          "Variant": {
+                            "Api": {
+                              "Named": {
+                                "message": {
+                                  "Option": "String"
+                                },
+                                "retcode": "I32",
+                                "wording": {
+                                  "Option": "String"
+                                }
+                              }
+                            },
+                            "Decode": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "Encode": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "GroupDenied": {
+                              "Unnamed": []
+                            },
+                            "Protocol": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "Submitted": {
+                              "Unnamed": []
+                            },
+                            "Transport": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            }
+                          }
                         }
-                      }
-                    },
-                    "Decode": {
-                      "Unnamed": [
-                        "String"
-                      ]
-                    },
-                    "Encode": {
-                      "Unnamed": [
-                        "String"
-                      ]
-                    },
-                    "GroupDenied": {
-                      "Unnamed": []
-                    },
-                    "Protocol": {
-                      "Unnamed": [
-                        "String"
-                      ]
-                    },
-                    "Submitted": {
-                      "Unnamed": []
-                    },
-                    "Transport": {
-                      "Unnamed": [
-                        "String"
                       ]
                     }
                   }

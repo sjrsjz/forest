@@ -48,6 +48,7 @@ impl Scheduler {
             logs: crate::LogWriter::default(),
             run_queue,
             directory: Mutex::new(Directory {
+                host_config: crate::io_settings::IoSettings::access(),
                 slots: HashMap::new(),
                 natives: HashMap::new(),
                 native_budgets: HashMap::new(),

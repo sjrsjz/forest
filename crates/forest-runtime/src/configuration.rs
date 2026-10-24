@@ -15,6 +15,8 @@ pub struct ConfigWriter {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigWriteError {
+    #[error("invalid host setting: {0}")]
+    InvalidSetting(String),
     #[error(transparent)]
     Dispatch(#[from] DispatchError),
     #[error(transparent)]

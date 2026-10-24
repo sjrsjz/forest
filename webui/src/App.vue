@@ -244,7 +244,7 @@ onMounted(checkSession)
               >
                 <strong>{{ h.object.split('/').at(-1) }}</strong>
                 <code>{{ h.object }}</code>
-                <small>原生接口 / 事件源</small>
+                <small>{{ h.object === '/core/runtime' ? '宿主设置' : '原生接口 / 事件源' }}</small>
               </button>
             </details>
           </div>

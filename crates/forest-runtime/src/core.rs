@@ -147,6 +147,7 @@ pub(crate) struct Core {
     _ticker: EpochTicker,
 }
 pub(crate) struct Directory {
+    pub host_config: AclTable,
     pub slots: HashMap<Token, Slot>,
     natives: HashMap<(Token, Token), Arc<RegisteredNative>>,
     native_budgets: HashMap<Token, Arc<Budget>>,

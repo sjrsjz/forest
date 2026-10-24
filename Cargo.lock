@@ -1102,11 +1102,13 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "forest-agent-tools",
+ "forest-ai-paint",
  "forest-config",
  "forest-context-module",
  "forest-deepseek-web",
  "forest-media",
  "forest-memory-module",
+ "forest-message-output",
  "forest-onebot",
  "forest-onebot-tools",
  "forest-openai-provider",
@@ -1138,6 +1140,25 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "forest-ai-paint"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "forest-config",
+ "forest-media",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -1257,6 +1278,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "forest-message-output"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "forest-onebot",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "forest-npucraft"
 version = "0.1.0"
 dependencies = [
@@ -1285,6 +1321,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "forest-media",
+ "forest-message-output",
  "forest-onebot",
  "forest-protocol",
  "forest-runtime",

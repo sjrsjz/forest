@@ -255,6 +255,20 @@ pub fn default_routes() -> Vec<Route> {
             "/render",
         ),
         route(
+            "image_generate",
+            "Generate one AI image from a detailed visual prompt. Use this for drawing requests; use typst_render for documents, exact equations and tables. Preserve the user's intended subject and requested wording. style is anime (default), photo or none; size is portrait, landscape or square (default). Returns a persistent media reference and a ready-to-send cq image code: copy the cq exactly into your assistant reply, or send it with onebot_send_group_message/onebot_send_private_message. The tool generates and stores the image but does not send it. Endpoint, model, quality and inference steps are administrator settings. seed is optional and only supported by SiliconFlow and SwarmUI. Do not retry a failed or interrupted generation automatically; it may already have been billed.",
+            serde_json::json!({
+                "type":"object","properties":{
+                    "prompt":{"type":"string","minLength":1,"maxLength":8000},
+                    "style":{"type":"string","enum":["anime","photo","none"],"default":"anime"},
+                    "size":{"type":"string","enum":["portrait","landscape","square"],"default":"square"},
+                    "seed":{"type":"integer","minimum":0,"maximum":9999999999_i64,"description":"Optional reproducible seed for SiliconFlow/SwarmUI; omit for a random image."}
+                },"required":["prompt"],"additionalProperties":false
+            }),
+            "/module/ai-paint",
+            "/generate",
+        ),
+        route(
             "memory_read",
             "Read up to 16 archived memory units by original group and sequence. Original source is preserved.",
             serde_json::json!({

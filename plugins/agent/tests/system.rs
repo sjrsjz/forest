@@ -334,7 +334,8 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
 }
 
 async fn typst_render_and_delivery(h: &mut Harness) {
-    use forest_agent_module::{managed, tools};
+    use forest_agent_module::tools;
+    use forest_media::contract as managed;
     let source = "= Forest 排版测试\n\n中文、数学与表格。\n$ integral_0^pi x^2 sin(x) dif x = pi^2 - 4 $\n#table(columns: 2, [项目], [数值], [结果], [$pi^2 - 4$])\n#pagebreak()\n= 第二页\n媒体引用在渲染模块重载后仍然有效。";
     let invocation = tools::Invocation {
         group_id: 20,

@@ -21,7 +21,10 @@ const activeTab = ref<'current' | 'default' | 'schema'>('current')
 const loadingEntry = ref(false)
 const editing = ref(false)
 const entityController = new AbortController()
-const loaded = computed(() => new Set(props.snapshot.modules.map((m) => m.object)))
+const loaded = computed(() => new Set([
+  ...props.snapshot.modules.map((m) => m.object),
+  ...props.snapshot.hosts.map((h) => h.object),
+]))
 const filteredKeys = computed(() =>
   keys.value.status === 'ready'
     ? keys.value.value.data.filter((k) =>
@@ -243,6 +246,9 @@ onUnmounted(() => entityController.abort())
             </button>
           </div>
           <div class="entry-value scroll-area">
+            <p v-if="object === '/core/runtime' && selectedKey === '/io'" class="muted">
+              单位 MiB。HTTP 和文件读取在下一次操作生效；WebSocket 在下次建连时生效。
+            </p>
             <ConfigEditor
               v-if="editing"
               :key="`${object}:${selectedKey}`"

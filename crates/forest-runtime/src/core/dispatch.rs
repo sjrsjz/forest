@@ -89,7 +89,7 @@ impl Core {
             if !request.input.check(&native.declaration.input, false) {
                 return Err(DispatchError::InputContract);
             }
-            let bytes = abi::encode(&request.input).map_err(|_| DispatchError::InputContract)?;
+            let bytes = abi::encode(&request.input).map_err(|_| DispatchError::FrameTooLarge)?;
             let admission = directory.native_budgets[&request.object].reserve(bytes.len())?;
             return Ok(Admitted::Native {
                 native,
@@ -126,7 +126,7 @@ impl Core {
             input: request.input,
             context,
         };
-        let bytes = abi::encode(&invocation).map_err(|_| DispatchError::InputContract)?;
+        let bytes = abi::encode(&invocation).map_err(|_| DispatchError::FrameTooLarge)?;
         let accepted = Request {
             admission: slot.budget.reserve(bytes.len())?,
             invocation,

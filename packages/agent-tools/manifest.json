@@ -166,6 +166,32 @@
           {
             "Record": {
               "interface": {
+                "String": "/generate"
+              },
+              "object": {
+                "String": "/module/ai-paint"
+              },
+              "tool": {
+                "Record": {
+                  "description": {
+                    "Some": {
+                      "String": "Generate one AI image from a detailed visual prompt. Use this for drawing requests; use typst_render for documents, exact equations and tables. Preserve the user's intended subject and requested wording. style is anime (default), photo or none; size is portrait, landscape or square (default). Returns a persistent media reference and a ready-to-send cq image code: copy the cq exactly into your assistant reply, or send it with onebot_send_group_message/onebot_send_private_message. The tool generates and stores the image but does not send it. Endpoint, model, quality and inference steps are administrator settings. seed is optional and only supported by SiliconFlow and SwarmUI. Do not retry a failed or interrupted generation automatically; it may already have been billed."
+                    }
+                  },
+                  "name": {
+                    "String": "image_generate"
+                  },
+                  "parameters_json": {
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"prompt\":{\"maxLength\":8000,\"minLength\":1,\"type\":\"string\"},\"seed\":{\"description\":\"Optional reproducible seed for SiliconFlow/SwarmUI; omit for a random image.\",\"maximum\":9999999999,\"minimum\":0,\"type\":\"integer\"},\"size\":{\"default\":\"square\",\"enum\":[\"portrait\",\"landscape\",\"square\"],\"type\":\"string\"},\"style\":{\"default\":\"anime\",\"enum\":[\"anime\",\"photo\",\"none\"],\"type\":\"string\"}},\"required\":[\"prompt\"],\"type\":\"object\"}"
+                  },
+                  "strict": "None"
+                }
+              }
+            }
+          },
+          {
+            "Record": {
+              "interface": {
                 "String": "/memory"
               },
               "object": {
@@ -730,6 +756,54 @@
     {
       "object": "/module/agent-tools",
       "interface": "/memory",
+      "input": [
+        {
+          "Record": {
+            "arguments_json": "String",
+            "bot_id": "I64",
+            "group_id": "I64",
+            "name": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                "String"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/ai-paint",
+      "interface": "/generate",
       "input": [
         {
           "Record": {
