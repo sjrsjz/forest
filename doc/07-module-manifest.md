@@ -1,8 +1,8 @@
-﻿# 模块 Manifest 详细设计
+# 模块 Manifest 详细设计
 
 本文确定插件包的外部静态声明 `manifest.json`。宿主读取文件即可了解对象令牌、工件、配置及 ACL、提供和使用的接口、宿主事件接收声明，无需执行 Wasm 才能取得这些信息。
 
-本文规定外部 Manifest。类型、解析器、加载器、运行时及基础 SDK 已实现，实际 API 和限制见[运行说明](13-runtime-and-sdk.md)。本阶段不设计自动生成工具、UI 配置、ABI 版本、版本协商或迁移分支。
+本文规定外部 Manifest，实际加载 API 和限制见[运行说明](13-runtime-and-sdk.md)。Manifest 不包含 UI 配置、ABI 版本或版本协商字段。
 
 Manifest 的接口和配置 Schema 是外部契约，不要求使用 Rust。当前 Rust 包工具可将本包声明转成 Manifest，同时输出等价的 Schema 语言文本；这是实现便利，不是插件对宿主或对其他包的 Rust 链接依赖。各插件自行持有实现和类型映射，宿主只依赖通用 Schema/Value 与固定 ABI。
 

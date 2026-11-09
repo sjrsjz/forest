@@ -1,16 +1,8 @@
 # OneBot v11 API 库
 
-## 选型与边界
+## 职责与边界
 
-先核对现有 Rust 库，再决定实现范围。核对版本为 `onebot-api 1.3.0`、`onebot_v11 0.1.5`；源码下载到忽略目录，仅用于评估，不加入产品代码。
-
-| 候选 | 核对结果 |
-|---|---|
-| [onebot-api](https://github.com/Ecamika/onebot-api) | 提供异步 API 和多种传输。但发布版 HTTP 循环在网络/解析错误后直接继续，不向对应调用返回错误；`get_msg` 把 `message_type` 判别放在 sender 内，而标准字段位于 data 顶层。协议类型还与 Tokio 网络客户端同包且强制启用相关依赖，不适合直接作为 Wasm 协议层依赖。 |
-| [onebot_v11](https://github.com/canxin121/onebotv11_rs) | 提供 HTTP/WS 和类型定义，但发布版 HTTP 路径按字符串读取标准数值 retcode，失败结果又合并进动态错误；返回值通过运行时响应枚举关联请求。 |
-| [runbot](https://github.com/niuhuan/runbot)、[Kovi](https://github.com/ThriceCola/Kovi) | 是包含处理器或插件机制的框架；当前需要独立 API 库，不引入第二套框架。 |
-
-因此实现独立 `forest-onebot`，复用 Serde 和 Reqwest 等基础库，不复制候选 SDK 的实现。
+`forest-onebot` 提供 OneBot v11 的类型化请求、响应、消息段与异步客户端。协议层依赖 Serde，原生 HTTP 传输通过可选 feature 引入 Reqwest；模块调度、鉴权和网关连接管理由宿主负责。
 
 ## 协议与执行分离
 
@@ -18,7 +10,7 @@
 - `Client<T>` 负责一次请求的编码、异步提交及结果解码。`Transport` 只负责向指定 action 传递参数 JSON 字节并取得响应 JSON 字节。
 - 默认不启用网络依赖，协议和泛型客户端可以编译为 Wasm。`http` feature 提供原生 HTTP(S) 传输，使用 Tokio 运行时，但库不创建运行时或隐式后台任务。
 - 覆盖 v11 的全部 38 个公开 API，包含消息、群管理、请求处理、查询、凭证、媒体和实现管理。不把 NapCat 等实现的扩展混成标准。
-- 本次不实现 WebSocket 连接、echo 分派、事件监听服务器或 Forest 插件生命周期。这些属于后续传输及模块接入，不把普通 Rust crate 叫作已完成的 Wasm 插件。
+- 本库提供 v11 数据类型和异步 API 客户端；WebSocket 连接、echo 分派与事件监听由宿主适配器负责，见[运行说明](13-runtime-and-sdk.md)。模块生命周期由调度器管理。
 - 请求结构与消息段是数据，构造和序列化不发送请求。只有显式调用异步方法才产生 I/O。
 
 ## 结果语义
@@ -39,6 +31,8 @@ HTTP 请求使用 JSON Content-Type 和可选 Bearer 认证；目标可带路径
 
 字符串形式由调用方明确决定是原始 CQ 还是普通文本（`auto_escape`）；段数组的文本不会被再次解析为 CQ。SDK 不负责执行 Agent 输出策略。未知消息段或非法标准字段返回解码错误；不通过降级为普通文本掩盖协议问题。扩展支持需要显式增加类型。
 
+已显式支持 NapCat 的 `Markdown { content: String }` 消息段。原始 Markdown 保留在结构化消息中，经 CQ 投影时使用正确转义的 `[CQ:markdown,content=...]`，读取时可还原。含该段的消息可通过 notifier 进入记忆，不因缺失一种消息段而整条拒收。声明依据为 [NapCat 消息类型](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/types/message.ts)。
+
 `get_msg` 在顶层按 message_type 区分 sender；成员列表允许标准说明可能缺失的字段；状态 online 可以为 null。普通可选请求参数不传时省略，由 OneBot 实现应用标准默认值。
 
 ## 与 Forest 接入
@@ -53,9 +47,9 @@ HTTP 请求使用 JSON Content-Type 和可选 Bearer 认证；目标可带路径
 
 群消息保留 time、self_id、post_type/message_type/sub_type、message_id、group_id、user_id、anonymous、message、raw_message 和 sender。message 的 CQ 字符串或消息段结构保持原意，不降级为裸文本，不主动下载或内联媒体。sender 的可选信息按标准缺省，不伪造昵称、角色等字段。字段含义与可选性依据 [v11 消息事件](https://github.com/botuniverse/onebot-11/blob/master/event/message.md)。
 
-无关字段可在共享事件类型中明确省略，首版可省略 font；消息来源、发送者、回复关系及媒体引用不作为无关信息删除。省略发生在接入协议的类型定义处，不能由调度器任意裁剪字段，也不改变接口 Schema 校验规则。
+共享事件类型省略 font 等与接入无关的字段，保留消息来源、发送者、回复关系及媒体引用。省略由接入协议的类型定义确定，调度器不任意裁剪字段。
 
-HTTP 上报与反向 WebSocket 等协议监听由宿主接入能力负责，不把连接转交给接收插件。事件源身份由宿主绑定；平台用户信息和群角色属于事件上下文，不自动授予框架管理权限。首个可用传输随接入实现确定，无须为此先引入跨平台事件抽象。
+WebSocket 连接与事件监听由宿主接入层负责，不把连接转交给接收插件。事件源身份由宿主绑定；平台用户信息和群角色属于事件上下文，不自动授予框架管理权限。
 
 模块主动取得的网络句柄按其执行实例生命周期管理，不迁移 Rust Future 或连接对象；宿主事件接入自身的资源归该宿主能力，不归某个消息接收插件所有。具体通知契约见[notifier 设计](11-notifier-and-dependencies.md)。
 

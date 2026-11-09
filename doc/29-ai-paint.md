@@ -1,6 +1,6 @@
 # AI 绘画
 
-`/module/ai-paint` 是独立、可热重载的 Wasm 包，提供 `/generate`。Agent 通过工具网关的 `image_generate` 调用它，沿用初号机的 SwarmUI、Nano-Banana 与 SiliconFlow 绘图能力。
+`/module/ai-paint` 是独立、可热重载的 Wasm 包，提供 `/generate`。Agent 通过工具网关的 `image_generate` 调用它，支持 SwarmUI、Nano-Banana 与 SiliconFlow 绘图后端。
 
 调用参数：
 
@@ -34,17 +34,17 @@ SwarmUI 为每次生成获取 session，发送 `images=1`、`donotsave=true`。�
 
 生成模块接收供应商结果，下载或解码为图片字节，通过 Media 的 `/put` 持久化。媒体写入 ACL 明确允许 `/module/ai-paint`，不扩大为任意模块写入。下载图片时不携带云端 API 的 Authorization；图片重定向与供应商调用分别处理。
 
-返回值只含 `reference`、`mime` 与 `cq`：
+返回值只含 `reference`、`mime` 与 `markdown`：
 
 ```json
 {
   "reference": "media:<sha256>",
   "mime": "image/png",
-  "cq": "[CQ:image,file=media:<sha256>]"
+  "markdown": "![generated image](media:<sha256>)"
 }
 ```
 
-模型可原样复制 `cq` 到普通 assistant 回复，或交给 OneBot 独立发送工具。绘图工具本身不发送群消息。供应商 URL、Base64、凭据和 SwarmUI session 不进入工具结果；图片引用可跨模块热重载继续读取，也能用于 Typst 的受管图片输入。文档、公式和表格排版仍使用 Typst 工具。
+模型可原样复制 `markdown` 到普通 assistant 回复，或交给 OneBot 独立发送工具。绘图工具本身不发送群消息。供应商 URL、Base64、凭据和 SwarmUI session 不进入工具结果；图片引用可跨模块热重载继续读取，也能用于 Typst 的受管图片输入。文档、公式和表格排版仍使用 Typst 工具。
 
 ## 构建与安装
 

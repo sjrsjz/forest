@@ -1,6 +1,6 @@
-# Agent 实现与启动
+# Agent 使用指南
 
-Agent、Memory、工具网关是三个独立 Wasm 包，分别位于 `plugins/agent`、`plugins/memory`、`plugins/agent-tools`。Context、Provider、Embedding 继续使用原有独立包。宿主新增的只有模块私有 SQLite 操作；其余实现、SQL、提示词和接口类型映射均在插件内。
+Agent 由多个独立 Wasm 包协作实现：Agent 管理工作循环，Memory 管理原始记忆和索引，Context 组织模型输入，Provider 转换模型协议，工具网关连接可调用模块。SQL、提示词及各接口的类型映射均由对应插件维护，宿主提供调度、配置与通用 I/O。
 
 ## 1. 包与接口
 
@@ -10,17 +10,22 @@ Agent、Memory、工具网关是三个独立 Wasm 包，分别位于 `plugins/ag
 | `/module/memory` | `/accept`、`/archive`、`/link`、`/delivery` | 不可变原文、群内位置、归档集合、实际种子联想和发送回执关联 |
 | `/module/memory` | `/read`、`/recall`、`/project` | 已归档原文读取、全局召回和格式化用投影 |
 | `/module/media` | `/put`、`/register`、`/get` | 受管图片与入站附件持久化 |
-| `/module/message-output` | `/send` | 群输出、CQ 与图片解析、逐群长消息转发 |
-| `/module/typst` | `/render` | 中文、公式与文档渲染为受管 PNG 引用 |
+| `/module/image-projection` | `/prepare` | 模型输入图片的可配置缩放及派生缓存 |
+| `/module/image-projection` | `/thumbnail` | 重排用静态缩略图，独立尺寸与派生缓存 |
+| `/module/message-output` | `/send`、`/send_markdown` | 原生或 Markdown 群输出、图片解析、逐群长消息转发 |
+| `/module/markdown` | `/encode`、`/format` | 原生消息投影、专用链接解析与选择性排版 |
+| `/module/typst` | `/render`、`/typeset` | 文档与 Markdown 排版片段渲染为受管 PNG 引用 |
+| `/module/typst-command` | `/group_message` | 群内 `/typst` 命令，直接渲染并发送，不调用 Agent |
 | `/module/memory` | `/index/advance`、`/index/rebuild`、`/status` | 持久索引待办、显式重建和索引状态 |
 | `/module/agent-tools` | `/describe`、`/invoke` | 原生工具声明与显式模块路由 |
 | `/module/deepseek-web` | `/search`、`/fetch` | 默认网页搜索与 Markdown 抓取 |
 | `/module/wolfram-alpha` | `/query` | 官方 LLM API 精确计算与科学知识查询 |
-| `/module/ai-paint` | `/generate` | 三种绘图后端、受管图片与可发送 CQ |
+| `/module/ai-paint` | `/generate` | 三种绘图后端、受管图片与 Markdown 图片链接 |
 | `/module/onebot-tools` | 账号、好友、群、成员查询与独立发送 | 无凭据 Wasm 工具，复用宿主 OneBot 连接 |
-| `/module/context` | `/format` | 人格提示词、账号身份、来源标记、CQ 和图片格式化 |
+| `/module/context` | `/format` | 人格提示词、账号身份、来源标记、Markdown 和图片格式化 |
 | `/module/openai-provider` | `/complete`、`/capabilities` | 模型协议和多模态能力声明 |
 | `/module/qwen-vl-embedding` | `/embed` | 固定模型、2048 维文本或图片向量 |
+| `/module/qwen-vl-reranker` | `/rank` | 文本或图片相关性评分，供 Memory 筛选种子 |
 
 公共契约见各包中的 `manifest.json` 和 `*.schema`。Rust 调用方持有本地类型映射，不链接其他插件实现；其他语言使用同一 Schema/Value 和固定 Wasm ABI。
 
@@ -32,21 +37,23 @@ Agent、Memory、工具网关是三个独立 Wasm 包，分别位于 `plugins/ag
 
 每轮选取截至最后一条已接纳 @ 的前缀，保存在会话的 staged 队列中，然后逐条 @ 查询。等待期间的新消息不扩张该批次。召回分别放在各自 @ 之前；所有工具结果闭合后，才将下一批群消息接入标准 API 请求。请求头、工具声明和已发送 messages 在同一次工作内保持原值，仅追加新内容。
 
+每次模型调用前，Agent 将当前选好的完整窗口传给 Context `/format`，直接使用返回的完整 messages，不拼接旧 messages，也不剥离头部。Context 是完整输入到完整输出的格式化转换；预置人格 Assistant 每份结果只出现一次，不会插入工具续轮中间。模型实际返回的 reasoning_content 与 tool_calls 原样保留。
+
 窗口按单元数计量，默认高水位 256、低水位 128。静默与首次请求冻结前可以归档并移除旧前缀；开始模型工作后只追加。原生 Assistant 与其工具结果是一个不可拆分块。RecallBatch 保存原记录引用、种子与图元数据，不再次归档或嵌入。每条触发点对应自己的召回批次，格式化时保持完整批次和来源。裁剪不调用摘要模型，没有估算 token 超限硬阻断。
 
-Provider 失败只记录一次；有新的 @ 则接入新输入、清除旧待报告错误并继续。无持续点时排空普通尾部并静默；仍有错误则用 `send` 提交错误报告。正常正文在工具执行前交给独立 Message Output 包发送，支持文本、@、回复、表情和受管图片 CQ。输出包从 Media 解析发送所需的图片，按群设置将长消息转换为合并转发，并返回实际回执，详见[群消息输出](30-message-output.md)。
+Provider 失败只记录一次；有新的 @ 则接入新输入、清除旧待报告错误并继续。无持续点时排空普通尾部并静默；仍有错误则用 `send` 提交错误报告。正常正文在工具执行前经 `/send_markdown` 发送，专用链接表达 @、回复、表情和受管图片。输出模块按群设置将长消息转换为合并转发，并返回每次实际发送的回执，详见[群消息输出](30-message-output.md)。
 
-静默接纳与归档维护失败只记录诊断，不向群内发送错误。触发准备或工作失败才结算一次群错误通知，已结算的持续点保留消息并清除触发意图；报告期间新收到的 @ 属于下一次正常尝试。ModelTurn 与 ToolResult 是原始文本，Memory 按完整 `media:<sha256>` 提取图片关联，不要求它们整段符合 CQ 协议。CQ 语法校验属于发送路径，错误输出不会因归档或多模态投影而反复中断后续对话。
+静默接纳与归档维护失败只记录诊断，不向群内发送错误。触发准备或工作失败才结算一次群错误通知，已结算的持续点保留消息并清除触发意图；报告期间新收到的 @ 属于下一次正常尝试。ModelTurn 与 ToolResult 保存原始内容，Memory 按完整 `media:<sha256>` 提取图片关联。输出协议的解析属于 Markdown 与发送模块，归档不要求模型正文符合 OneBot CQ 语法。
 
 正常 destroy 将窗口、staged、pending 和诊断写入自身配置项。新 create 清除旧触发意图并恢复静默；不重放 Provider 或工具副作用。不完整的旧工具块保留原始记录，但不作为下一次请求的顶层原生工具链。Force/trap 仍只能恢复此前成功保存的状态。
 
 ## 3. 存储与派生索引
 
-Memory 的表结构位于 `plugins/memory/src/schema.sql`，包含 `trunks`、`units`、`links`、`media`、`vectors` 和 `deliveries`。原始结构用 JSON 保存，可直接用 SQLite 工具查看；CQ 是可重建的投影。图片原始字节进入受管文件，数据 URI 仅在模型或发送调用需要时生成。
+Memory 的表结构位于 `plugins/memory/src/schema.sql`，包含 `trunks`、`units`、`links`、`media`、`vectors` 和 `deliveries`。原始结构用 JSON 保存，可直接用 SQLite 工具查看；Markdown 是派生投影。图片原始字节由 Media 的私有 SQLite 持久化，数据 URI 仅在模型或发送调用需要时生成。聊天模型用图通过独立 [Image Projection 包](31-image-projection.md)按配置生成派生图，嵌入来源保持原样。
 
 接纳事务保存原文、位置和媒体来源，随后用 self-send 推进媒体获取。归档事务加入归档资格及每个表示的持久待办，然后返回；嵌入和 Qdrant 不在此事务中。后台处理登记明确的 published/failed 状态；思考和空节点不产生向量表示。非空工具调用、完整工具结果和纯图片均进入处理。
 
-未完成待办在下一次 Memory 接纳/归档或显式 `/index/advance` 时继续推进。重载不重放 Agent 工作，也不凭空创建模块后台线程。已失败项保持失败；管理员可显式 `/index/rebuild` 重建当前索引。换模型或投影配方应建立新的索引空间，再从同一事实库重建；不能把不同空间混写到一个 collection。
+未完成待办在下一次 Memory 接纳/归档或显式 `/index/advance` 时继续推进。重载不重放 Agent 工作。已失败项保持失败；管理员可显式 `/index/rebuild` 重建当前索引，重建会产生嵌入服务调用。更换嵌入模型必须建立新的索引空间，不同模型的向量不能混写。既有 CQ 投影向量保留，新增归档采用 Markdown；历史召回的展示与重排从原始结构生成 Markdown。
 
 Qdrant 保存向量和原群、序号引用。查询采用 [Query API](https://api.qdrant.tech/api-reference/search/query-points)；发布使用 [upsert 的 `wait=true`](https://api.qdrant.tech/api-reference/points/upsert-points)，确认 completed 后才标记本地发布成功。命中回表检查 Archived，随后在 SQLite 内查询有界邻接。种子相似度门槛与图激活分开；时序按实际位置差衰减，联想按端点去重，超出度数限制时随机抽样。
 
@@ -58,7 +65,7 @@ Qdrant 保存向量和原群、序号引用。查询采用 [Query API](https://a
 ./scripts/build-agent.ps1
 ```
 
-该脚本构建十五个独立 Wasm 包及其外部 Manifest/Schema，每次编译并行数为 2。
+该脚本构建十九个独立 Wasm 包及其外部 Manifest/Schema，每次编译并行数为 2。首次使用前运行 `cargo fetch --locked`，并安装 `wasm32-unknown-unknown` 目标。
 
 配置项如下，修改后热重载所属模块生效：
 
@@ -69,10 +76,13 @@ Qdrant 保存向量和原群、序号引用。查询采用 [Query API](https://a
 | Context `/prompt/agent` | 此 Bot 的人格与行动提示词 |
 | Provider `/settings` | endpoint、model、api_key、multimodal、output_limit、reasoning_effort |
 | Embedding `/connection` | 同一 Qwen VL 模型的 endpoint、api_key |
+| Reranker `/connection` | 重排 endpoint、api_key、batch_size；默认沿用 Embedding 凭据初始化，可独立修改 |
 | Memory `/settings` | Qdrant endpoint、api_key、collection、检索参数 JSON |
 | 工具网关 `/routes` | 工具声明及其目标对象、接口 |
 | DeepSeek Web `/connection` | DeepSeek API 前缀和独立凭据 |
 | Wolfram Alpha `/connection` | LLM API endpoint 和 AppID |
+
+检索参数与多模态种子重排见[多模态召回重排](32-multimodal-reranking.md)。`candidate_limit` 控制粗召回范围，`seed_threshold` 与 `rerank_threshold` 分别控制粗筛和重排门槛，`rerank_batch_size` 与 `rerank_image_max_side` 控制重排批次及图片大小。配置辅助程序支持独立的 `FOREST_RERANK_ENDPOINT` / `FOREST_RERANK_KEY`；未提供 Key 时使用 `FOREST_EMBED_KEY` 初始化重排连接。
 
 初次部署可用配置辅助程序。先在当前终端设置 `FOREST_CHAT_ENDPOINT`、`FOREST_CHAT_MODEL`、`FOREST_CHAT_KEY`、`FOREST_EMBED_KEY`、`FOREST_GROUPS`，再执行：
 
@@ -97,7 +107,9 @@ cargo run --locked --offline -j 2 -p forest-cli -- --package packages/agent --ev
 
 默认路由还包含独立 [OneBot 工具包](28-onebot-agent-tools.md)的九个 `onebot_*` 工具，用于读取账号、好友、群与成员信息，以及立即发送独立群消息或私聊消息。普通 assistant 回复仍按原路径自动发送，工具发送成功后不重复发送同一正文。
 
-`image_generate` 通过独立 [AI 绘画包](29-ai-paint.md)生成一张图片，返回受管引用与现成 CQ。绘图供应商、模型、凭据和生成参数由该包的配置表管理，生成失败不自动重试或切换供应商。
+`image_generate` 通过独立 [AI 绘画包](29-ai-paint.md)生成图片，返回受管引用与 Markdown 图片链接。绘图供应商、模型、凭据和生成参数由该包的配置表管理。
+
+`typst_render` 通过独立排版包与 Media 包产生受管图片；将返回页面的 `markdown` 加入 Assistant 正文即可发送，见[文档渲染与受管媒体](25-document-rendering.md)。普通 Markdown 的表格、行间公式和代码块也可自动渲染，标题、列表、引用及行内内容保留为文本。
 
 外部工具接口接受 `Invocation { group_id, bot_id, name, arguments_json }`，返回 `Result<String, Error>`。路由按工具名选择明确的 `(对象, 接口)`，调用仍经过 Manifest uses 和目标 ACL；参数不参与选择任意接口。把自定义路由列表交给打包程序，可同时生成静态依赖：
 
@@ -111,15 +123,9 @@ cargo run --locked --offline -j 2 -p forest-agent-tools --bin package-agent-tool
 
 `plugins/agent/tests/system.rs` 加载实际 Wasm Agent、Memory、Context、Provider、Embedding 和工具网关，模型、向量 HTTP 和 OneBot 回执由本地可控服务提供。覆盖排队边界、并发群会话、原生角色顺序与缓存前缀、正文先发送、静默裁剪、错误报告、热重载、原文保留、媒体投影、失败索引和有界图扩散。
 
-本轮还通过了运行时的 5 项检查，包括 SQLite 原子性与隔离、OneBot 实际 Wasm 链路和调度/热重载；新增包及受影响宿主通过 Clippy。CLI 常规集成命令因现有进程占用 `target/debug/forest.exe` 无法覆盖可执行文件，随后用本次构建的 `target/debug/deps/forest.exe`、临时配置库和本地 WebSocket 完成独立包回复与六包 Agent 依赖启动验证。现有进程未停止，配置辅助程序也在临时库中验证。
-
 ```powershell
 cargo test --locked --offline -j 2 -p forest-agent-module --test system
 cargo test --locked --offline -j 2 -p forest-runtime --lib sqlite_tests
 ```
 
-这组模拟服务测试不衡量真实模型相关性、供应商延迟或十万/百万向量容量。首次实现验证时 Docker 引擎未运行，未连接真实 Qdrant 或发送真实群消息。现有 Vue 控制台提供模块观测和加载/重载；专门的 Agent 配置表单与记忆浏览页面尚未增加。
-
-2026-10-22 的真实启动观察已连接 Qdrant v1.19.2、固定 Qwen VL 模型、配置的 Chat Completions 模型与 OneBot 网关。用户在授权测试群发送 @ 后，实际完成了图片能力查询、文本向量化、Qdrant 查询、模型响应和发送回执；原始群消息与带 reasoning_content 的模型回合各保存一条，随后回到静默，六个模块仍为 Serving。新库尚无归档单元，此次召回为空；未声称验证了真实记忆命中质量或工具执行。原有 AliceBot 服务保留运行。
-
-`typst_render` 通过独立排版包与 Media 包产生受管图片；将返回的 `cq` 放进 assistant 正文即可发送，见 [文档渲染与受管媒体](25-document-rendering-proposal.md)。
+模拟服务测试不衡量真实模型相关性、供应商延迟或十万、百万向量规模的容量。在线部署应独立观察模型请求、向量发布与发送回执，并依据实际数据评估检索参数。

@@ -1,6 +1,6 @@
-# Forest 序列化移植
+# 序列化与类型契约
 
-由已有序列化实现移植并修正。本仓库使用 `forest-serde` 与 `forest-serde-macros`，公共模块拼写统一为 `prelude`。包名、宏生成路径、示例和依赖均使用 Forest 命名，不提供旧名称兼容层。
+`forest-serde` 提供语言无关的 Schema、Value 及结构化编解码，`forest-serde-macros` 提供 Rust 类型映射宏。公共导出位于 `prelude`。
 
 本文只说明类型表达、转换和序列化，不定义模块 ABI、调度器、调用权限、数据库或框架生命周期。运行时设计方向另见[模块运行时架构](01-module-runtime.md)和[状态与访问详细设计](02-state-access-and-reload.md)。
 
@@ -40,13 +40,13 @@ let restored = State::<String>::from_value(value)?;
 
 ## 转换规则
 
-保留原有的结构子类型和前缀投影语义：
+结构子类型与解码采用以下规则：
 
 - `I32` 可以提升为 `i64`；不进行反向缩窄或其他猜测转换。
 - Record 按目标字段读取，额外字段忽略；缺少字段是错误。`Option<T>` 字段缺失不等于该字段的值是 `None`。
 - Tuple 和未命名 Variant 载荷读取目标所需前缀，长度不足是错误，额外尾部忽略。
-- 空 Record 和空 Tuple 维持原有互操作；空结构的转换忽略源结构中的额外字段或元素。空 Variant 载荷同理。
-- 固定数组使用 const generics，不再限制为宏生成的 0–12 长度。
+- 空 Record 和空 Tuple 可以互操作；空结构的转换忽略源结构中的额外字段或元素。空 Variant 载荷同理。
+- 固定数组使用 const generics 表达长度。
 - Map 键转换产生冲突时返回错误，不静默覆盖记录。Map Schema 的键类型仍保持不变性。
 - `Value::check(schema, true)` 是显式宽松校验，允许部分跨形状匹配；`AsValue::from_value` 不启用宽松模式，也不猜测输入形状。
 
@@ -60,8 +60,8 @@ let restored = State::<String>::from_value(value)?;
 
 - Schema 的 Serde 编码统一为根类型在索引 0 的类型表，序列化与反序列化对称。拒绝空类型表和越界引用。
 - Value 与 Schema 都支持 Serde。Map 编码为有序键值对序列，支持 JSON 中的任意结构键并拒绝重复编码键。文本 DSL 的字符串遵循 JSON 转义，格式化保留 Variant 的外层载荷结构，避免单个 Tuple/Record 字段被展开。
-- 继承原来的纯 Ref 环与递归结构类型规则；本次没有重定义类型代数。
+- Schema 以引用表示递归结构，结构兼容性由类型图判定。
 - 原生目标保留 `stacksafe` 调用栈增长；Wasm 目标不依赖原生栈切换，递归受其执行栈限制。当前不承诺任意深度的输入可成功处理。
 - 尚未扩展浮点数和无符号整数。
 - 文本中的字符串由迭代扫描确定边界，再按 JSON 规则解码；较长的转义字符串不递归推进词法器，配置提示词可按同一无损文本格式编辑。
-- JSON 用于外部声明及可读 SQLite 数据，固定 bincode 编码用于[Wasm ABI](13-runtime-and-sdk.md)。本阶段不冻结跨版本持久化二进制协议，不加入状态迁移或 ABI 版本协商。单例身份由 Manifest 的对象 Token 确定；热重载要求已有配置的键集合与 Schema 等价，允许更新默认值并保留当前值。
+- JSON 用于外部声明及可读 SQLite 数据，固定 bincode 编码用于[Wasm ABI](13-runtime-and-sdk.md)。ABI 没有版本协商，宿主、SDK 和插件应配套构建。单例身份由 Manifest 的对象 Token 确定；热重载要求配置键集合与 Schema 等价，允许更新默认值并保留当前值。

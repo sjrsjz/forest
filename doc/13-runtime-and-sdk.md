@@ -1,6 +1,6 @@
 # 运行时、SDK 与 Wasm ABI
 
-本文记录第一版实际实现，语义约束以[调度状态机](12-scheduler-state-machine.md)为准。没有旧 Python 调用层、包格式迁移或 ABI 版本协商。
+本文说明运行时 API、Rust SDK、固定 Wasm ABI 与资源限制。调度语义以[调度状态机](12-scheduler-state-machine.md)为准。
 
 | crate | 职责 |
 |---|---|
@@ -43,11 +43,9 @@ cargo run -p forest-cli --locked -- \
 
 模块 Serving 后，在允许群发送 `#forest-test`，模块回复一次 `hello world`。支持文本段及消息数组中对当前账号的 @。示例接口不可重入；发送成功后才持久化 `/state/replies`。其余命令不触发回复，未允许群不会进入模块或收到原生发送。
 
-以上示例显式传入 `--allow-group` 以限制测试范围；该参数现在可选。省略时 OneBot 宿主不按群过滤，是否处理由接收模块决定，接口 ACL 始终检查。正常 Agent 实例只使用其配置表的 `allowed_groups`，见[Agent 启动](22-agent-implementation.md)。需要宿主测试限制时才传此参数；`GroupScope::Only` 的空集合拒绝全部群，不将空集合解释为全放行。
+以上示例显式传入 `--allow-group` 以限制测试范围；该参数现在可选。省略时 OneBot 宿主不按群过滤，是否处理由接收模块决定，接口 ACL 始终检查。正常 Agent 实例只使用其配置表的 `allowed_groups`，见[Agent 启动](22-agent-guide.md)。需要宿主测试限制时才传此参数；`GroupScope::Only` 的空集合拒绝全部群，不将空集合解释为全放行。
 
-支持多客户端的 OneBot 网关可以同时连接现有 Bot 和测试宿主。测试期间保持现有 Bot 正常服务，通过允许群和精确测试命令限制测试模块的响应范围；启动测试宿主不要求停止现有 Bot。
-
-默认路径均从启动工作目录解析：包 `packages/forest-test`，SQLite `data/forest.sqlite3`，受管文件 `data/modules`。分别可用 `--package`、`--database`、`--data-directory` 修改；不使用隐式 `.local` 工作区。
+默认路径均从启动工作目录解析：包 `packages/forest-test`，SQLite `data/forest.sqlite3`，受管文件 `data/modules`。分别可用 `--package`、`--database`、`--data-directory` 修改。
 
 Ctrl+C 默认 Drain，可用 `--shutdown-mode yield` 或 `force` 显式选择。OneBot 正向 WS 在初次连接失败或运行中断开后自动重连，间隔按 1、2、4、8、16、30 秒退避；成功连接后恢复为 1 秒。连接恢复不重建调度器、模块或 Agent 会话，WebUI 继续运行。反向 WS 保持原监听器，连接结束后等待网关再次接入。
 
@@ -84,7 +82,7 @@ cargo run --release --locked -p forest-runtime --example prepare_packages -- dat
 
 最后的包目录可继续追加；该命令只准备明确列出的包，不自动遍历依赖。应在目标机器上使用与正式宿主一致的 Wasmtime 构建与编译设置准备缓存。Debug 构建还以可执行文件修改时间区分缓存，独立示例程序不能替 Debug 宿主预热；同一个 Debug 宿主重启可以复用。缓存是宿主管理的本机数据，不作为跨 CPU 或跨平台插件工件分发。
 
-2026-10-22 在使用 Wasmtime 38.0.3 的 Windows Debug 宿主上，以隔离数据目录启动完整 Agent 依赖闭包，测量进程启动至 OneBot 本地监听就绪：空缓存为 339.738 秒，同一可执行文件的第二次启动为 2.925 秒。其中 Typst 包准备耗时从 228.521 秒降为 1.939 秒。测量包含包准备和实例初始化，没有调用模型 API；这些历史数值不代表树莓派或后续 Wasmtime 版本的实测性能。
+启动耗时应区分包读取、Wasm 编译与实例初始化。跨平台部署需在目标机器生成编译缓存，具体步骤见[Linux ARM64 部署](27-linux-deployment.md)。
 
 | 操作 | 行为 |
 |---|---|
@@ -166,4 +164,4 @@ cargo test --workspace --all-features --locked
 
 集成测试编译真实 Wasm，使用两个代码不同、契约相同的候选。覆盖类型化调用、ACL、非重入与重入交错、自唤醒和组合 Future、容量、三种卸载方式、代码替换、trap、单线程执行器下的抢占、配置恢复和延迟 SQLite 写入交接、文件隔离、HTTP/WS，以及实际 CLI 的群消息到 OneBot 回执。自动测试流量只进入本地模拟服务。
 
-宿主注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`、`/send_private_message`、`/query`；查询入口接受固定的只读 action 枚举，Agent 工具封装位于独立 [OneBot 工具包](28-onebot-agent-tools.md)。CLI 的 OneBot callers 授权 `/module/**`，因此独立加载的插件可使用这些原生接口；可选 `--allow-group` 额外限制群接收、查询与发送，并禁止私聊发送。CLI 另安装 `/core/control` 管理适配器，仅授权 `/module/shell`，见[群聊 Shell](26-group-shell-and-school-help.md)。可选 WebUI 已提供观测和模块装卸。Agent、Memory 与工具网关已由独立 Wasm 包实现，见[实现与启动](22-agent-implementation.md)。热重载可更新同 Schema 的声明默认值并保留当前值；配置项集合或 Schema 变更仍拒绝。包分发与配置变更通知尚未实现。
+宿主注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`、`/send_private_message`、`/query`；查询入口接受固定的只读 action 枚举，Agent 工具封装位于独立 [OneBot 工具包](28-onebot-agent-tools.md)。CLI 的 OneBot callers 授权 `/module/**`，因此独立加载的插件可使用这些原生接口；可选 `--allow-group` 额外限制群接收、查询与发送，并禁止私聊发送。CLI 另安装 `/core/control` 管理适配器，仅授权 `/module/shell`，见[群聊 Shell](26-group-shell.md)。可选 WebUI 已提供观测和模块装卸。Agent、Memory 与工具网关已由独立 Wasm 包实现，见[实现与启动](22-agent-guide.md)。热重载可更新同 Schema 的声明默认值并保留当前值；配置项集合或 Schema 变更仍拒绝。包分发与配置变更通知尚未实现。

@@ -1,4 +1,4 @@
-﻿# 配置表与 SQLite 持久化
+# 配置表与 SQLite 持久化
 
 `forest-config` 是宿主配置存储。逻辑结构为 `实体 Token → 配置项 Token → Entry`，不包含 Bot 或 Agent 特定含义。SQLite 是数据的唯一权威，不另设一份可独立修改的内存表。
 

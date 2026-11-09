@@ -1,55 +1,63 @@
-# Forest 设计文档
+# Forest 文档
 
-本目录记录 Rust 新主线设计与实现边界。当前已实现调度核心、基础 SDK、静态 ACL、配置及 OneBot 接入。实际启动、ABI 和未覆盖范围见[运行与 SDK](13-runtime-and-sdk.md)。
+本目录说明 Forest 的使用方式、模块契约和架构。构建入口见[项目 README](../README.md)；模块接口的机器可读契约位于各包的 `manifest.json` 与 `*.schema` 文件中。
 
-| 文档 | 状态 |
-|---|---|
-| [序列化](serialization.md) | 已实现 |
-| [模块运行时架构](01-module-runtime.md) | 核心已实现 |
-| [状态、访问与重载](02-state-access-and-reload.md) | 已实现，声明变更策略仍受限 |
-| [Token 与通配符](03-token.md) | 路径及宿主来源绑定已实现 |
-| [OneBot API 与宿主接入](04-onebot-v11.md) | HTTP/WS 和群消息已接入 |
-| [配置表](05-config-table.md) | SQLite 与受限入口已实现 |
-| [静态 ACL](06-config-access.md) | 声明及宿主检查已接入 |
-| [外部 Manifest](07-module-manifest.md) | 类型及加载器已实现 |
-| [宿主接口](08-host-interfaces.md) | 基础 SDK 与导入已实现 |
-| [模块调度](09-scheduling.md) | 独占推进、两种让出及重入已实现 |
-| [生命周期](10-module-lifecycle.md) | 三种卸载与资源交接已实现 |
-| [notifier 与依赖](11-notifier-and-dependencies.md) | 静态转发及装卸计划已实现 |
-| [状态机与所有权](12-scheduler-state-machine.md) | 已实现，关键交错经真实 Wasm 验证 |
-| [运行与 SDK](13-runtime-and-sdk.md) | 实际命令、ABI、范围及验证 |
-| [宿主调试台与模块管理](14-inspection-webui.md) | Vue/TypeScript、Inspector、SSE、依赖图、配置编辑、滚动日志与受限本地包管理已实现 |
-| [多主干多模态记忆模型](15-memory-model.md) | Memory 独立包已实现；多主干、归档集合、媒体引用、跨主干召回与联想 |
-| [Qwen VL 与记忆设施](16-memory-infrastructure.md) | 模块私有 SQLite 与 Qdrant 协议已接入；原文与派生向量分离 |
-| [向量化 Wasm 模块](17-embedding-module.md) | 已实现；JSON 浮点载荷、热重载、真实图文批量调用已验证 |
-| [OpenAI 兼容 Provider](18-openai-provider.md) | 已实现；模块配置模型与连接、图片能力声明、原生 function 工具及完整响应 |
-| [上下文格式化模块](19-context-module.md) | 已实现；单一 format 入口，可配置 Agent 提示词，原生角色、CQ/图片及热重载经实际 Wasm 验证 |
-| [Agent 状态与窗口裁剪](20-agent-state-and-window.md) | 独立 Agent 包已实现；每群串行工作、持续点、高低水位裁剪及静默恢复 |
-| [Agent、Memory 与数据库边界](21-agent-storage-boundary.md) | 已实现；Wasm 持有数据模型，宿主按模块身份执行通用原子 SQLite 操作 |
-| [Agent 实现与启动](22-agent-implementation.md) | 包构建、配置、工具路由、启动命令及实际验证范围 |
-| [DeepSeek 网页工具](23-deepseek-web.md) | 独立 Wasm 搜索/抓取插件，默认联网工具与原始 HTTP 分工 |
-| [Wolfram Alpha 工具](24-wolfram-alpha.md) | 独立 Wasm 计算插件、连接配置与工具网关路由 |
-| [文档渲染与受管媒体](25-document-rendering-proposal.md) | 独立 Typst/Media Wasm 包、PNG 引用、CQ 发送及媒体持久化 |
-| [群聊 Shell 与学校帮助](26-group-shell-and-school-help.md) | 授权管理 Wasm 包、共享宿主管理端口与 NPUCraft 帮助回复 |
-| [Linux ARM64 部署](27-linux-deployment.md) | 交叉构建、编译预热、systemd、WebUI 监听与数据搬迁 |
-| [Agent OneBot 工具](28-onebot-agent-tools.md) | 独立 Wasm 查询与发送工具、CQ、受管图片及原生接口边界 |
-| [AI 绘画](29-ai-paint.md) | 独立 Wasm 绘图包，SwarmUI/Nano-Banana/SiliconFlow 与受管图片发送 |
-| [群消息输出](30-message-output.md) | 独立输出包、逐群长消息转发与发送回执 |
+## 使用与部署
 
-文档中的“待定”表示尚未形成决定。编写对应实现前应继续讨论，不能把示例名称或先前提案直接固定为接口。
+| 文档 | 内容 |
+| --- | --- |
+| [运行时、SDK 与 Wasm ABI](13-runtime-and-sdk.md) | 启动方式、OneBot 接入、插件开发、热重载及 ABI |
+| [WebUI 与模块管理](14-inspection-webui.md) | 登录、运行状态、声明依赖图、配置编辑、日志和模块装卸 |
+| [Agent 使用指南](22-agent-guide.md) | 插件构建、模型连接、群启用、工具配置与运行流程 |
+| [群聊 Shell](26-group-shell.md) | 群内管理命令、授权、配置读写与示例回复插件 |
+| [Linux ARM64 部署](27-linux-deployment.md) | 交叉构建、编译预热、systemd 和运行目录 |
 
-当前采用宿主托管状态表，以及“提供方在配置或接口上挂静态 AccessPolicy＋调度器绑定真实来源＋宿主检查执行”的方向。配置读写使用 readers/writers，接口 send/call 使用 callers，复用同一套 ACL 查询，不建立动态 SQL ACL 表。此前讨论的强制 `snapshot` 交接、完整委派令牌树及自动重载超时均未采用。
+## 内核与模块开发
 
-当前范围收敛到单个 Bot 账号，同时处理多个群聊。OneBot 事件沿用 v11 原始结构，省略无关字段，不为多账号预设实体目录、路由与配置挂载。
+| 文档 | 内容 |
+| --- | --- |
+| [序列化](serialization.md) | Schema、Value、结构子类型、转换和编码 |
+| [模块运行时架构](01-module-runtime.md) | 单例模块、消息通信、隔离及职责 |
+| [状态、访问与重载](02-state-access-and-reload.md) | 托管状态、配置、ACL 与实例交接 |
+| [来源令牌与路径匹配](03-token.md) | 身份路径、可信来源和通配符 |
+| [OneBot v11](04-onebot-v11.md) | API 库、宿主接入和消息契约 |
+| [配置表](05-config-table.md) | 默认值、原子操作、SQLite 存储与导入导出 |
+| [访问声明](06-config-access.md) | 配置读写、接口调用和静态 ACL |
+| [模块 Manifest](07-module-manifest.md) | 身份、接口、依赖、配置和事件订阅声明 |
+| [宿主接口](08-host-interfaces.md) | 通信、配置、网络、文件、SQLite、日志和时间 |
+| [模块调度](09-scheduling.md) | 执行权、时间片、异步等待、重入与队列 |
+| [模块生命周期](10-module-lifecycle.md) | create/destroy、三种停止方式和故障结算 |
+| [宿主事件与依赖](11-notifier-and-dependencies.md) | 事件投递、静态接收声明和依赖规划 |
+| [调度器状态机](12-scheduler-state-machine.md) | 状态转换、所有权、不变量和资源交接 |
 
-模块配置接口先采用独立、原子的单项 `get/set/reset`，冲突处理由模块决定；不引入事务内模块回调、批量操作、版本、CAS 或自动重试。现有原生配置库的额外 API 不自动成为 Wasm 接口。
+## Agent 与记忆
 
-同一 Wasm 实例一次只推进一个任务。时间片被动让出保留执行权，模块主动返回 Pending 才释放；接口明确声明 reentrant，不设置数值并发上限。不可重入接口在任务等待期间仍保持占用，主动让出也不代表热重载排空完成。
+| 文档 | 内容 |
+| --- | --- |
+| [多主干多模态记忆](15-memory-model.md) | 原始单元、群主干、归档资格、联想与图扩散 |
+| [记忆存储与索引设施](16-memory-infrastructure.md) | SQLite、受管媒体、Qdrant 和向量空间 |
+| [多模态向量化](17-embedding-module.md) | 嵌入接口、固定模型、连接配置和浮点载荷 |
+| [聊天模型 Provider](18-openai-provider.md) | Chat Completions、原生工具调用、思考字段和能力声明 |
+| [上下文格式化](19-context-module.md) | 完整输入到标准 API 上下文、人格和来源标记 |
+| [群会话与裁剪](20-agent-state-and-window.md) | 每群串行工作、持续点、高低水位和静默维护 |
+| [Agent 与数据库边界](21-agent-storage-boundary.md) | 插件数据所有权、原子提交与恢复 |
+| [模型输入图片投影](31-image-projection.md) | 聊天图片缩放、重排缩略图与派生缓存 |
+| [多模态召回重排](32-multimodal-reranking.md) | 候选召回、文本/图片评分和种子选择 |
 
-状态机以所有权表达约束：当前推进、接口许可、请求额度和返回出口只移动不复制；ReadyQueue 合并重复唤醒，结束任务不保留可变终态。poll 返回之后的 ABI 收尾仍属于独占推进；原生本地操作终结后才完成旧实例的资源交接。
+## 工具与消息输出
 
-外部卸载/重载可明确选择 Drain、AtYield 或 Force，不自动超时升级。create/destroy 均禁止 send/call，包括宿主原生服务对象；destroy 另限于配置与基础清理。Force/trap 跳过全部来宾析构，由宿主回收资源。宿主定义事件，Manifest 只声明接收入口，无运行时取消订阅。
+| 文档 | 内容 |
+| --- | --- |
+| [搜索与网页抓取](23-deepseek-web.md) | DeepSeek 搜索、抓取与原始 HTTP 工具的分工 |
+| [计算工具](24-wolfram-alpha.md) | Wolfram Alpha LLM API 与连接配置 |
+| [文档渲染与受管媒体](25-document-rendering.md) | Typst、Media、图片引用和群内 `/typst` 命令 |
+| [Agent OneBot 工具](28-onebot-agent-tools.md) | 账号、好友、群成员查询及独立消息发送 |
+| [AI 绘画](29-ai-paint.md) | 绘图后端、参数、受管图片和工具结果 |
+| [群消息输出](30-message-output.md) | 分片发送、逐群长消息转发和实际回执 |
+| [Markdown 消息与富文本](33-markdown-messages.md) | 专用链接、选择性排版、原文保留及协议投影 |
 
-群消息等事件由宿主接入能力产生，调度器 notifier 查静态注册表投递普通请求，逐目标接纳结果由宿主处理。模块没有 events 字段或 notify 发布接口。模块加载依赖由 uses 的模块目标确定，subscriptions 只核对宿主事件支持，不产生插件生产者依赖。
+## 阅读约定
 
-旧 Python 实现及其设计文档保存在 `archive/python-2026-10-19` 等归档分支中，不作为新主线的设计依据。
+架构文档说明模块职责和运行时保证，使用指南说明构建、配置和操作。模块章节中的离线构建命令以完成根 README 的工具链安装和 `cargo fetch --locked` 为前提。未提供的能力在各章的范围说明中列出。
+
+所有地址、账号、群号和凭据均使用示例或占位符。模型 API、协议标准及构建依赖的链接用于说明公开契约，阅读文档不需要访问其他项目的源码或本地目录。

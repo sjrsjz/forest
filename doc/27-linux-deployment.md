@@ -17,9 +17,11 @@ cargo zigbuild --release --locked -j 2 --target aarch64-unknown-linux-gnu.2.36 -
 
 运行目录包含 `bin/forest`、`bin/qdrant`、`packages/`、`webui/dist/`、`data/`、`.env` 和 `qdrant.yaml`，可选安装预热工具 `bin/prepare_packages`。配置数据库为 `data/config.sqlite3`，模块私有数据库、媒体与编译缓存位于 `data/modules/`。凭据文件只允许服务用户读取，使用 `FOREST_WEB_PASSWORD` 和 `FOREST_ONEBOT_TOKEN`；Qdrant 启用密钥时另设 `QDRANT__SERVICE__API_KEY`。
 
+临时更新目录放在 `temp/updates/`，一次性脚本放在 `temp/scripts/`，安装压缩包放在 `temp/archives/`，诊断与预热产物放在 `temp/diagnostics/`。历史包和配置备份集中在 `backup/`，迁移快照放在 `backup/migration/`，部署记录放在 `backup/deployment-records/`，服务文件备份放在 `backup/service-files/`。`data/` 仅存运行数据。
+
 [服务模板](../deploy/linux/forest.service.in)与 [Qdrant 服务模板](../deploy/linux/forest-qdrant.service.in)中的 `@USER@` 和 `@ROOT@` 分别替换为实际用户与绝对运行目录，再安装至 `/etc/systemd/system/`。Qdrant 使用[独立配置](../deploy/linux/qdrant.yaml)，只在本机监听；WebUI 在 `0.0.0.0:8081` 监听并保留密码登录。
 
-CLI 允许重复 `--package` 声明启动根包，依赖闭包一次规划、共享依赖一次加载。服务模板同时启动 Agent、Shell 与学校帮助包，重启后无需手动恢复后两者。OneBot 使用本机 `ws://127.0.0.1:8080`；不同网关部署可直接修改服务参数。
+CLI 允许重复 `--package` 声明启动根包，依赖闭包一次规划、共享依赖一次加载。服务模板同时启动 Agent、Shell、学校帮助与 Typst 群命令包，重启后无需手动恢复。OneBot 使用本机 `ws://127.0.0.1:8080`；不同网关部署可直接修改服务参数。
 
 首次启动服务前，可以在目标机器运行 `bin/prepare_packages data/modules packages/typst ...`，列出全部待启动包以预热本机编译缓存。预热不创建来宾实例，不连接 OneBot，不调用模型 API。跨架构迁移不复制旧机器的编译缓存。
 

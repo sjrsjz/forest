@@ -46,9 +46,5 @@ Agent 的实际 Wasm 联调通过网关调用本插件，核对鉴权、请求�
 在线验证读取已有配置库，将连接复制进临时调度器，分别执行一次真实搜索和抓取，不连接 OneBot、不输出正文或凭据：
 
 ```powershell
-cargo run --locked --offline -j 2 -p forest-deepseek-web --example verify -- data/agent/config.sqlite3
+cargo run --locked --offline -j 2 -p forest-deepseek-web --example verify -- data/forest.sqlite3
 ```
-
-2026-10-22 的真实 API 验证：搜索返回 3 条结果，耗时 332 ms；抓取返回 6405 字符的 Markdown，耗时 94 ms。耗时仅代表本次样本，不作为服务延迟保证。
-
-运行实例已启用四条工具路由：`web_search`、`web_fetch`、`http_request`、`memory_read`。本次同时验证了宿主装载同 Schema 的新默认值时保留当前配置，未归档会话经正常 destroy 保存后恢复为静默。

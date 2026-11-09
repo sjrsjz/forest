@@ -1,8 +1,8 @@
 # Wolfram Alpha 计算工具
 
-`plugins/wolfram-alpha` 是独立 Wasm 包，提供 `/module/wolfram-alpha` 的 `/query` 接口。它沿用 QiYu 当前后端的官方 [LLM API](https://products.wolframalpha.com/llm-api/documentation)，不采用旧调试工具中的网页 WebSocket 协议。
+`plugins/wolfram-alpha` 是独立 Wasm 包，通过官方 [LLM API](https://products.wolframalpha.com/llm-api/documentation) 提供 `/module/wolfram-alpha` 的 `/query` 接口。
 
-工具网关默认发布 `wolfram_alpha`，通过 Manifest 的 uses 和目标接口 ACL 调用。参数为 `query: string`、可选 `max_chars: integer`；查询使用简明的单行英文，长度为 1–2000 个字符，结果字符额度默认 4000，可选 500–6000，与 QiYu 的工具参数一致。
+工具网关默认发布 `wolfram_alpha`，通过 Manifest 的 uses 和目标接口 ACL 调用。参数为 `query: string`、可选 `max_chars: integer`；查询使用简明的单行英文，长度为 1–2000 个字符，结果字符额度默认 4000，可选 500–6000。
 
 插件通过宿主通用 HTTP 发出 GET 请求，查询参数只有 `input` 和 `maxchars`。AppID 使用官方支持的 `Authorization: Bearer <AppID>`，不进入 URL、工具参数或结果。插件不重试，不调用模型，也不负责上下文裁剪或消息发送。
 
@@ -23,4 +23,4 @@ cargo run --locked --offline -j 2 -p forest-agent-tools --bin package-agent-tool
 cargo run --locked --offline -j 2 -p forest-wolfram-alpha --example verify -- data/forest.sqlite3
 ```
 
-2026-10-22 已使用 QiYu 配置的 AppID 完成真实 Wasm 调用：`integrate x^2 sin(x) from 0 to pi` 返回 `π² − 4 ≈ 5.8696`，调用约 1.8 秒。当前实例经管理员配置入口加入该工具并热重载网关，八个模块均为 Serving；未发送测试群消息。AppID 只保存在本地配置库，未写入源码、Manifest 或本文。
+验证程序会调用真实服务，需先在配置库中设置有效 AppID。凭据保存在本地配置库中，不写入 Manifest。

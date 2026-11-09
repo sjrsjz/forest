@@ -1,6 +1,6 @@
 # 宿主调试台与模块管理
 
-状态：已实现。控制台供受信管理员使用，可以查看完整配置，包括仅允许 SelfModule 读取的项；配置写入使用宿主绑定的 `/user/admin` 来源，按声明的 writers 鉴权，无管理员写入旁路。
+控制台供受信管理员使用，可以查看完整配置，包括仅允许 SelfModule 读取的项；配置写入使用宿主绑定的 `/user/admin` 来源，按声明的 writers 鉴权。
 
 调试台展示模块实时状态、声明依赖关系、配置表内容和滚动运行日志，并提供本地包加载、重载和卸载入口。运行时仍是状态权威，WebUI 是可选的宿主适配层。
 
@@ -22,7 +22,7 @@ flowchart LR
     Set --> Store
 ```
 
-Web 层持有三个由宿主显式授予的独立能力：Inspector 只读观测，ModuleManager 执行包读取、依赖规划及装卸，ConfigWriter 以绑定来源执行受 ACL 约束的配置 set。Web 层不持有完整 Scheduler、模块调用能力或可写 ConfigStore。这些句柄不传入 Wasm；宿主可经独立 `/core/control` 适配器向特定管理插件开放类型化端口，静态 callers 仍控制可调用者，见[群聊 Shell](26-group-shell-and-school-help.md)。本地包目录的读取、规划及装卸实现由 `forest-control::packages` 共用。
+Web 层持有三个由宿主显式授予的独立能力：Inspector 只读观测，ModuleManager 执行包读取、依赖规划及装卸，ConfigWriter 以绑定来源执行受 ACL 约束的配置 set。Web 层不持有完整 Scheduler、模块调用能力或可写 ConfigStore。这些句柄不传入 Wasm；宿主可经独立 `/core/control` 适配器向特定管理插件开放类型化端口，静态 callers 仍控制可调用者，见[群聊 Shell](26-group-shell.md)。本地包目录的读取、规划及装卸实现由 `forest-control::packages` 共用。
 
 观测不执行来宾代码、不遍历来宾内存、不恢复任务。控制台连接、读取和关闭不改变模块生命周期。只有显式装卸请求可以执行生命周期代码。配置 set 只更新存储值，不执行来宾或自动重载。模块自带 UI 和 Agent 页面另行设计。
 
@@ -37,7 +37,7 @@ Web 层持有三个由宿主显式授予的独立能力：Inspector 只读观测
 | 宿主调试台 | 明确授予的完整配置只读观测能力 |
 | 管理端配置 set | `/user/admin` 来源，逐项检查当前已发布配置 ACL 的 writers，校验 Schema 后原子写入 |
 
-第一版采用单个宿主管理口令和会话，不建用户数据库或角色系统。口令由宿主启动配置提供；认证后用同源 HttpOnly 会话 Cookie 访问 HTTP/SSE，不把口令放入 URL。默认回环监听，远程访问可由用户配置受保护的入口。
+控制台采用单个宿主管理口令和会话。口令由宿主启动配置提供；认证后用同源 HttpOnly 会话 Cookie 访问 HTTP/SSE。监听地址由 `--webui` 指定。
 
 运行状态、配置读取和写入、本地包列表和模块管理均置于认证边界内。静态资源不嵌入运行数据；数据响应不缓存。配置写入与模块管理请求和登录一样检查同源。管理端口不提供任意模块调用。
 
@@ -79,7 +79,7 @@ CLI 在创建控制台时授予 `scheduler.config_writer("/user/admin")`；来�
 
 Serving 表示对象可以接纳工作，不表示它此刻正在执行 CPU 指令。占用名额包括必要收尾，不冒充“正在运行的任务数”。原生对象的登记也不代表外部网络连接健康。
 
-第一版不显示尚无权威采集来源的 CPU 百分比、Wasm 实际内存、精确执行耗时或任务运行中/等待中分类；不为填满仪表盘增加调度状态副本。
+页面显示已有权威采集来源的状态和计数，不估算 CPU 百分比、Wasm 实际内存或精确执行耗时。
 
 ### 3.2 依赖图
 
@@ -100,7 +100,7 @@ flowchart LR
 
 重载期间保留已发布图，详情同时显示当前实例与候选标记；新声明发布后再切换图。不能把候选边静默混入已发布依赖。
 
-后端返回类型化节点和边，浏览器生成 Mermaid 描述。内部节点 ID 使用生成的 `n0` 等标识，不直接用 Token 拼 Mermaid 语法；标签统一转义。使用 strict 模式和纯文本标签，不允许插件注入图语句或 HTML。Mermaid 的 strict 模式会禁用其声明式点击功能，因此节点选择首版由模块列表完成，不为点击放宽模式。[渲染接口](https://mermaid.js.org/config/usage)、[安全模式](https://mermaid.js.org/config/schema-docs/config-properties-securitylevel.html)。
+后端返回类型化节点和边，浏览器生成 Mermaid 描述。节点使用生成的 `n0` 等内部 ID，Token 仅作为转义后的标签。图采用 strict 模式与纯文本标签，节点选择由模块列表完成。参见[渲染接口](https://mermaid.js.org/config/usage)与[安全模式](https://mermaid.js.org/config/schema-docs/config-properties-securitylevel.html)。
 
 只在节点、边或显示状态改变时更新图，不随每次计数刷新重新布局。前端资源本地打包并锁定依赖，不要求运行机器联网访问 CDN。
 
@@ -174,14 +174,11 @@ set 在运行时重查 ACL 后，进入 Wasm `config_set` 共用的写入路径�
 
 配置默认只在用户选择或刷新时读取。自动刷新只作用于当前选中项，并限制为上一请求结束后再发下一请求；不将整个配置库按采样频率扫描。
 
-## 6. 实施范围
+## 6. 宿主集成与模块管理
 
-1. 在 forest-runtime 增加 Inspector 与只读快照 DTO；复用现有 State、Manifest、Budget 和 ConfigStore，不引入调度控制副本。
-2. 增加可选 forest-webui，承载认证、固定查询、受限模块管理、ACL 配置编辑和 SSE，CLI 显式挂载。
-3. 实现 PC 页面与 Mermaid 依赖图，资源随程序分发。
-4. 验证读取不执行模块、不初始化数据；热重载时发布信息正确切换；慢客户端不积压；普通 Wasm 仍不能读取未授权配置。
+`forest-runtime` 提供 Inspector 和只读快照，复用 State、Manifest、Budget 与 ConfigStore。可选的 `forest-webui` 承载认证、查询、模块管理、配置编辑及 SSE，由 CLI 挂载。Vue 页面与 Mermaid 资源随部署目录分发。
 
-这一阶段不改变现有模块 ABI，不为 UI 注册新的 Wasm 接口，不停止正在正常服务的初号机。
+WebUI 通过宿主控制接口访问运行时，不为界面引入专用 Wasm 导出。
 
 ### 6.1 本地包与装卸入口
 
@@ -252,4 +249,4 @@ API 表单用例对聊天 Provider、嵌入、网页工具和 Memory 的实际�
 
 `tests/layout.spec.ts` 验证两处分隔线的拖动、键盘操作、刷新后宽度保留和双击复位，以及数组项增删后保存保持完整值、1280×720 桌面无整页溢出。截图位于已忽略的 test-results。
 
-运行日志的 HTTP 验证包含未登录拒绝、初始回放、实时增量、Last-Event-ID 续接、旧宿主游标重置以及关闭时结束 SSE。`tests/logs.spec.ts` 使用模拟的 150 条日志验证本地筛选、仅当前对象、暂停跟随、回到最新和 1280×720 视口，不写配置或发送群消息。该用例已通过，截图为 `test-results/logs-1280.png`。
+运行日志的 HTTP 验证包含未登录拒绝、初始回放、实时增量、Last-Event-ID 续接、旧宿主游标重置以及关闭时结束 SSE。`tests/logs.spec.ts` 使用模拟日志验证本地筛选、对象过滤、暂停跟随、回到最新和桌面视口，不写配置或发送群消息。

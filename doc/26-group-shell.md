@@ -1,4 +1,4 @@
-# 群聊 Shell 与学校服务器帮助
+# 群聊 Shell 与示例回复插件
 
 两个功能分别由 `/module/shell` 和 `/module/npucraft` 独立 Wasm 包实现。它们订阅宿主 OneBot 群消息事件，不调用 Agent、Provider 或 Memory。命令解析、触发匹配、授权用户和回复内容均属于插件。
 
@@ -12,15 +12,15 @@ cargo build --offline --locked -j 2 -p forest-cli
 
 两个包出现在 `packages/shell`、`packages/npucraft`，也纳入 `scripts/build-agent.ps1`。使用更新后的 `forest` 宿主，在 WebUI 的本地包页面分别加载它们。Shell 所需 `/core/control` 端口由 CLI 安装，独立于 WebUI 是否启用；自定义宿主需显式安装同一适配器。
 
-## 学校 MC 帮助
+## 服务器帮助回复示例
 
-`npucraft` 精确匹配去除首尾空白后的“地图”“卫星地图”和小写 `ciallo`，返回初号机现有的主服、工业服、资源服地图及数据面板链接。附带其他文字、@ 或媒体的消息不匹配。自身账号消息不触发。
+`npucraft` 是服务器帮助回复示例。它精确匹配去除首尾空白后的“地图”“卫星地图”和小写 `ciallo`，返回配置的地图或数据面板链接。附带其他文字、@ 或媒体的消息不匹配。自身账号消息不触发。
 
 `/module/npucraft` 的 `/settings` 包含：
 
 | 字段 | 含义 |
 |---|---|
-| `allowed_groups` | 允许群；空集合沿用初号机的所有群行为 |
+| `allowed_groups` | 允许群；空集合表示所有群 |
 | `triggers` | 精确匹配的完整消息文本 |
 | `reply` | 回复原文 |
 
@@ -43,7 +43,7 @@ cargo build --offline --locked -j 2 -p forest-cli
 
 ## 命令
 
-直接发送纯文本命令，无需 @。第一版仅解析纯文本消息，命令前不附加 @、引用或其他 CQ 段。
+直接发送纯文本命令，无需 @。命令解析仅接受纯文本消息，命令前不附加 @、引用或其他消息段。
 
 ```text
 #forest help
@@ -57,7 +57,7 @@ cargo build --offline --locked -j 2 -p forest-cli
 #forest module force /module/npucraft
 #forest config keys /module/context
 #forest config get /module/context /prompt/agent
-#forest config set /module/context /prompt/agent "You are Alice."
+#forest config set /module/context /prompt/agent "Respond clearly and concisely."
 ```
 
 `load` 按包的对象 Token 从宿主配置的包目录定位，并通过现有静态依赖计划加载依赖。目录中不合法的包在 `packages` 结果里显示错误，重复对象声明不能任取其中一个。

@@ -1,16 +1,17 @@
 # 群消息输出与长消息转发
 
-`/module/message-output` 是独立 Wasm 包，源码位于 `plugins/message-output`。它通过静态 `/send` 接口完成 CQ 解析、受管图片解析、按群选择长消息展示方式与 OneBot 发送。Agent 持有包自己的契约副本，不链接其实现；宿主仍只提供 OneBot 原生传输。
+`/module/message-output` 是独立 Wasm 包，源码位于 `plugins/message-output`。模型输出通过 `/send_markdown` 调用独立 Markdown 包进行解析与排版，再解析受管图片、按群选择长消息展示方式并调用 OneBot。原生 `/send` 用于框架命令与错误报告。Agent 持有包自己的契约副本，不链接其实现；宿主仍只提供 OneBot 原生传输。
 
 ## 调用与回执
 
 ```text
-Agent 模型正文 / 错误报告 ─┐
-                         ├─ message-output /send ─ core/onebot /send_group_message
-OneBot 工具的群发送 ──────┘
+Agent 模型正文 / OneBot 群发送 → message-output /send_markdown
+                                  ↓ Markdown /format → Typst /typeset
+                                  ↓ core/onebot /send_group_message
+框架错误报告 / Typst 群命令 ──→ message-output /send
 ```
 
-请求为 `GroupOutput { group_id, bot_id, bot_name, message }`，其中 message 是 OneBot 的类型化 Message：模型正文使用 CQ 字符串，框架错误报告使用明确的 Text 消息段。返回 `Result<SentMessage, Error>`；调度失败仍属于外层 DispatchError。静态 callers 允许 Agent、OneBot 工具包和受信管理员。
+原生 `/send` 请求为 `GroupOutput { group_id, bot_id, bot_name, message }`，返回 `Result<SentMessage, Error>`。`/send_markdown` 请求为 `MarkdownOutput { group_id, bot_id, bot_name, source }`，返回 `Result<DeliveryReport, Error>`：发送前错误直接返回 Err；开始发送后保留全部成功回执以及最终 outcome，失败后停止、不重试。分隔符节点产生多条消息，每条分别应用长消息策略，判定使用排版前文本计量。Agent 为所有成功回执登记同一 ModelTurn。详见 [Markdown 消息](33-markdown-messages.md)。
 
 发送前只接纳文本、@、回复、表情和受管图片。图片由 Media 取得字节，转换为本次发送使用的 Base64；引用或地址本身不计入文本长度。模型不能通过输出 `node` 伪造其他人的发言。合并转发节点由输出模块构造，发送者始终为调用请求中的 Bot 身份。
 

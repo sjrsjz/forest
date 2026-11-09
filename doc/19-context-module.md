@@ -1,6 +1,6 @@
 # 上下文格式化模块设计
 
-本模块已实现并通过实际 Wasm 验证，衔接[记忆内容](15-memory-model.md)与[OpenAI Provider](18-openai-provider.md)。
+Context 将[记忆内容](15-memory-model.md)格式化为可交给[OpenAI Provider](18-openai-provider.md)的标准消息。
 
 ## 1. 职责
 
@@ -73,13 +73,17 @@ let request = Request {
 
 > Be helpful, natural, and attentive to the participants in the conversation. Clearly distinguish established information, historical evidence, and uncertainty.
 
-开头的 System 消息严格按以下顺序拼接：
+每次格式化先生成固定的两条消息，再按原顺序追加调用方提供的完整上下文：
 
-1. 包内英文 Markdown 系统提示词 [system.md](../plugins/context/src/system.md)，详细定义请求顺序、群消息、触发点、召回批次、来源与图关系、原生工具序列、CQ 和多模态内容。
-2. `## Runtime identity values`：在 `runtime_identity` 中注入 Bot 账号和当前群。
-3. `## Persona`：原样附加 `/prompt/agent`，不翻译或改写用户的人格配置。
+1. **System**：包内英文 Markdown 系统提示词 [system.md](../plugins/context/src/system.md) 定义请求顺序、群消息、触发点、召回批次、来源与图关系、原生工具序列、Forest Markdown 和多模态内容；随后通过 `## Runtime identity values` 注入 Bot 账号和当前群；最后的 `## Persona initialization` 说明开头的自我描述已经完成，应按该身份继续对话。System 不拼入人格配置本身。
+2. **Assistant**：使用包内英文模板 [persona.md](../plugins/context/src/persona.md)，将 `/prompt/agent` 原样放入普通 `content` 的字面 `<think>...</think>` 块。模板以第一人称确认描述属于自己，并明确原始设定中的第二人称指自己；不翻译或改写用户配置。
+3. **实际上下文**：逐条转换调用方提供的群消息、召回、模型回合和工具结果，保持传入次序。
 
-人格负责角色和语气，输入契约负责来源解释。提示词明确说明召回只为对应触发点提供候选证据、跨群来源不能改写为本群发言、关联边不等于事实或同一话题、检索排列不一定是时间顺序。当前会话与实际问题决定回答目标。输入标签不约束模型的输出；Assistant、thinking 和 tool_calls 均沿用原生协议。
+每次模型调用前，Agent 传入当前选好的完整窗口，直接使用 Context 返回的完整 messages。Context 不接收增量标记，不持有上一次格式化结果；Agent 不拼接旧 messages，也不按条数或角色剥离提示词。
+
+这条开头的 Assistant 是 Context 在本地预置的完整消息，不额外调用模型生成自述，不使用 `prefix` 或人为填写 `reasoning_content`。`<think>` 在此只是普通正文标签，不依赖供应商的思考字段或特殊 token 语义；是否改善人格一致性需通过实际对话观察。它不写入 Agent 消息队列、记忆数据库或向量索引，每段请求历史恰好生成一次。相同配置与身份产生稳定前缀。
+
+人格负责角色和语气，输入契约负责来源解释。提示词明确说明召回只为对应触发点提供候选证据、跨群来源不能改写为本群发言、关联边不等于事实或同一话题、检索排列不一定是时间顺序。当前会话与实际问题决定回答目标。输入标签不约束模型的输出；实际模型响应、tool_calls 和供应商返回的 reasoning_content 均沿用原生协议，不转写为字面 `<think>`。
 
 提示词在 create 读取为实例内不可变值，修改配置并热重载后用于新的 format 调用。配置读权限为 SelfModule，写权限为 `/user/admin`；format 通过静态 callers 授权给调用模块。Context 的长期配置只有提示词，没有预算、保留数量或会话状态。
 
@@ -87,18 +91,18 @@ let request = Request {
 
 | 输入 | 输出 |
 |---|---|
-| 群消息 | User：group_message，含稳定引用、trigger、原始来源与规范 CQ 正文 |
+| 群消息 | User：group_message，含稳定引用、trigger、原始来源与规范 Markdown 正文 |
 | 模型回合 | 原生 Assistant，保留正文、tool_calls、refusal、reasoning_content |
-| 工具结果 | 原生 Tool，保留 tool_call_id 与结果正文 |
+| 工具结果 | 原生 Tool，保留 tool_call_id；正文为原文字符串或原文与图片组成的有序内容块 |
 | RecallBatch | 一个 User 中的 memory_retrieval，包含 records 和 retrieval_graph |
 
-群消息使用 `<group_message source="conversation" ...><body encoding="cq">...</body></group_message>`。保留原群、消息 ID、时间、Bot 账号、消息子类型、作者账号及可用昵称、群名片、群角色、头衔等发送者信息。匿名来源单独标识，不输出匿名 flag 或将占位账号作为真实用户。每条群消息输出一个 User，保持输入次序。
+群消息使用 `<group_message source="conversation" ...><body encoding="forest-markdown">...</body></group_message>`。保留原群、消息 ID、时间、Bot 账号、消息子类型、作者账号及可用昵称、群名片、群角色、头衔等发送者信息。匿名来源单独标识，不输出匿名 flag 或将占位账号作为真实用户。每条群消息输出一个 User，保持输入次序。
 
 召回使用 `<memory_retrieval source="archive" for_group_id="..." for_sequence="...">` 标明服务的触发点。每个 `<memory_record>` 保留原群、序号、SAME_GROUP/CROSS_GROUP、来源类型和 seed 标记；来源群消息使用 `source="archive"`，模型与工具来源分别使用 `archived_assistant` 和 `archived_tool_result`。`retrieval_graph` 保留 JSON 图及其原引用。Context 不把激活度排序伪装为对话时间顺序。
 
-CQ 来自类型化消息段；字符串、数组和单段输入都通过 `forest_onebot::cq` 转换，不读取可能过时的 raw_message。CQ 转义后再作 XML 转义，字面 CQ 文本与真实消息段保持区别。嵌套转发递归保留 CQ 参数层次及图片位置。规则依据 [OneBot CQ 字符串格式](https://github.com/botuniverse/onebot-11/blob/master/message/string.md)与[消息段定义](https://github.com/botuniverse/onebot-11/blob/master/message/segment.md)。
+Context 批量调用独立 Markdown 包的 `/encode`，从类型化消息段生成 Forest Markdown 文本/图片引用片段，再对文本施加 XML 转义。不读取可能过时的 raw_message。字符串消息只在传输入口解码 CQ，模型侧使用专用链接；嵌套转发保留发送者及图片位置。群消息来源头额外提供可复制的 `author_mention` 与含来源群及有符号消息 ID 的 `reply_link`。协议详见 [Markdown 消息](33-markdown-messages.md)。
 
-召回中的 ModelTurn/ToolResult 作为历史资料展示，不作为本轮顶层工具调用或工具结果回放。历史 reasoning 不进入召回正文，当前工作中的 reasoning_content 保持原值。原群身份始终保留，跨群资料不改写成当前群消息。检索命中的文本跨度由调用方用于定位并回读对应完整单元。CQ reply 保留目标 ID；格式化本身不联网获取目标正文，提示词明确 ID 不代表已经拿到被引用内容。
+召回中的 ModelTurn/ToolResult 作为历史资料展示，不作为本轮顶层工具调用或工具结果回放。历史 reasoning 不进入召回正文，当前工作中的 reasoning_content 保持原值。原群身份始终保留，跨群资料不改写成当前群消息。检索命中的文本跨度由调用方用于定位并回读对应完整单元。Markdown reply 链接保留原群与目标 ID；格式化本身不联网获取目标正文，提示词明确 ID 不代表已经拿到被引用内容。
 
 工具调用及其结果的完整性、次序由调用方构造。Context 按类型转换，不修补缺失结果、不生成调用 ID，也不重排工具链。
 
@@ -106,15 +110,19 @@ CQ 来自类型化消息段；字符串、数组和单段输入都通过 `forest
 
 开启 multimodal 时，按消息段顺序将文字和已提供的图片映射为 Text/ImageUrl 内容块。图片保留其所属消息和受管引用，避免同批多图失去对应关系。
 
-关闭时只输出文字，保留 CQ 中的受管图片引用与图片存在标记。没有取得图片输入时也保留存在信息，不编造图像描述。原始 MemoryContent、媒体文件和向量索引不受投影影响。
+工具结果的原始正文仍是 Memory 中的字符串。Context 从中识别完整的 `media:<64 位十六进制>` 引用，将调用方已提供的图片作为原生 `tool.content` 的 `image_url` 块输出，用 `<media_image reference="...">` 标记引用；按原文首次出现次序排列，同一结果内相同引用只投影一次。结果中的 JSON、CQ 和普通文本不作为指令解析，也不改写为新的持久记录。未提供图片时保留原文字符串。多工具结果仍逐条保持原生 Tool，不插入额外 User 或拆散工具链。
 
-base64 仅进入本次 ImageUrl 的 data URL，不嵌入 CQ 正文或来源标签。图片、语音、视频的 CQ 投影只保留资源引用及内容属性，不输出 url/cache/proxy/timeout 等传输选项。输入中的媒体 file 应已规范化为引用；若直接包含 base64/data URL，返回 InlineMedia，由接纳方先管理资源。普通文本不会因包含类似字符串而被改写。Context 不下载图片或读取媒体文件。
+召回的模型正文和工具正文使用同样的引用投影，图片放在所属的 `archived_assistant` 或 `archived_tool_result` 内，原群与记录标记仍由外层 `memory_record` 保留。
+
+关闭时只输出文字，保留 Markdown 中的受管图片引用与图片存在标记。没有取得图片输入时也保留存在信息，不编造图像描述。原始 MemoryContent、媒体文件和向量索引不受投影影响。
+
+base64 仅进入本次 ImageUrl 的 data URL，不嵌入 Markdown 正文或来源标签。图片、语音、视频的结构投影只保留资源引用及内容属性。输入中的媒体 file 应已规范化为引用；若直接包含 base64/data URL，通过 Projection 错误返回，由接纳方先管理资源。普通文本不会因包含类似字符串而被改写。Context 不下载图片或读取媒体文件。
 
 ## 6. 模块边界
 
 处理入口只读取输入与提示词，可重入。模块不调用 Memory 或 Provider，无需声明对它们的运行时调用依赖。与其他模块交换内容时依据 Schema/Value，Rust 结构体名称或 TypeId 不参与模块间契约。热重载使用现有生命周期，没有待迁移的群聊状态。
 
-全部实现归属 `plugins/context`：`src/format.rs` 是私有的格式化逻辑；提示词在本包中；`types.rs`、`memory.rs`、`openai.rs` 是本包所需的 Rust 映射。宿主不依赖这些源码，不直接执行格式化函数，也不解释 MemoryContent。跨模块调用只按对象、接口地址通过调度器传递 Value。格式化阶段的模块错误仅有 CQ 输入错误与 InlineMedia。
+上下文编排归属 `plugins/context`：`src/format.rs` 是私有、无 I/O 的编排逻辑；提示词在本包中；`types.rs`、`memory.rs`、`openai.rs`、`markdown.rs` 是本包所需的 Rust 映射。消息协议投影由独立 Markdown 包执行。宿主不依赖这些源码，不直接执行格式化函数，也不解释 MemoryContent。跨模块调用只按对象、接口地址通过调度器传递 Value。格式化入口的 Projection 错误保留消息投影失败原因。
 
 ## 7. 构建与验证
 

@@ -1,79 +1,135 @@
 # Forest
 
-Rust + Wasm Bot 微内核。当前已实现调度器核心、基础 SDK、配置 ACL、专用 I/O 和 OneBot 接入。模块用外部 Manifest 声明单例身份、配置、接口、依赖及宿主事件订阅；独立 Wasm 内存中的异步任务由宿主调度，支持完整代码替换。
+Forest 是基于 Rust 与 WebAssembly 的模块化 Bot 框架。微内核负责调度、生命周期、接口契约、访问控制和宿主资源；消息处理、Agent、记忆、模型调用及工具由独立 Wasm 插件实现。
 
-当前设计面向单个 Bot 账号，可处理多个群聊；不预设多 Bot 实体、账号路由或按 Bot 挂载配置。
+模块通过外部 Manifest 声明身份、接口、依赖、配置和事件订阅，以 Forest Schema/Value 作为跨语言契约。调用方只依赖接口声明，不链接目标模块的实现。
 
-已提供 Vue + TypeScript [宿主调试台](doc/14-inspection-webui.md)：实时模块状态、声明依赖图、配置查看与 ACL 鉴权编辑、滚动日志，以及本地包加载、热重载和卸载。OneBot 连接中断会自动重连，模块与会话保持原实例。构建与启动方法见该文档。
+## 特性
 
-```text
-crates/
-  forest-serde/          Schema、Value、类型转换与文本语法
-  forest-serde-macros/   从 Rust 类型生成 Schema 与 Value 转换
-  forest-util/           通用值类型与纯操作，包含 token 和 acl 模块
-  forest-onebot/         类型化 OneBot v11 API，可选异步 HTTP(S) 传输
-  forest-config/         宿主 SQLite 配置表，必填默认值、异步原子更新与可读 JSON
-  forest-protocol/       Manifest、调度错误、ABI 和宿主操作数据
-  forest-sdk/            类型化处理器、来宾 Future 与固定导出
-  forest-runtime/        Wasmtime、调度、生命周期、ACL、I/O、notifier
-  forest-webui/          可选 Inspector HTTP/SSE、受限模块管理与管理员会话
-  forest-control/        WebUI 共用包目录与显式授权的宿主管理端口
-  forest-cli/            可执行宿主与 OneBot HTTP/WebSocket 接入
-webui/                  Vue、TypeScript、Mermaid 前端，构建产物为 dist
-plugins/forest-test/     #forest-test 示例模块与打包程序
-plugins/qwen-vl-embedding/ 2048 维多模态向量供应 Wasm 模块
-plugins/openai-provider/  OpenAI 兼容 Chat Completions Wasm 模块
-plugins/context/          可配置 Agent 提示词的上下文格式化 Wasm 模块
-plugins/memory/           原文、媒体、跨群联想与派生向量索引 Wasm 模块
-plugins/agent/            每群工作循环、持续点与短期窗口 Wasm 模块
-plugins/agent-tools/      原生工具声明与显式模块调用网关 Wasm 模块
-plugins/deepseek-web/     DeepSeek 搜索与 Markdown 网页抓取 Wasm 插件
-plugins/wolfram-alpha/    Wolfram Alpha LLM API 精确计算 Wasm 插件
-plugins/typst/            中文、公式与文档排版 Wasm 插件
-plugins/media/            独立受管图片存储 Wasm 插件
-plugins/shell/            按用户与群授权的 Forest 管理命令 Wasm 插件
-plugins/npucraft/         学校 MC 服务器地图与帮助回复 Wasm 插件
-packages/forest-test/    生成的外部 Manifest 与 module.wasm
-data/                   默认运行数据，不进入 Git
+- **模块隔离与热重载**：每个模块使用私有 Wasm 内存；支持排空、主动让出处中断和强制替换，替换前检查接口兼容性。
+- **异步调度**：区分时间片让出与异步等待，按接口声明控制重入；同一实例只允许一次独占推进，不同实例可以并行。
+- **类型化通信**：`call` 等待执行结果，`send` 返回接纳结果；Schema 同时约束请求和完整的模块返回值。
+- **持久配置与静态 ACL**：SQLite 配置表保存当前值和默认值，宿主绑定真实来源并执行读、写及调用权限检查。
+- **OneBot v11 接入**：支持正向 WebSocket，以及 HTTP API 配合反向 WebSocket；连接恢复与模块生命周期分离。
+- **管理与扩展**：Vue/TypeScript WebUI 提供运行状态、依赖图、日志、配置编辑和模块装卸；群聊 Shell 提供授权管理命令。
+- **可选 Agent 系统**：每群串行工作、多群异步对话，支持持续点、上下文裁剪、多主干多模态记忆、跨群联想及工具调用。
+
+项目处于开发阶段，宿主、SDK 与插件应从同一份源码及锁文件构建。
+
+## 架构
+
+```mermaid
+flowchart TB
+    Gateway[OneBot 网关] --> Host[宿主接入与原生 I/O]
+    Host --> Kernel[调度器 · 生命周期 · 契约 · ACL]
+    Console[WebUI / 群聊 Shell] --> Kernel
+    Kernel --> Modules[独立 Wasm 模块]
+    Modules --> Agent[Agent / Context / 工具网关]
+    Modules --> Memory[Memory / 嵌入 / 重排]
+    Modules --> Output[消息输出 / Markdown / Typst / Media]
 ```
 
-插件的实现、提示词和 Rust 类型映射均留在各自的 `plugins/` 包中。模块间通过固定 Wasm ABI 传递 Forest Value，以 Manifest 的 Schema 为契约；不依赖对方的 Rust crate。打包同时输出可独立读取的 Schema 语言文本，其他语言可按相同契约实现模块。
+框架面向单个 Bot 账号，可同时处理多个群聊。Agent 与记忆系统均为可选模块，运行普通命令插件不需要模型服务或向量数据库。
+
+## 构建
+
+构建宿主与插件需要支持 Rust 2024 Edition 及锁定依赖的 Rust 工具链，以及 `wasm32-unknown-unknown` 目标。本机还需 C/C++ 编译与链接工具，用于 SQLite 等原生依赖；Windows 可使用 Visual Studio Build Tools，Linux 可使用发行版的构建工具包。WebUI 另需 Node.js 22.12+ 和 pnpm。依赖版本分别由 `Cargo.lock` 与 `webui/pnpm-lock.yaml` 固定。
+
+在仓库根目录执行：
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo run -p forest-test --bin package --locked
-cargo run -p forest-cli --locked -- --events-ws ws://127.0.0.1:8080 --allow-group 123456789
-cargo test --workspace --all-features --locked
+cargo fetch --locked
+cargo build --locked -j 2 -p forest-cli
+cargo run --locked -j 2 -p forest-test --bin package
 ```
 
-序列化语义、修正范围和当前限制见 [序列化说明](doc/serialization.md)。令牌类型、身份边界与通配符规则见 [来源令牌设计](doc/03-token.md)。插件包、模块通信、状态表、ACL 与热重载的设计见 [模块运行时架构](doc/01-module-runtime.md)和[状态与访问详细设计](doc/02-state-access-and-reload.md)。
+最后一条命令生成示例包的 `module.wasm`、`manifest.json` 和接口 Schema。构建 WebUI：
 
-地址与群号均为示例。网关需要令牌时，启动前设置 `FOREST_ONEBOT_TOKEN` 环境变量；凭据不放入命令行。模块 Serving 后，在允许群发送 `#forest-test`，回复 `hello world`。默认包和数据都位于仓库根目录下，不使用 `.local`。更多启动方式、SDK 和热重载 API 见[运行与 ABI](doc/13-runtime-and-sdk.md)。
+```sh
+pnpm --dir webui install --frozen-lockfile
+pnpm --dir webui build
+```
 
-上述 `--allow-group` 是可选的宿主测试限制。正常 Agent 启动省略此参数，在 WebUI 的 Agent 配置表中管理 `allowed_groups`，保存并重载 Agent 即可生效。
+构建仓库提供的 Agent、工具和管理插件，可在 PowerShell 中执行；Linux 可通过 `pwsh` 运行同一脚本：
 
-OneBot 使用方式见 [API 库说明](crates/forest-onebot/README.md)，选型和职责边界见 [OneBot v11 设计](doc/04-onebot-v11.md)。事件沿用 v11 原始结构，经 notifier 转发给模块；HTTP 与双向 WS 调用均可使用。
+```powershell
+./scripts/build-agent.ps1
+```
 
-配置表的声明、类型化访问、原子更新、SQLite 存储和序列化边界见 [配置表实现](doc/05-config-table.md)。
+该脚本使用离线构建，首次运行前需完成 `cargo fetch --locked`。也可单独运行各插件的打包程序，具体命令见[模块文档](doc/README.md)。
 
-配置与接口在声明上挂静态 AccessPolicy，宿主绑定真实来源并检查；配置使用 readers/writers，接口 send/call 使用 callers，不建立动态 SQL ACL 表。内存表与只读 `check` 已接入宿主边界，不存在的对象/资源键对一律返回 `false`，见[访问声明](doc/06-config-access.md)。
+不需要 WebUI 时，可使用 `cargo build --locked -p forest-cli --no-default-features` 构建宿主。
 
-包的外部静态声明见[模块 Manifest 详细设计](doc/07-module-manifest.md)：单例对象由 Manifest 声明稳定 Token，调用按 `(对象 Token, 接口路径)` 定位，`uses` 直接声明两端路径，热重载保持调用地址和契约；本阶段不包含 UI 配置和 ABI 版本，自动生成工具另行设计。
+## 运行示例插件
 
-模块可用的最小操作见[宿主接口设计](doc/08-host-interfaces.md)：通信、单项配置 `get/set/reset`、HTTP、WebSocket、受管文件、日志与时间。上述接口已实现；模块侧不引入事务回调或自动冲突处理。
+准备一个 OneBot v11 网关，并启用正向 WebSocket。根据网关设置，在启动环境中配置 `FOREST_ONEBOT_TOKEN`；启用 WebUI 时还需设置非空的 `FOREST_WEB_PASSWORD`。CLI 不自动读取 `.env` 文件。
 
-[调度设计](doc/09-scheduling.md)明确同一实例独占推进、时间片被动让出保留执行权、模块主动让出释放执行权，以及接口 reentrant 的排队与恢复规则；已由运行时和 SDK 实现，本阶段不设计死锁处理或接口数值并发上限。
+```sh
+cargo run --locked -p forest-cli -- --package packages/forest-test --events-ws ws://127.0.0.1:8080 --database data/config.sqlite3 --webui 127.0.0.1:8081
+```
 
-[生命周期设计](doc/10-module-lifecycle.md)明确 RAII、create 禁止 send/call、Drain/AtYield/Force 三种卸载方式、destroy 宿主操作白名单、静态 notifier 注册和 trap 后不可调度的处理。所有方式保持对象地址，非排空方式允许中断旧请求，不迁移连接或执行状态。
+在浏览器打开 `http://127.0.0.1:8081`，使用管理口令登录，无需用户名。模块进入 `Serving` 后，在群中发送 `#forest-test`，示例模块回复 `hello world`。
 
-[宿主事件 notifier 与静态依赖设计](doc/11-notifier-and-dependencies.md)明确宿主产生事件，Manifest 只用 subscriptions 声明接收入口，调度器按注册表投递；模块没有事件发布接口。模块加载依赖与宿主事件支持分开检查，不提供运行时订阅增删接口。
+上述地址为示例。测试时可通过 `--allow-group 123456789` 限定宿主接收与发送的群；正式运行通常由各模块的群配置决定处理范围。反向 WebSocket、HTTP API、启动参数和热重载说明见[运行时与 SDK](doc/13-runtime-and-sdk.md)。
 
-[调度器状态机与所有权](doc/12-scheduler-state-machine.md)细化六个模块阶段、Idle/Advancing 执行权、接口许可、请求额度、一次性结果出口及唤醒规则。不变量依靠状态构造和所有权转移保持；集成测试使用真实 Wasm 验证并发、抢占、热重载与 SQLite 写入交接。Agent、Memory 与工具网关均为独立 Wasm 包，构建与使用见[Agent 实现与启动](doc/22-agent-implementation.md)。
+首次加载 Wasm 需要编译，后续启动可复用持久编译缓存。缓存位置和预热方法也见运行时文档。
 
-旧 Python 实现及旧设计文档位于 `archive/python-2026-10-19`，最后快照为 `2d560a69`。其他旧分支及 worktree 快照分别保存在 `archive/master-2026-10-19`、`archive/control-payloads-2026-10-19`、`archive/shell-contracts-2026-10-19`。旧文档不再指导新主线实现。
+## 启用 Agent
 
-文档与公式可通过 `typst_render` 工具生成 PNG；工具只返回受管媒体引用，Agent 在正文中使用返回的 CQ 图片码发送。见 [文档渲染与受管媒体](doc/25-document-rendering-proposal.md)。
+完成插件构建后，启动记忆索引服务：
 
-群聊管理命令以 `#forest` 开头，授权与命令见[群聊 Shell 与学校帮助](doc/26-group-shell-and-school-help.md)。Shell 与 NPUCraft 为独立可热重载的 Wasm 包，可在 WebUI 本地包页面加载。
+```sh
+docker compose up -d qdrant
+```
 
-Linux ARM64 的构建、systemd 常驻运行和数据搬迁见[部署说明](doc/27-linux-deployment.md)。CLI 可重复传入 `--package` 同时声明多个启动根包。
+以 Agent 作为启动根包，宿主会根据 Manifest 加载其依赖：
+
+```sh
+cargo run --locked -p forest-cli -- --package packages/agent --events-ws ws://127.0.0.1:8080 --database data/config.sqlite3 --webui 127.0.0.1:8081
+```
+
+在 WebUI 配置聊天模型、嵌入与重排服务、记忆数据库和允许响应的群，再重载相应模块。Agent 默认不启用任何群。模型服务的 endpoint、模型配置与凭据由所属插件管理，不由消息调用方逐次提供。
+
+完整配置步骤、初始化辅助程序、工具列表和模块职责见 [Agent 使用指南](doc/22-agent-guide.md)。Qdrant 也可独立安装；宿主无需运行在 Docker 中。
+
+需要群内管理或直接排版命令时，可追加启动根包：
+
+```text
+--package packages/shell
+--package packages/typst-command
+```
+
+Shell 需要单独配置授权用户和群。Agent 输出使用 Markdown 专用链接表达提及、回复、表情和受管图片；自动排版仅处理表格、独立行间公式和代码块，其他正文保留文本。
+
+## 仓库结构
+
+| 路径 | 内容 |
+| --- | --- |
+| `crates/` | 序列化、配置、协议、SDK、运行时、宿主管理与 CLI |
+| `plugins/` | 独立 Wasm 插件及其本地接口类型映射 |
+| `packages/` | 插件 Manifest、接口 Schema 和生成的 Wasm 工件 |
+| `webui/` | Vue/TypeScript 管理前端 |
+| `scripts/` | 插件构建脚本 |
+| `deploy/` | Linux 服务模板和部署配置 |
+| `doc/` | 使用指南、接口契约和架构说明 |
+| `data/` | 本地运行数据，不进入版本控制 |
+
+## 文档
+
+- [文档导航](doc/README.md)
+- [运行时、SDK 与 Wasm ABI](doc/13-runtime-and-sdk.md)
+- [WebUI 与模块管理](doc/14-inspection-webui.md)
+- [Agent 使用指南](doc/22-agent-guide.md)
+- [群聊 Shell](doc/26-group-shell.md)
+- [Linux ARM64 部署](doc/27-linux-deployment.md)
+- [Markdown 消息与富文本](doc/33-markdown-messages.md)
+
+## 验证
+
+```sh
+cargo test --locked --workspace --all-features -j 2
+pnpm --dir webui build
+```
+
+运行时与插件集成测试使用真实 Wasm 工件和本地可控服务。外部模型、网关与浏览器验证的配置方式见对应模块文档。

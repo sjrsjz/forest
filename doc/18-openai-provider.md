@@ -6,7 +6,7 @@
 
 这是普通 Wasm 插件，使用现有配置与完整 HTTP 请求能力，没有新增宿主接口。Provider 负责协议转换、HTTP 调用及响应解码；Context 负责提示词、内容格式化及多模态投影；Agent 负责工作循环、会话窗口协调及工具执行。
 
-本轮实现 Chat Completions 的完整响应模式，固定 `stream=false`。现有宿主 HTTP 不提供增量 body，不把先收完整 SSE 再回放冒充流式调用。本轮没有实现 Responses、音频输入输出或自定义类型工具。
+模块使用 Chat Completions 的完整响应模式，固定 `stream=false`。宿主 HTTP 返回完整 body；接口支持文本、图片输入及原生 function 工具，不包含 Responses、音频输入输出或自定义类型工具。
 
 ## 2. 调用契约
 
@@ -23,7 +23,7 @@ struct Request {
 }
 ```
 
-Message 是明确的 System、Developer、User、Assistant、Tool 枚举，发送时序列化为原生 `role` 结构。User 内容可以是文字或有序的 text/image_url 内容块，图片地址支持服务可读 URL 或临时 data URL。Provider 不获取受管媒体文件；调用者完成资源解析后提供合法图片输入。
+Message 是明确的 System、Developer、User、Assistant、Tool 枚举，发送时序列化为原生 `role` 结构。User 与 Tool 的内容都可以是文字或有序的 text/image_url 内容块，图片地址支持服务可读 URL 或临时 data URL。Provider 不获取受管媒体文件；调用者完成资源解析后提供合法图片输入。工具图片由 Context 投影，Provider 仅按原内容编码，不更改角色或插入 User 消息。
 
 Assistant 同时保留正文、多个原生 function tool_calls、refusal 与兼容服务的 reasoning_content。工具调用伴随正文时，两者均返回，不因为有工具调用就丢弃正文。Provider 不发送群消息、不运行工具，也不决定 reasoning 是否展示。
 
@@ -66,7 +66,7 @@ Settings 是实例内不可变值。更改配置后通过已有热重载生效�
 
 外层仍是调度器的 DispatchResult，内层是 Provider 的 Result。模块 Error 区分 NotConfigured、Host、Http、ToolSchema 与 Response。错误字符串仅作诊断，不用于分发或判断恢复分支。
 
-HTTP 失败保留状态码与可用的 x-request-id，不回显原始错误响应、请求正文或凭据。不自动重试、不缩减输入后重发、不为 API 报错生成虚构正文。完整响应只在边界解码一次，之后使用类型化角色、工具和结果对象。
+HTTP 失败保留状态码、可用的 x-request-id 及服务端错误响应正文 `body`，使调用者能区分具体拒绝原因；正文作为第三方协议诊断文本保留，不参与错误分发。请求正文和 Authorization 不加入错误对象。不自动重试、不缩减输入后重发、不为 API 报错生成虚构正文。成功响应只在边界解码一次，之后使用类型化角色、工具和结果对象。
 
 ## 5. 构建与验证
 
@@ -85,14 +85,8 @@ cargo run --offline --locked -p forest-openai-provider --example verify-openai-p
 
 它不接入 OneBot、不执行框架工具，只检验原生 function 调用、arguments、工具结果与 Assistant 历史回传。配置文件放在忽略提交的位置，不把密钥作为命令行参数。
 
-真实 Wasm 假服务测试已验证：角色与图片块的原生映射、Schema 对象嵌入、工具选择、正文和多个工具调用并存、reasoning 保留、usage、模型别名、ACL、错误 arguments 不被修补、HTTP 错误，以及修改 endpoint/模型/能力后 Drain 重载的在途与排队请求交接。关闭多模态后依旧保持原输入，证明投影没有潜入 Provider。
+Wasm 集成测试覆盖角色与图片块映射、Schema 对象嵌入、工具选择、正文和多个工具调用并存、reasoning 保留、usage、模型别名、ACL、错误 arguments、HTTP 错误，以及配置修改后 Drain 重载的请求交接。多模态投影由 Context 的测试单独验证。
 
-2026-10-21，使用 QiYu 现有 OpenAI 兼容模型配置完成在线往返：实际 Wasm 收到 forest_echo 的原生工具调用，验证程序追加原 Assistant（保留 reasoning_content）及相应工具结果，下一次调用返回 `FOREST_OK`。两次调用分别耗时 0.756 秒和 0.842 秒，不包含包构建、实例加载；该模型确实返回了 reasoning_content，回传已被 API 接受。
+## 6. 协议参考
 
-验证使用 tool_choice=auto。该供应商在 thinking 模式下拒绝指定函数的 tool_choice，首次指定函数验证返回 HTTP 400；核对原因后只修改了验证程序请求，Provider 不根据报错偷偷替换调用者的工具策略。在线模型为文本模型，图片输入与开关交接由真实 Wasm 假服务测试验证，未声称已经实测视觉模型。
-
-## 6. 协议核对来源
-
-本轮官方文档抓取连接失败，直连官方页面返回 HTTP 403，因此没有把实时网页访问标为成功。协议字段核对了 QiYu 环境中安装的官方 OpenAI Python SDK（由 OpenAPI 生成）的 chat_completion_message、completion_create_params、chat_completion_content_part_image_param、chat_completion_tool_message_param 和 function_definition 类型。实现只承诺上述明确范围，不宣称覆盖该 SDK 的全部功能。
-
-官方参考入口：[Chat Completions](https://platform.openai.com/docs/api-reference/chat/create)、[Function calling](https://platform.openai.com/docs/guides/function-calling)、[图像输入](https://platform.openai.com/docs/guides/images-vision)。兼容服务的具体可用模型与参数，以实际 endpoint 的契约和验证结果为准。
+接口对应 [Chat Completions](https://platform.openai.com/docs/api-reference/chat/create) 的消息和工具字段。`reasoning_content` 及 Tool 图片内容块等兼容扩展取决于实际服务能力，参见 [DeepSeek Chat Completions](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/)。Provider 保留这些字段，由调用者维护完整的 Assistant/Tool 历史和有效顺序。
