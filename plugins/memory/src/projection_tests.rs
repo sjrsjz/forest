@@ -1,6 +1,12 @@
-use crate::{content::*, embedding, managed, openai::Assistant, types::*};
+use crate::{
+    content::*, embedding, image_projection, managed, openai::Assistant, reranker, types::*,
+};
 use forest_protocol::{SubjectPattern, manifest::callers};
 use forest_runtime::{NativeInterface, RuntimeOptions, Scheduler, StopMode};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::{path::PathBuf, process::Command};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -82,12 +88,80 @@ async fn malformed_generated_cq_can_be_archived_read_and_projected_by_real_wasm(
         .unwrap();
     scheduler
         .register_native(NativeInterface::new(
+            image_projection::OBJECT.parse().unwrap(),
+            image_projection::PREPARE.parse().unwrap(),
+            false,
+            access.clone(),
+            |_, reference: String| async move {
+                if reference == format!("media:{}", "a".repeat(64)) {
+                    Err(image_projection::Error::Media(managed::Error::NotFound))
+                } else {
+                    Ok(managed::Blob {
+                        mime: "image/png".into(),
+                        bytes: vec![0x5a; 7 * 1024 * 1024],
+                    })
+                }
+            },
+        ))
+        .unwrap();
+    scheduler
+        .register_native(NativeInterface::new(
             embedding::OBJECT.parse().unwrap(),
             embedding::EMBED.parse().unwrap(),
             true,
-            access,
+            access.clone(),
             |_, _: Vec<embedding::Input>| async {
                 Err::<embedding::Embeddings, _>(embedding::Error::NotConfigured)
+            },
+        ))
+        .unwrap();
+    scheduler
+        .register_native(NativeInterface::new(
+            image_projection::OBJECT.parse().unwrap(),
+            image_projection::THUMBNAIL.parse().unwrap(),
+            false,
+            access.clone(),
+            |_, _: image_projection::Thumbnail| async {
+                Err::<managed::Blob, _>(image_projection::Error::Media(managed::Error::NotFound))
+            },
+        ))
+        .unwrap();
+    scheduler
+        .register_native(NativeInterface::new(
+            reranker::OBJECT.parse().unwrap(),
+            reranker::RANK.parse().unwrap(),
+            true,
+            access,
+            |_, _: reranker::Request| async {
+                Err::<reranker::Scores, _>(reranker::Error::NotConfigured)
+            },
+        ))
+        .unwrap();
+    let projection_calls = Arc::new(AtomicUsize::new(0));
+    let capture = projection_calls.clone();
+    scheduler
+        .register_native(NativeInterface::new(
+            crate::markdown::OBJECT.parse().unwrap(),
+            "/encode".parse().unwrap(),
+            true,
+            callers(vec![SubjectPattern::Path(
+                "/module/memory".parse().unwrap(),
+            )]),
+            move |_, inputs: Vec<crate::markdown::Encode>| {
+                let capture = capture.clone();
+                async move {
+                    Ok::<_, crate::markdown::Error>(
+                        inputs
+                            .into_iter()
+                            .map(|_| {
+                                vec![crate::markdown::Fragment::Text(format!(
+                                    "projection recipe {}",
+                                    capture.fetch_add(1, Ordering::SeqCst)
+                                ))]
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                }
             },
         ))
         .unwrap();
@@ -210,6 +284,38 @@ async fn malformed_generated_cq_can_be_archived_read_and_projected_by_real_wasm(
     assert_eq!(
         scheduler.phase(&OBJECT.parse().unwrap()),
         Some(forest_runtime::ModulePhase::Serving)
+    );
+    let group:forest_onebot::forest::GroupMessage=serde_json::from_value(serde_json::json!({
+        "time":1,"self_id":42,"post_type":"message","message_type":"group","sub_type":"normal",
+        "message_id":-7,"group_id":43,"user_id":7,"anonymous":null,
+        "message":[{"type":"text","data":{"text":"archive once"}}],"raw_message":"archive once","sender":{}
+    })).unwrap();
+    let accepted: Result<Accepted, Error> = scheduler
+        .call(
+            "/user/admin".parse().unwrap(),
+            OBJECT.parse().unwrap(),
+            "/accept".parse().unwrap(),
+            &Incoming::Group(Box::new(group)),
+        )
+        .await
+        .unwrap();
+    let ids = vec![accepted.unwrap().unit.id];
+    for _ in 0..2 {
+        let archived: Result<(), Error> = scheduler
+            .call(
+                "/user/admin".parse().unwrap(),
+                OBJECT.parse().unwrap(),
+                "/archive".parse().unwrap(),
+                &ids,
+            )
+            .await
+            .unwrap();
+        archived.unwrap();
+    }
+    assert_eq!(
+        projection_calls.load(Ordering::SeqCst),
+        1,
+        "repeat archive must retain the original representation even if a newer recipe would produce different text"
     );
     scheduler.shutdown(StopMode::Drain).await.unwrap();
 }

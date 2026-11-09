@@ -3,7 +3,7 @@
     "id": "/module/onebot-tools",
     "version": "0.1.0",
     "name": "OneBot tools",
-    "description": "Account, group and member queries and explicit CQ messaging"
+    "description": "Account, group and member queries and explicit Markdown messaging"
   },
   "module": "module.wasm",
   "configs": [],
@@ -651,7 +651,7 @@
     },
     {
       "object": "/module/message-output",
-      "interface": "/send",
+      "interface": "/send_markdown",
       "input": [
         {
           "Record": {
@@ -660,1048 +660,7 @@
               "Option": "String"
             },
             "group_id": "I64",
-            "message": {
-              "Variant": {
-                "Cq": {
-                  "Unnamed": [
-                    "String"
-                  ]
-                },
-                "Segments": {
-                  "Unnamed": [
-                    {
-                      "Array": {
-                        "Variant": {
-                          "Anonymous": {
-                            "Named": {
-                              "ignore": {
-                                "Option": "String"
-                              }
-                            }
-                          },
-                          "At": {
-                            "Named": {
-                              "qq": "String"
-                            }
-                          },
-                          "Contact": {
-                            "Unnamed": [
-                              {
-                                "Variant": {
-                                  "Group": {
-                                    "Named": {
-                                      "id": "String"
-                                    }
-                                  },
-                                  "Qq": {
-                                    "Named": {
-                                      "id": "String"
-                                    }
-                                  }
-                                }
-                              }
-                            ]
-                          },
-                          "Dice": {
-                            "Named": {}
-                          },
-                          "Face": {
-                            "Named": {
-                              "id": "String"
-                            }
-                          },
-                          "Forward": {
-                            "Named": {
-                              "id": "String"
-                            }
-                          },
-                          "Image": {
-                            "Unnamed": [
-                              {
-                                "Record": {
-                                  "file": "String",
-                                  "kind": {
-                                    "Option": {
-                                      "Variant": {
-                                        "Flash": {
-                                          "Unnamed": []
-                                        }
-                                      }
-                                    }
-                                  },
-                                  "options": {
-                                    "Record": {
-                                      "cache": {
-                                        "Option": "String"
-                                      },
-                                      "proxy": {
-                                        "Option": "String"
-                                      },
-                                      "timeout": {
-                                        "Option": "String"
-                                      },
-                                      "url": {
-                                        "Option": "String"
-                                      }
-                                    }
-                                  }
-                                }
-                              }
-                            ]
-                          },
-                          "Json": {
-                            "Named": {
-                              "data": "String"
-                            }
-                          },
-                          "Location": {
-                            "Named": {
-                              "content": {
-                                "Option": "String"
-                              },
-                              "lat": "String",
-                              "lon": "String",
-                              "title": {
-                                "Option": "String"
-                              }
-                            }
-                          },
-                          "Music": {
-                            "Unnamed": [
-                              {
-                                "Variant": {
-                                  "Custom": {
-                                    "Named": {
-                                      "audio": "String",
-                                      "content": {
-                                        "Option": "String"
-                                      },
-                                      "image": {
-                                        "Option": "String"
-                                      },
-                                      "title": "String",
-                                      "url": "String"
-                                    }
-                                  },
-                                  "Netease": {
-                                    "Named": {
-                                      "id": "String"
-                                    }
-                                  },
-                                  "Qq": {
-                                    "Named": {
-                                      "id": "String"
-                                    }
-                                  },
-                                  "Xiami": {
-                                    "Named": {
-                                      "id": "String"
-                                    }
-                                  }
-                                }
-                              }
-                            ]
-                          },
-                          "Node": {
-                            "Unnamed": [
-                              {
-                                "Variant": {
-                                  "Custom": {
-                                    "Named": {
-                                      "content": {
-                                        "Ref": 1
-                                      },
-                                      "nickname": "String",
-                                      "user_id": "String"
-                                    }
-                                  },
-                                  "Reference": {
-                                    "Named": {
-                                      "id": "String"
-                                    }
-                                  }
-                                }
-                              }
-                            ]
-                          },
-                          "Poke": {
-                            "Named": {
-                              "id": "String",
-                              "kind": "String",
-                              "name": {
-                                "Option": "String"
-                              }
-                            }
-                          },
-                          "Record": {
-                            "Unnamed": [
-                              {
-                                "Record": {
-                                  "file": "String",
-                                  "magic": {
-                                    "Option": "String"
-                                  },
-                                  "options": {
-                                    "Record": {
-                                      "cache": {
-                                        "Option": "String"
-                                      },
-                                      "proxy": {
-                                        "Option": "String"
-                                      },
-                                      "timeout": {
-                                        "Option": "String"
-                                      },
-                                      "url": {
-                                        "Option": "String"
-                                      }
-                                    }
-                                  }
-                                }
-                              }
-                            ]
-                          },
-                          "Reply": {
-                            "Named": {
-                              "id": "String"
-                            }
-                          },
-                          "Rps": {
-                            "Named": {}
-                          },
-                          "Shake": {
-                            "Named": {}
-                          },
-                          "Share": {
-                            "Named": {
-                              "content": {
-                                "Option": "String"
-                              },
-                              "image": {
-                                "Option": "String"
-                              },
-                              "title": "String",
-                              "url": "String"
-                            }
-                          },
-                          "Text": {
-                            "Named": {
-                              "text": "String"
-                            }
-                          },
-                          "Video": {
-                            "Unnamed": [
-                              {
-                                "Record": {
-                                  "file": "String",
-                                  "options": {
-                                    "Record": {
-                                      "cache": {
-                                        "Option": "String"
-                                      },
-                                      "proxy": {
-                                        "Option": "String"
-                                      },
-                                      "timeout": {
-                                        "Option": "String"
-                                      },
-                                      "url": {
-                                        "Option": "String"
-                                      }
-                                    }
-                                  }
-                                }
-                              }
-                            ]
-                          },
-                          "Xml": {
-                            "Named": {
-                              "data": "String"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  ]
-                },
-                "Single": {
-                  "Unnamed": [
-                    {
-                      "Variant": {
-                        "Anonymous": {
-                          "Named": {
-                            "ignore": {
-                              "Option": "String"
-                            }
-                          }
-                        },
-                        "At": {
-                          "Named": {
-                            "qq": "String"
-                          }
-                        },
-                        "Contact": {
-                          "Unnamed": [
-                            {
-                              "Variant": {
-                                "Group": {
-                                  "Named": {
-                                    "id": "String"
-                                  }
-                                },
-                                "Qq": {
-                                  "Named": {
-                                    "id": "String"
-                                  }
-                                }
-                              }
-                            }
-                          ]
-                        },
-                        "Dice": {
-                          "Named": {}
-                        },
-                        "Face": {
-                          "Named": {
-                            "id": "String"
-                          }
-                        },
-                        "Forward": {
-                          "Named": {
-                            "id": "String"
-                          }
-                        },
-                        "Image": {
-                          "Unnamed": [
-                            {
-                              "Record": {
-                                "file": "String",
-                                "kind": {
-                                  "Option": {
-                                    "Variant": {
-                                      "Flash": {
-                                        "Unnamed": []
-                                      }
-                                    }
-                                  }
-                                },
-                                "options": {
-                                  "Record": {
-                                    "cache": {
-                                      "Option": "String"
-                                    },
-                                    "proxy": {
-                                      "Option": "String"
-                                    },
-                                    "timeout": {
-                                      "Option": "String"
-                                    },
-                                    "url": {
-                                      "Option": "String"
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          ]
-                        },
-                        "Json": {
-                          "Named": {
-                            "data": "String"
-                          }
-                        },
-                        "Location": {
-                          "Named": {
-                            "content": {
-                              "Option": "String"
-                            },
-                            "lat": "String",
-                            "lon": "String",
-                            "title": {
-                              "Option": "String"
-                            }
-                          }
-                        },
-                        "Music": {
-                          "Unnamed": [
-                            {
-                              "Variant": {
-                                "Custom": {
-                                  "Named": {
-                                    "audio": "String",
-                                    "content": {
-                                      "Option": "String"
-                                    },
-                                    "image": {
-                                      "Option": "String"
-                                    },
-                                    "title": "String",
-                                    "url": "String"
-                                  }
-                                },
-                                "Netease": {
-                                  "Named": {
-                                    "id": "String"
-                                  }
-                                },
-                                "Qq": {
-                                  "Named": {
-                                    "id": "String"
-                                  }
-                                },
-                                "Xiami": {
-                                  "Named": {
-                                    "id": "String"
-                                  }
-                                }
-                              }
-                            }
-                          ]
-                        },
-                        "Node": {
-                          "Unnamed": [
-                            {
-                              "Variant": {
-                                "Custom": {
-                                  "Named": {
-                                    "content": {
-                                      "Ref": 1
-                                    },
-                                    "nickname": "String",
-                                    "user_id": "String"
-                                  }
-                                },
-                                "Reference": {
-                                  "Named": {
-                                    "id": "String"
-                                  }
-                                }
-                              }
-                            }
-                          ]
-                        },
-                        "Poke": {
-                          "Named": {
-                            "id": "String",
-                            "kind": "String",
-                            "name": {
-                              "Option": "String"
-                            }
-                          }
-                        },
-                        "Record": {
-                          "Unnamed": [
-                            {
-                              "Record": {
-                                "file": "String",
-                                "magic": {
-                                  "Option": "String"
-                                },
-                                "options": {
-                                  "Record": {
-                                    "cache": {
-                                      "Option": "String"
-                                    },
-                                    "proxy": {
-                                      "Option": "String"
-                                    },
-                                    "timeout": {
-                                      "Option": "String"
-                                    },
-                                    "url": {
-                                      "Option": "String"
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          ]
-                        },
-                        "Reply": {
-                          "Named": {
-                            "id": "String"
-                          }
-                        },
-                        "Rps": {
-                          "Named": {}
-                        },
-                        "Shake": {
-                          "Named": {}
-                        },
-                        "Share": {
-                          "Named": {
-                            "content": {
-                              "Option": "String"
-                            },
-                            "image": {
-                              "Option": "String"
-                            },
-                            "title": "String",
-                            "url": "String"
-                          }
-                        },
-                        "Text": {
-                          "Named": {
-                            "text": "String"
-                          }
-                        },
-                        "Video": {
-                          "Unnamed": [
-                            {
-                              "Record": {
-                                "file": "String",
-                                "options": {
-                                  "Record": {
-                                    "cache": {
-                                      "Option": "String"
-                                    },
-                                    "proxy": {
-                                      "Option": "String"
-                                    },
-                                    "timeout": {
-                                      "Option": "String"
-                                    },
-                                    "url": {
-                                      "Option": "String"
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          ]
-                        },
-                        "Xml": {
-                          "Named": {
-                            "data": "String"
-                          }
-                        }
-                      }
-                    }
-                  ]
-                }
-              }
-            }
-          }
-        },
-        {
-          "Variant": {
-            "Cq": {
-              "Unnamed": [
-                "String"
-              ]
-            },
-            "Segments": {
-              "Unnamed": [
-                {
-                  "Array": {
-                    "Variant": {
-                      "Anonymous": {
-                        "Named": {
-                          "ignore": {
-                            "Option": "String"
-                          }
-                        }
-                      },
-                      "At": {
-                        "Named": {
-                          "qq": "String"
-                        }
-                      },
-                      "Contact": {
-                        "Unnamed": [
-                          {
-                            "Variant": {
-                              "Group": {
-                                "Named": {
-                                  "id": "String"
-                                }
-                              },
-                              "Qq": {
-                                "Named": {
-                                  "id": "String"
-                                }
-                              }
-                            }
-                          }
-                        ]
-                      },
-                      "Dice": {
-                        "Named": {}
-                      },
-                      "Face": {
-                        "Named": {
-                          "id": "String"
-                        }
-                      },
-                      "Forward": {
-                        "Named": {
-                          "id": "String"
-                        }
-                      },
-                      "Image": {
-                        "Unnamed": [
-                          {
-                            "Record": {
-                              "file": "String",
-                              "kind": {
-                                "Option": {
-                                  "Variant": {
-                                    "Flash": {
-                                      "Unnamed": []
-                                    }
-                                  }
-                                }
-                              },
-                              "options": {
-                                "Record": {
-                                  "cache": {
-                                    "Option": "String"
-                                  },
-                                  "proxy": {
-                                    "Option": "String"
-                                  },
-                                  "timeout": {
-                                    "Option": "String"
-                                  },
-                                  "url": {
-                                    "Option": "String"
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        ]
-                      },
-                      "Json": {
-                        "Named": {
-                          "data": "String"
-                        }
-                      },
-                      "Location": {
-                        "Named": {
-                          "content": {
-                            "Option": "String"
-                          },
-                          "lat": "String",
-                          "lon": "String",
-                          "title": {
-                            "Option": "String"
-                          }
-                        }
-                      },
-                      "Music": {
-                        "Unnamed": [
-                          {
-                            "Variant": {
-                              "Custom": {
-                                "Named": {
-                                  "audio": "String",
-                                  "content": {
-                                    "Option": "String"
-                                  },
-                                  "image": {
-                                    "Option": "String"
-                                  },
-                                  "title": "String",
-                                  "url": "String"
-                                }
-                              },
-                              "Netease": {
-                                "Named": {
-                                  "id": "String"
-                                }
-                              },
-                              "Qq": {
-                                "Named": {
-                                  "id": "String"
-                                }
-                              },
-                              "Xiami": {
-                                "Named": {
-                                  "id": "String"
-                                }
-                              }
-                            }
-                          }
-                        ]
-                      },
-                      "Node": {
-                        "Unnamed": [
-                          {
-                            "Variant": {
-                              "Custom": {
-                                "Named": {
-                                  "content": {
-                                    "Ref": 1
-                                  },
-                                  "nickname": "String",
-                                  "user_id": "String"
-                                }
-                              },
-                              "Reference": {
-                                "Named": {
-                                  "id": "String"
-                                }
-                              }
-                            }
-                          }
-                        ]
-                      },
-                      "Poke": {
-                        "Named": {
-                          "id": "String",
-                          "kind": "String",
-                          "name": {
-                            "Option": "String"
-                          }
-                        }
-                      },
-                      "Record": {
-                        "Unnamed": [
-                          {
-                            "Record": {
-                              "file": "String",
-                              "magic": {
-                                "Option": "String"
-                              },
-                              "options": {
-                                "Record": {
-                                  "cache": {
-                                    "Option": "String"
-                                  },
-                                  "proxy": {
-                                    "Option": "String"
-                                  },
-                                  "timeout": {
-                                    "Option": "String"
-                                  },
-                                  "url": {
-                                    "Option": "String"
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        ]
-                      },
-                      "Reply": {
-                        "Named": {
-                          "id": "String"
-                        }
-                      },
-                      "Rps": {
-                        "Named": {}
-                      },
-                      "Shake": {
-                        "Named": {}
-                      },
-                      "Share": {
-                        "Named": {
-                          "content": {
-                            "Option": "String"
-                          },
-                          "image": {
-                            "Option": "String"
-                          },
-                          "title": "String",
-                          "url": "String"
-                        }
-                      },
-                      "Text": {
-                        "Named": {
-                          "text": "String"
-                        }
-                      },
-                      "Video": {
-                        "Unnamed": [
-                          {
-                            "Record": {
-                              "file": "String",
-                              "options": {
-                                "Record": {
-                                  "cache": {
-                                    "Option": "String"
-                                  },
-                                  "proxy": {
-                                    "Option": "String"
-                                  },
-                                  "timeout": {
-                                    "Option": "String"
-                                  },
-                                  "url": {
-                                    "Option": "String"
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        ]
-                      },
-                      "Xml": {
-                        "Named": {
-                          "data": "String"
-                        }
-                      }
-                    }
-                  }
-                }
-              ]
-            },
-            "Single": {
-              "Unnamed": [
-                {
-                  "Variant": {
-                    "Anonymous": {
-                      "Named": {
-                        "ignore": {
-                          "Option": "String"
-                        }
-                      }
-                    },
-                    "At": {
-                      "Named": {
-                        "qq": "String"
-                      }
-                    },
-                    "Contact": {
-                      "Unnamed": [
-                        {
-                          "Variant": {
-                            "Group": {
-                              "Named": {
-                                "id": "String"
-                              }
-                            },
-                            "Qq": {
-                              "Named": {
-                                "id": "String"
-                              }
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    "Dice": {
-                      "Named": {}
-                    },
-                    "Face": {
-                      "Named": {
-                        "id": "String"
-                      }
-                    },
-                    "Forward": {
-                      "Named": {
-                        "id": "String"
-                      }
-                    },
-                    "Image": {
-                      "Unnamed": [
-                        {
-                          "Record": {
-                            "file": "String",
-                            "kind": {
-                              "Option": {
-                                "Variant": {
-                                  "Flash": {
-                                    "Unnamed": []
-                                  }
-                                }
-                              }
-                            },
-                            "options": {
-                              "Record": {
-                                "cache": {
-                                  "Option": "String"
-                                },
-                                "proxy": {
-                                  "Option": "String"
-                                },
-                                "timeout": {
-                                  "Option": "String"
-                                },
-                                "url": {
-                                  "Option": "String"
-                                }
-                              }
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    "Json": {
-                      "Named": {
-                        "data": "String"
-                      }
-                    },
-                    "Location": {
-                      "Named": {
-                        "content": {
-                          "Option": "String"
-                        },
-                        "lat": "String",
-                        "lon": "String",
-                        "title": {
-                          "Option": "String"
-                        }
-                      }
-                    },
-                    "Music": {
-                      "Unnamed": [
-                        {
-                          "Variant": {
-                            "Custom": {
-                              "Named": {
-                                "audio": "String",
-                                "content": {
-                                  "Option": "String"
-                                },
-                                "image": {
-                                  "Option": "String"
-                                },
-                                "title": "String",
-                                "url": "String"
-                              }
-                            },
-                            "Netease": {
-                              "Named": {
-                                "id": "String"
-                              }
-                            },
-                            "Qq": {
-                              "Named": {
-                                "id": "String"
-                              }
-                            },
-                            "Xiami": {
-                              "Named": {
-                                "id": "String"
-                              }
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    "Node": {
-                      "Unnamed": [
-                        {
-                          "Variant": {
-                            "Custom": {
-                              "Named": {
-                                "content": {
-                                  "Ref": 1
-                                },
-                                "nickname": "String",
-                                "user_id": "String"
-                              }
-                            },
-                            "Reference": {
-                              "Named": {
-                                "id": "String"
-                              }
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    "Poke": {
-                      "Named": {
-                        "id": "String",
-                        "kind": "String",
-                        "name": {
-                          "Option": "String"
-                        }
-                      }
-                    },
-                    "Record": {
-                      "Unnamed": [
-                        {
-                          "Record": {
-                            "file": "String",
-                            "magic": {
-                              "Option": "String"
-                            },
-                            "options": {
-                              "Record": {
-                                "cache": {
-                                  "Option": "String"
-                                },
-                                "proxy": {
-                                  "Option": "String"
-                                },
-                                "timeout": {
-                                  "Option": "String"
-                                },
-                                "url": {
-                                  "Option": "String"
-                                }
-                              }
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    "Reply": {
-                      "Named": {
-                        "id": "String"
-                      }
-                    },
-                    "Rps": {
-                      "Named": {}
-                    },
-                    "Shake": {
-                      "Named": {}
-                    },
-                    "Share": {
-                      "Named": {
-                        "content": {
-                          "Option": "String"
-                        },
-                        "image": {
-                          "Option": "String"
-                        },
-                        "title": "String",
-                        "url": "String"
-                      }
-                    },
-                    "Text": {
-                      "Named": {
-                        "text": "String"
-                      }
-                    },
-                    "Video": {
-                      "Unnamed": [
-                        {
-                          "Record": {
-                            "file": "String",
-                            "options": {
-                              "Record": {
-                                "cache": {
-                                  "Option": "String"
-                                },
-                                "proxy": {
-                                  "Option": "String"
-                                },
-                                "timeout": {
-                                  "Option": "String"
-                                },
-                                "url": {
-                                  "Option": "String"
-                                }
-                              }
-                            }
-                          }
-                        }
-                      ]
-                    },
-                    "Xml": {
-                      "Named": {
-                        "data": "String"
-                      }
-                    }
-                  }
-                }
-              ]
-            }
+            "source": "String"
           }
         }
       ],
@@ -1785,7 +744,97 @@
               "Unnamed": [
                 {
                   "Record": {
-                    "message_id": "I32"
+                    "outcome": {
+                      "Variant": {
+                        "Err": {
+                          "Unnamed": [
+                            {
+                              "Variant": {
+                                "Dispatch": {
+                                  "Unnamed": [
+                                    "String"
+                                  ]
+                                },
+                                "InvalidConfiguration": {
+                                  "Unnamed": [
+                                    "String"
+                                  ]
+                                },
+                                "InvalidMessage": {
+                                  "Unnamed": [
+                                    "String"
+                                  ]
+                                },
+                                "Media": {
+                                  "Unnamed": [
+                                    "String"
+                                  ]
+                                },
+                                "OneBot": {
+                                  "Unnamed": [
+                                    {
+                                      "Variant": {
+                                        "Api": {
+                                          "Named": {
+                                            "message": {
+                                              "Option": "String"
+                                            },
+                                            "retcode": "I32",
+                                            "wording": {
+                                              "Option": "String"
+                                            }
+                                          }
+                                        },
+                                        "Decode": {
+                                          "Unnamed": [
+                                            "String"
+                                          ]
+                                        },
+                                        "Encode": {
+                                          "Unnamed": [
+                                            "String"
+                                          ]
+                                        },
+                                        "GroupDenied": {
+                                          "Unnamed": []
+                                        },
+                                        "Protocol": {
+                                          "Unnamed": [
+                                            "String"
+                                          ]
+                                        },
+                                        "Submitted": {
+                                          "Unnamed": []
+                                        },
+                                        "Transport": {
+                                          "Unnamed": [
+                                            "String"
+                                          ]
+                                        }
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          ]
+                        },
+                        "Ok": {
+                          "Unnamed": [
+                            {
+                              "Tuple": []
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "sent": {
+                      "Array": {
+                        "Record": {
+                          "message_id": "I32"
+                        }
+                      }
+                    }
                   }
                 }
               ]
@@ -1909,6 +958,11 @@
                               }
                             }
                           },
+                          "Markdown": {
+                            "Named": {
+                              "content": "String"
+                            }
+                          },
                           "Music": {
                             "Unnamed": [
                               {
@@ -2163,6 +1217,11 @@
                             "title": {
                               "Option": "String"
                             }
+                          }
+                        },
+                        "Markdown": {
+                          "Named": {
+                            "content": "String"
                           }
                         },
                         "Music": {
@@ -2433,6 +1492,11 @@
                           }
                         }
                       },
+                      "Markdown": {
+                        "Named": {
+                          "content": "String"
+                        }
+                      },
                       "Music": {
                         "Unnamed": [
                           {
@@ -2687,6 +1751,11 @@
                         "title": {
                           "Option": "String"
                         }
+                      }
+                    },
+                    "Markdown": {
+                      "Named": {
+                        "content": "String"
                       }
                     },
                     "Music": {
@@ -2959,6 +2028,888 @@
                   }
                 }
               ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "object": "/module/markdown",
+      "interface": "/format",
+      "input": [
+        {
+          "Record": {
+            "group_id": {
+              "Option": "I64"
+            },
+            "source": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Input": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Protocol": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Array": {
+                    "Record": {
+                      "segments": {
+                        "Array": {
+                          "Variant": {
+                            "Anonymous": {
+                              "Named": {
+                                "ignore": {
+                                  "Option": "String"
+                                }
+                              }
+                            },
+                            "At": {
+                              "Named": {
+                                "qq": "String"
+                              }
+                            },
+                            "Contact": {
+                              "Unnamed": [
+                                {
+                                  "Variant": {
+                                    "Group": {
+                                      "Named": {
+                                        "id": "String"
+                                      }
+                                    },
+                                    "Qq": {
+                                      "Named": {
+                                        "id": "String"
+                                      }
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "Dice": {
+                              "Named": {}
+                            },
+                            "Face": {
+                              "Named": {
+                                "id": "String"
+                              }
+                            },
+                            "Forward": {
+                              "Named": {
+                                "id": "String"
+                              }
+                            },
+                            "Image": {
+                              "Unnamed": [
+                                {
+                                  "Record": {
+                                    "file": "String",
+                                    "kind": {
+                                      "Option": {
+                                        "Variant": {
+                                          "Flash": {
+                                            "Unnamed": []
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "options": {
+                                      "Record": {
+                                        "cache": {
+                                          "Option": "String"
+                                        },
+                                        "proxy": {
+                                          "Option": "String"
+                                        },
+                                        "timeout": {
+                                          "Option": "String"
+                                        },
+                                        "url": {
+                                          "Option": "String"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "Json": {
+                              "Named": {
+                                "data": "String"
+                              }
+                            },
+                            "Location": {
+                              "Named": {
+                                "content": {
+                                  "Option": "String"
+                                },
+                                "lat": "String",
+                                "lon": "String",
+                                "title": {
+                                  "Option": "String"
+                                }
+                              }
+                            },
+                            "Markdown": {
+                              "Named": {
+                                "content": "String"
+                              }
+                            },
+                            "Music": {
+                              "Unnamed": [
+                                {
+                                  "Variant": {
+                                    "Custom": {
+                                      "Named": {
+                                        "audio": "String",
+                                        "content": {
+                                          "Option": "String"
+                                        },
+                                        "image": {
+                                          "Option": "String"
+                                        },
+                                        "title": "String",
+                                        "url": "String"
+                                      }
+                                    },
+                                    "Netease": {
+                                      "Named": {
+                                        "id": "String"
+                                      }
+                                    },
+                                    "Qq": {
+                                      "Named": {
+                                        "id": "String"
+                                      }
+                                    },
+                                    "Xiami": {
+                                      "Named": {
+                                        "id": "String"
+                                      }
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "Node": {
+                              "Unnamed": [
+                                {
+                                  "Variant": {
+                                    "Custom": {
+                                      "Named": {
+                                        "content": {
+                                          "Variant": {
+                                            "Cq": {
+                                              "Unnamed": [
+                                                "String"
+                                              ]
+                                            },
+                                            "Segments": {
+                                              "Unnamed": [
+                                                {
+                                                  "Ref": 1
+                                                }
+                                              ]
+                                            },
+                                            "Single": {
+                                              "Unnamed": [
+                                                {
+                                                  "Ref": 2
+                                                }
+                                              ]
+                                            }
+                                          }
+                                        },
+                                        "nickname": "String",
+                                        "user_id": "String"
+                                      }
+                                    },
+                                    "Reference": {
+                                      "Named": {
+                                        "id": "String"
+                                      }
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "Poke": {
+                              "Named": {
+                                "id": "String",
+                                "kind": "String",
+                                "name": {
+                                  "Option": "String"
+                                }
+                              }
+                            },
+                            "Record": {
+                              "Unnamed": [
+                                {
+                                  "Record": {
+                                    "file": "String",
+                                    "magic": {
+                                      "Option": "String"
+                                    },
+                                    "options": {
+                                      "Record": {
+                                        "cache": {
+                                          "Option": "String"
+                                        },
+                                        "proxy": {
+                                          "Option": "String"
+                                        },
+                                        "timeout": {
+                                          "Option": "String"
+                                        },
+                                        "url": {
+                                          "Option": "String"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "Reply": {
+                              "Named": {
+                                "id": "String"
+                              }
+                            },
+                            "Rps": {
+                              "Named": {}
+                            },
+                            "Shake": {
+                              "Named": {}
+                            },
+                            "Share": {
+                              "Named": {
+                                "content": {
+                                  "Option": "String"
+                                },
+                                "image": {
+                                  "Option": "String"
+                                },
+                                "title": "String",
+                                "url": "String"
+                              }
+                            },
+                            "Text": {
+                              "Named": {
+                                "text": "String"
+                              }
+                            },
+                            "Video": {
+                              "Unnamed": [
+                                {
+                                  "Record": {
+                                    "file": "String",
+                                    "options": {
+                                      "Record": {
+                                        "cache": {
+                                          "Option": "String"
+                                        },
+                                        "proxy": {
+                                          "Option": "String"
+                                        },
+                                        "timeout": {
+                                          "Option": "String"
+                                        },
+                                        "url": {
+                                          "Option": "String"
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "Xml": {
+                              "Named": {
+                                "data": "String"
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "source_characters": "I64",
+                      "source_lines": "I64"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "Array": {
+            "Variant": {
+              "Anonymous": {
+                "Named": {
+                  "ignore": {
+                    "Option": "String"
+                  }
+                }
+              },
+              "At": {
+                "Named": {
+                  "qq": "String"
+                }
+              },
+              "Contact": {
+                "Unnamed": [
+                  {
+                    "Variant": {
+                      "Group": {
+                        "Named": {
+                          "id": "String"
+                        }
+                      },
+                      "Qq": {
+                        "Named": {
+                          "id": "String"
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "Dice": {
+                "Named": {}
+              },
+              "Face": {
+                "Named": {
+                  "id": "String"
+                }
+              },
+              "Forward": {
+                "Named": {
+                  "id": "String"
+                }
+              },
+              "Image": {
+                "Unnamed": [
+                  {
+                    "Record": {
+                      "file": "String",
+                      "kind": {
+                        "Option": {
+                          "Variant": {
+                            "Flash": {
+                              "Unnamed": []
+                            }
+                          }
+                        }
+                      },
+                      "options": {
+                        "Record": {
+                          "cache": {
+                            "Option": "String"
+                          },
+                          "proxy": {
+                            "Option": "String"
+                          },
+                          "timeout": {
+                            "Option": "String"
+                          },
+                          "url": {
+                            "Option": "String"
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "Json": {
+                "Named": {
+                  "data": "String"
+                }
+              },
+              "Location": {
+                "Named": {
+                  "content": {
+                    "Option": "String"
+                  },
+                  "lat": "String",
+                  "lon": "String",
+                  "title": {
+                    "Option": "String"
+                  }
+                }
+              },
+              "Markdown": {
+                "Named": {
+                  "content": "String"
+                }
+              },
+              "Music": {
+                "Unnamed": [
+                  {
+                    "Variant": {
+                      "Custom": {
+                        "Named": {
+                          "audio": "String",
+                          "content": {
+                            "Option": "String"
+                          },
+                          "image": {
+                            "Option": "String"
+                          },
+                          "title": "String",
+                          "url": "String"
+                        }
+                      },
+                      "Netease": {
+                        "Named": {
+                          "id": "String"
+                        }
+                      },
+                      "Qq": {
+                        "Named": {
+                          "id": "String"
+                        }
+                      },
+                      "Xiami": {
+                        "Named": {
+                          "id": "String"
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "Node": {
+                "Unnamed": [
+                  {
+                    "Variant": {
+                      "Custom": {
+                        "Named": {
+                          "content": {
+                            "Variant": {
+                              "Cq": {
+                                "Unnamed": [
+                                  "String"
+                                ]
+                              },
+                              "Segments": {
+                                "Unnamed": [
+                                  {
+                                    "Ref": 1
+                                  }
+                                ]
+                              },
+                              "Single": {
+                                "Unnamed": [
+                                  {
+                                    "Ref": 2
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          "nickname": "String",
+                          "user_id": "String"
+                        }
+                      },
+                      "Reference": {
+                        "Named": {
+                          "id": "String"
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "Poke": {
+                "Named": {
+                  "id": "String",
+                  "kind": "String",
+                  "name": {
+                    "Option": "String"
+                  }
+                }
+              },
+              "Record": {
+                "Unnamed": [
+                  {
+                    "Record": {
+                      "file": "String",
+                      "magic": {
+                        "Option": "String"
+                      },
+                      "options": {
+                        "Record": {
+                          "cache": {
+                            "Option": "String"
+                          },
+                          "proxy": {
+                            "Option": "String"
+                          },
+                          "timeout": {
+                            "Option": "String"
+                          },
+                          "url": {
+                            "Option": "String"
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "Reply": {
+                "Named": {
+                  "id": "String"
+                }
+              },
+              "Rps": {
+                "Named": {}
+              },
+              "Shake": {
+                "Named": {}
+              },
+              "Share": {
+                "Named": {
+                  "content": {
+                    "Option": "String"
+                  },
+                  "image": {
+                    "Option": "String"
+                  },
+                  "title": "String",
+                  "url": "String"
+                }
+              },
+              "Text": {
+                "Named": {
+                  "text": "String"
+                }
+              },
+              "Video": {
+                "Unnamed": [
+                  {
+                    "Record": {
+                      "file": "String",
+                      "options": {
+                        "Record": {
+                          "cache": {
+                            "Option": "String"
+                          },
+                          "proxy": {
+                            "Option": "String"
+                          },
+                          "timeout": {
+                            "Option": "String"
+                          },
+                          "url": {
+                            "Option": "String"
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              "Xml": {
+                "Named": {
+                  "data": "String"
+                }
+              }
+            }
+          }
+        },
+        {
+          "Variant": {
+            "Anonymous": {
+              "Named": {
+                "ignore": {
+                  "Option": "String"
+                }
+              }
+            },
+            "At": {
+              "Named": {
+                "qq": "String"
+              }
+            },
+            "Contact": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Group": {
+                      "Named": {
+                        "id": "String"
+                      }
+                    },
+                    "Qq": {
+                      "Named": {
+                        "id": "String"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "Dice": {
+              "Named": {}
+            },
+            "Face": {
+              "Named": {
+                "id": "String"
+              }
+            },
+            "Forward": {
+              "Named": {
+                "id": "String"
+              }
+            },
+            "Image": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "file": "String",
+                    "kind": {
+                      "Option": {
+                        "Variant": {
+                          "Flash": {
+                            "Unnamed": []
+                          }
+                        }
+                      }
+                    },
+                    "options": {
+                      "Record": {
+                        "cache": {
+                          "Option": "String"
+                        },
+                        "proxy": {
+                          "Option": "String"
+                        },
+                        "timeout": {
+                          "Option": "String"
+                        },
+                        "url": {
+                          "Option": "String"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "Json": {
+              "Named": {
+                "data": "String"
+              }
+            },
+            "Location": {
+              "Named": {
+                "content": {
+                  "Option": "String"
+                },
+                "lat": "String",
+                "lon": "String",
+                "title": {
+                  "Option": "String"
+                }
+              }
+            },
+            "Markdown": {
+              "Named": {
+                "content": "String"
+              }
+            },
+            "Music": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Custom": {
+                      "Named": {
+                        "audio": "String",
+                        "content": {
+                          "Option": "String"
+                        },
+                        "image": {
+                          "Option": "String"
+                        },
+                        "title": "String",
+                        "url": "String"
+                      }
+                    },
+                    "Netease": {
+                      "Named": {
+                        "id": "String"
+                      }
+                    },
+                    "Qq": {
+                      "Named": {
+                        "id": "String"
+                      }
+                    },
+                    "Xiami": {
+                      "Named": {
+                        "id": "String"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "Node": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Custom": {
+                      "Named": {
+                        "content": {
+                          "Variant": {
+                            "Cq": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "Segments": {
+                              "Unnamed": [
+                                {
+                                  "Ref": 1
+                                }
+                              ]
+                            },
+                            "Single": {
+                              "Unnamed": [
+                                {
+                                  "Ref": 2
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "nickname": "String",
+                        "user_id": "String"
+                      }
+                    },
+                    "Reference": {
+                      "Named": {
+                        "id": "String"
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "Poke": {
+              "Named": {
+                "id": "String",
+                "kind": "String",
+                "name": {
+                  "Option": "String"
+                }
+              }
+            },
+            "Record": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "file": "String",
+                    "magic": {
+                      "Option": "String"
+                    },
+                    "options": {
+                      "Record": {
+                        "cache": {
+                          "Option": "String"
+                        },
+                        "proxy": {
+                          "Option": "String"
+                        },
+                        "timeout": {
+                          "Option": "String"
+                        },
+                        "url": {
+                          "Option": "String"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "Reply": {
+              "Named": {
+                "id": "String"
+              }
+            },
+            "Rps": {
+              "Named": {}
+            },
+            "Shake": {
+              "Named": {}
+            },
+            "Share": {
+              "Named": {
+                "content": {
+                  "Option": "String"
+                },
+                "image": {
+                  "Option": "String"
+                },
+                "title": "String",
+                "url": "String"
+              }
+            },
+            "Text": {
+              "Named": {
+                "text": "String"
+              }
+            },
+            "Video": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "file": "String",
+                    "options": {
+                      "Record": {
+                        "cache": {
+                          "Option": "String"
+                        },
+                        "proxy": {
+                          "Option": "String"
+                        },
+                        "timeout": {
+                          "Option": "String"
+                        },
+                        "url": {
+                          "Option": "String"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            "Xml": {
+              "Named": {
+                "data": "String"
+              }
             }
           }
         }

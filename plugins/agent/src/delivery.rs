@@ -1,8 +1,5 @@
 use crate::{Agent, content::MemoryId, memory, output, state::Shared, types::Error};
-use forest_onebot::{
-    forest::SentMessage,
-    message::{Message, Segment},
-};
+use forest_onebot::message::{Message, Segment};
 use forest_sdk::host;
 
 impl Agent {
@@ -16,29 +13,34 @@ impl Agent {
             let s = session.borrow();
             (s.data.group, s.data.bot)
         };
-        let sent: Result<SentMessage, output::Error> = host::call(
+        let report: Result<output::DeliveryReport, output::Error> = host::call(
             output::OBJECT.parse().unwrap(),
-            output::SEND.parse().unwrap(),
-            &output::GroupOutput {
+            output::SEND_MARKDOWN.parse().unwrap(),
+            &output::MarkdownOutput {
                 group_id: group,
                 bot_id: bot,
                 bot_name: self.settings.bot_name.clone(),
-                message: Message::Cq(body.into()),
+                source: body.into(),
             },
         )
         .await?;
-        let sent = sent.map_err(|e| Error::Delivery(format!("{e:?}")))?;
-        let result: Result<(), memory::Error> = host::call(
-            memory::OBJECT.parse().unwrap(),
-            "/delivery".parse().unwrap(),
-            &memory::Delivery {
-                turn: turn.clone(),
-                self_id: bot,
-                message_id: sent.message_id,
-            },
-        )
-        .await?;
-        result.map_err(Error::Memory)
+        let report = report.map_err(|e| Error::Delivery(format!("{e:?}")))?;
+        for sent in report.sent {
+            let result: Result<(), memory::Error> = host::call(
+                memory::OBJECT.parse().unwrap(),
+                "/delivery".parse().unwrap(),
+                &memory::Delivery {
+                    turn: turn.clone(),
+                    self_id: bot,
+                    message_id: sent.message_id,
+                },
+            )
+            .await?;
+            result.map_err(Error::Memory)?;
+        }
+        report
+            .outcome
+            .map_err(|e| Error::Delivery(format!("{e:?}")))
     }
 
     pub(crate) async fn report(&self, session: &Shared, error: &str) {

@@ -185,6 +185,9 @@ fn parse(code: &str) -> Result<Segment, Error> {
         "json" => Segment::Json {
             data: required("data")?,
         },
+        "markdown" => Segment::Markdown {
+            content: required("content")?,
+        },
         _ => return Err(Error::UnknownType(kind.into())),
     })
 }
@@ -322,5 +325,6 @@ pub fn encode_segment(part: &Segment) -> Result<String, Error> {
         },
         Segment::Xml { data } => code("xml", &[("data", data)], &[]),
         Segment::Json { data } => code("json", &[("data", data)], &[]),
+        Segment::Markdown { content } => code("markdown", &[("content", content)], &[]),
     })
 }

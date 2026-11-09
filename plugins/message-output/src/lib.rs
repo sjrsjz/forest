@@ -1,9 +1,10 @@
 pub mod contract;
 mod format;
 pub mod managed;
+pub mod markdown;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use contract::{Error, GroupOutput, OBJECT, SEND};
+use contract::{DeliveryReport, Error, GroupOutput, MarkdownOutput, OBJECT, SEND, SEND_MARKDOWN};
 use forest_onebot::{
     cq,
     forest::{self as onebot, OneBotError, SendGroupMessage, SentMessage},
@@ -66,19 +67,112 @@ impl Module for Output {
         })
     }
     fn handlers() -> Handlers<Self> {
-        Handlers::new().with(
-            SEND.parse().unwrap(),
-            true,
-            callers(vec![
-                SubjectPattern::Path("/module/agent".parse().unwrap()),
-                SubjectPattern::Path("/module/onebot-tools".parse().unwrap()),
-                SubjectPattern::Path("/user/admin".parse().unwrap()),
-            ]),
-            Self::send,
-        )
+        Handlers::new()
+            .with(
+                SEND.parse().unwrap(),
+                true,
+                callers(vec![
+                    SubjectPattern::Path("/module/agent".parse().unwrap()),
+                    SubjectPattern::Path("/module/onebot-tools".parse().unwrap()),
+                    SubjectPattern::Path("/module/typst-command".parse().unwrap()),
+                    SubjectPattern::Path("/user/admin".parse().unwrap()),
+                ]),
+                Self::send,
+            )
+            .with(
+                SEND_MARKDOWN.parse().unwrap(),
+                true,
+                callers(vec![
+                    SubjectPattern::Path("/module/agent".parse().unwrap()),
+                    SubjectPattern::Path("/module/onebot-tools".parse().unwrap()),
+                    SubjectPattern::Path("/user/admin".parse().unwrap()),
+                ]),
+                Self::send_markdown,
+            )
     }
 }
 impl Output {
+    async fn send_markdown(
+        self: Rc<Self>,
+        _: CallContext,
+        input: MarkdownOutput,
+    ) -> Result<DeliveryReport, Error> {
+        let group_id = input.group_id;
+        let messages = self.prepare_markdown(input).await?;
+        let mut sent = Vec::new();
+        for message in messages {
+            let result = host::call::<_, Result<SentMessage, OneBotError>>(
+                onebot::OBJECT.parse().unwrap(),
+                onebot::SEND_GROUP_MESSAGE.parse().unwrap(),
+                &SendGroupMessage {
+                    group_id,
+                    message,
+                    auto_escape: Some(false),
+                },
+            )
+            .await
+            .map_err(|e| Error::Dispatch(e.to_string()))
+            .and_then(|r| r.map_err(Error::OneBot));
+            match result {
+                Ok(receipt) => sent.push(receipt),
+                Err(error) => {
+                    return Ok(DeliveryReport {
+                        sent,
+                        outcome: Err(error),
+                    });
+                }
+            }
+        }
+        Ok(DeliveryReport {
+            sent,
+            outcome: Ok(()),
+        })
+    }
+    async fn prepare_markdown(
+        &self,
+        input: MarkdownOutput,
+    ) -> Result<Vec<forest_onebot::message::Message>, Error> {
+        let settings: Settings =
+            host::config_get(self.object.clone(), "/settings".parse().unwrap())
+                .await
+                .map_err(|e| Error::Dispatch(e.to_string()))?
+                .map_err(|e| Error::InvalidConfiguration(e.to_string()))?;
+        settings.validate()?;
+        let parts: Result<Vec<markdown::Part>, markdown::Error> = host::call(
+            markdown::OBJECT.parse().unwrap(),
+            "/format".parse().unwrap(),
+            &markdown::Format {
+                group_id: Some(input.group_id),
+                source: input.source,
+            },
+        )
+        .await
+        .map_err(|e| Error::Dispatch(e.to_string()))?;
+        let parts = parts.map_err(|e| Error::InvalidMessage(format!("{e:?}")))?;
+        if parts.is_empty() {
+            return Err(Error::InvalidMessage(
+                "message must contain a nonempty part".into(),
+            ));
+        }
+        let native = GroupOutput {
+            group_id: input.group_id,
+            bot_id: input.bot_id,
+            bot_name: input.bot_name,
+            message: forest_onebot::message::Message::Segments(vec![]),
+        };
+        let mut messages = Vec::new();
+        for mut part in parts {
+            resolve(&mut part.segments).await?;
+            messages.push(format::measured(
+                &native,
+                part.segments,
+                &settings,
+                part.source_characters as usize,
+                part.source_lines as usize,
+            ));
+        }
+        Ok(messages)
+    }
     async fn send(
         self: Rc<Self>,
         _: CallContext,
@@ -110,20 +204,7 @@ impl Output {
                 ));
             }
         }
-        for segment in &mut segments {
-            if let Segment::Image(image) = segment {
-                let blob: Result<managed::Blob, managed::Error> = host::call(
-                    managed::OBJECT.parse().unwrap(),
-                    "/get".parse().unwrap(),
-                    &image.file,
-                )
-                .await
-                .map_err(|e| Error::Dispatch(e.to_string()))?;
-                let blob = blob.map_err(|e| Error::Media(format!("{e:?}")))?;
-                image.file = format!("base64://{}", STANDARD.encode(blob.bytes));
-                image.options = Default::default();
-            }
-        }
+        resolve(&mut segments).await?;
         let message = format::format(&input, segments, &settings);
         let sent: Result<SentMessage, OneBotError> = host::call(
             onebot::OBJECT.parse().unwrap(),
@@ -139,6 +220,23 @@ impl Output {
         sent.map_err(Error::OneBot)
     }
 }
+async fn resolve(segments: &mut [Segment]) -> Result<(), Error> {
+    for segment in segments {
+        if let Segment::Image(image) = segment {
+            let blob: Result<managed::Blob, managed::Error> = host::call(
+                managed::OBJECT.parse().unwrap(),
+                "/get".parse().unwrap(),
+                &image.file,
+            )
+            .await
+            .map_err(|e| Error::Dispatch(e.to_string()))?;
+            let blob = blob.map_err(|e| Error::Media(format!("{e:?}")))?;
+            image.file = format!("base64://{}", STANDARD.encode(blob.bytes));
+            image.options = Default::default();
+        }
+    }
+    Ok(())
+}
 forest_sdk::export_module!(super::Output);
 
 pub fn manifest() -> Manifest {
@@ -147,7 +245,9 @@ pub fn manifest() -> Manifest {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),
             name: Some("Message output".into()),
-            description: Some("Managed CQ output with per-group long-message forwarding".into()),
+            description: Some(
+                "Native and Markdown output with per-group long-message forwarding".into(),
+            ),
         },
         module: "module.wasm".into(),
         configs: vec![ConfigDeclaration {
@@ -162,6 +262,12 @@ pub fn manifest() -> Manifest {
         }],
         provides: Output::handlers().declarations(),
         uses: vec![
+            InterfaceUse {
+                object: markdown::OBJECT.parse().unwrap(),
+                interface: "/format".parse().unwrap(),
+                input: markdown::Format::as_schema(),
+                output: Result::<Vec<markdown::Part>, markdown::Error>::as_schema(),
+            },
             InterfaceUse {
                 object: managed::OBJECT.parse().unwrap(),
                 interface: "/get".parse().unwrap(),

@@ -39,6 +39,9 @@ pub struct Remote {
     pub replies: BTreeMap<i64, VecDeque<Reply>>,
     pub requests: Vec<(i64, Value)>,
     pub embeddings: Vec<Value>,
+    pub reranks: Vec<Value>,
+    pub rerank_scores: BTreeMap<String, f64>,
+    pub rerank_failure: bool,
     pub web_requests: Vec<(String, Value)>,
     pub wolfram_requests: Vec<BTreeMap<String, String>>,
     pub points: BTreeMap<String, Value>,
@@ -110,6 +113,37 @@ async fn embeddings(
             json!({"model":"Qwen/Qwen3-VL-Embedding-8B","data":body["input"].as_array().unwrap().iter().enumerate().map(|(index,_)|json!({"index":index,"embedding":vector})).collect::<Vec<_>>()}),
         ),
     )
+}
+async fn rerank(
+    State(remote): State<Shared>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let mut remote = remote.lock().unwrap();
+    remote.reranks.push(body.clone());
+    if remote.rerank_failure {
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({"message":"rerank unavailable"})),
+        );
+    }
+    let results = body["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(index, document)| {
+            let text = document["text"].as_str().unwrap_or("");
+            let score = remote
+                .rerank_scores
+                .iter()
+                .find(|(key, _)| text.contains(key.as_str()))
+                .map(|(_, s)| *s)
+                .unwrap_or(1.0);
+            json!({"index":index,"relevance_score":score})
+        })
+        .rev()
+        .collect::<Vec<_>>();
+    (StatusCode::OK, Json(json!({"results":results})))
 }
 async fn collection(State(remote): State<Shared>) -> (StatusCode, Json<Value>) {
     if remote.lock().unwrap().collection {
@@ -246,8 +280,10 @@ impl Harness {
             "forest-ai-paint",
             "forest-message-output",
             "forest-context-module",
+            "forest-markdown",
             "forest-openai-provider",
             "forest-qwen-vl-embedding",
+            "forest-qwen-vl-reranker",
         ];
         let mut command = Command::new("cargo");
         command.args([
@@ -278,6 +314,8 @@ impl Harness {
                     "wasm32-unknown-unknown",
                     "-p",
                     "forest-typst",
+                    "-p",
+                    "forest-image-projection",
                     "--lib"
                 ])
                 .current_dir(&workspace)
@@ -292,6 +330,7 @@ impl Harness {
         let app = Router::new()
             .route("/chat", post(chat))
             .route("/embeddings", post(embeddings))
+            .route("/rerank", post(rerank))
             .route("/slow", get(slow))
             .route("/v1/tools/search", post(web_search))
             .route("/v1/tools/fetch", post(web_fetch))
@@ -323,10 +362,13 @@ impl Harness {
         .unwrap();
         let manifests = [
             forest_qwen_vl_embedding::manifest(),
+            forest_qwen_vl_reranker::manifest(),
             forest_openai_provider::manifest(),
             forest_context_module::manifest(),
+            forest_markdown::manifest(),
             forest_memory_module::manifest(),
             forest_media::manifest(),
+            forest_image_projection::manifest(),
             forest_typst::manifest(),
             forest_agent_tools::manifest(),
             forest_deepseek_web::manifest(),
@@ -339,10 +381,13 @@ impl Harness {
         let mut packages = BTreeMap::new();
         for (manifest, artifact) in manifests.into_iter().zip([
             "forest_qwen_vl_embedding",
+            "forest_qwen_vl_reranker",
             "forest_openai_provider",
             "forest_context_module",
+            "forest_markdown",
             "forest_memory_module",
             "forest_media",
+            "forest_image_projection",
             "forest_typst",
             "forest_agent_tools",
             "forest_deepseek_web",
@@ -377,7 +422,7 @@ impl Harness {
             std::fs::copy(
                 workspace.join(format!(
                     "target/wasm32-unknown-unknown/{}/{artifact}.wasm",
-                    if artifact == "forest_typst" {
+                    if matches!(artifact, "forest_typst" | "forest_image_projection") {
                         "guest"
                     } else {
                         "debug"
@@ -430,6 +475,17 @@ impl Harness {
                 &forest_deepseek_web::Connection {
                     endpoint: format!("{}/v1", result.endpoint),
                     api_key: "test".into(),
+                },
+            )
+            .await;
+        result
+            .configure(
+                "/module/qwen-vl-reranker",
+                "/connection",
+                &forest_qwen_vl_reranker::types::Connection {
+                    endpoint: format!("{}/rerank", result.endpoint),
+                    api_key: "test".into(),
+                    batch_size: 64,
                 },
             )
             .await;

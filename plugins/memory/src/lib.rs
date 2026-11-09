@@ -2,13 +2,17 @@
 pub mod content;
 mod embedding;
 mod graph;
+pub mod image_projection;
 mod index;
 pub mod managed;
+pub mod markdown;
 mod media;
 pub mod openai;
 mod projection;
 #[cfg(test)]
 mod projection_tests;
+mod ranking;
+mod reranker;
 mod store;
 pub mod types;
 use content::*;
@@ -171,7 +175,7 @@ impl Memory {
                     sequence: number(&row[2])?,
                 });
             }
-            store::archive(&ids, &self.settings.collection).await?;
+            store::reindex(&ids, &self.settings.collection).await?;
         }
         execute(vec![stmt(
             "UPDATE vectors SET state='pending',error=NULL WHERE space=?",
@@ -225,6 +229,30 @@ pub fn manifest() -> Manifest {
         }],
         provides: Memory::handlers().declarations(),
         uses: vec![
+            InterfaceUse {
+                object: markdown::OBJECT.parse().unwrap(),
+                interface: "/encode".parse().unwrap(),
+                input: Vec::<markdown::Encode>::as_schema(),
+                output: Result::<Vec<Vec<markdown::Fragment>>, markdown::Error>::as_schema(),
+            },
+            InterfaceUse {
+                object: reranker::OBJECT.parse().unwrap(),
+                interface: reranker::RANK.parse().unwrap(),
+                input: reranker::Request::as_schema(),
+                output: Result::<reranker::Scores, reranker::Error>::as_schema(),
+            },
+            InterfaceUse {
+                object: image_projection::OBJECT.parse().unwrap(),
+                interface: image_projection::THUMBNAIL.parse().unwrap(),
+                input: image_projection::Thumbnail::as_schema(),
+                output: Result::<managed::Blob, image_projection::Error>::as_schema(),
+            },
+            InterfaceUse {
+                object: image_projection::OBJECT.parse().unwrap(),
+                interface: image_projection::PREPARE.parse().unwrap(),
+                input: String::as_schema(),
+                output: Result::<managed::Blob, image_projection::Error>::as_schema(),
+            },
             InterfaceUse {
                 object: managed::OBJECT.parse().unwrap(),
                 interface: "/register".parse().unwrap(),

@@ -1,0 +1,2 @@
+schema T0 = variant {Err(string), Ok(())};
+export T0;

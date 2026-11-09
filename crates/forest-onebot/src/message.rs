@@ -15,7 +15,7 @@ pub enum Message {
     Single(Box<Segment>),
 }
 
-/// Segment data uses strings as specified by the v11 message wire format.
+/// Typed v11 segments and explicitly supported NapCat extensions.
 #[cfg_attr(
     feature = "forest",
     derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)
@@ -79,6 +79,9 @@ pub enum Segment {
     },
     Json {
         data: String,
+    },
+    Markdown {
+        content: String,
     },
 }
 

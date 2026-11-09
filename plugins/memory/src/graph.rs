@@ -5,6 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Deserialize)]
 pub struct Retrieval {
     pub seed_threshold: f64,
+    pub candidate_limit: usize,
+    pub rerank_threshold: f64,
+    pub rerank_batch_size: usize,
+    pub rerank_image_max_side: i32,
     pub seed_limit: usize,
     pub sequence_weight: f64,
     pub association_weight: f64,
@@ -18,6 +22,10 @@ impl Retrieval {
     pub fn parse(text: &str) -> Result<Self, String> {
         let result: Self = serde_json::from_str(text).map_err(|e| e.to_string())?;
         if !(0.0..=1.0).contains(&result.seed_threshold)
+            || !(0.0..=1.0).contains(&result.rerank_threshold)
+            || result.candidate_limit < result.seed_limit
+            || result.rerank_batch_size == 0
+            || result.rerank_image_max_side <= 0
             || !(0.0..1.0).contains(&result.sequence_weight)
             || !(0.0..1.0).contains(&result.association_weight)
             || !(0.0..=1.0).contains(&result.activation_min)
@@ -84,7 +92,7 @@ impl Memory {
             .into_iter()
             .filter(|e| kept.contains(&e.from) && kept.contains(&e.to))
             .collect::<Vec<_>>();
-        let graph = serde_json::json!({"nodes":selected.iter().map(|(id,activation)|serde_json::json!({"id":id,"activation":activation,"seed_score":seeds.iter().find(|(s,_)|s==*id).map(|(_,s)|s)})).collect::<Vec<_>>(),"edges":edges});
+        let graph = serde_json::json!({"seed_score_kind":"rerank","nodes":selected.iter().map(|(id,activation)|serde_json::json!({"id":id,"activation":activation,"seed_score":seeds.iter().find(|(s,_)|s==*id).map(|(_,s)|s)})).collect::<Vec<_>>(),"edges":edges});
         Ok(Region {
             units,
             seeds: seeds

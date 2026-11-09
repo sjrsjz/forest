@@ -239,7 +239,10 @@ async fn wasm_painting_adapters_return_persistent_media_without_credentials_or_i
     );
     let result: Value = serde_json::from_str(&response).unwrap();
     let reference = result["reference"].as_str().unwrap().to_owned();
-    assert_eq!(result["cq"], format!("[CQ:image,file={reference}]"));
+    assert_eq!(
+        result["markdown"],
+        format!("![generated image]({reference})")
+    );
     {
         let requests = requests.lock().unwrap();
         let (_, headers, body) = &requests[0];

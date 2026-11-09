@@ -20,6 +20,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+forest-markdown = { path = "../markdown" }
 forest-runtime = { path = "../../crates/forest-runtime" }
 forest-config = { path = "../../crates/forest-config" }
 tokio.workspace = true

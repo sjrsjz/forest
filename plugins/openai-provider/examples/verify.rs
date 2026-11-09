@@ -100,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(arguments.value, "FOREST_OK");
         request.messages.push(Message::Tool {
             tool_call_id: id,
-            content: arguments.value,
+            content: Content::Text(arguments.value),
         });
     }
     let started = Instant::now();

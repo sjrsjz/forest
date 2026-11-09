@@ -242,7 +242,7 @@ pub fn default_routes() -> Vec<Route> {
         ),
         route(
             "typst_render",
-            "Render a Typst document, equations or tables into PNG pages. Use Typst syntax, not Markdown or LaTeX. Defaults: 480pt width, automatic height, 12pt Chinese text, 2 pixels/pt; source can override page/text settings. Chinese and mathematical fonts are included. Returns page dimensions, managed media references and ready-to-send CQ image codes; include the returned cq in your assistant reply to send the images. No image bytes appear in the tool result. Optional images maps relative virtual file names to existing media: references for image(\"name.png\"). File system, package downloads and current date are unavailable. Compilation diagnostics are returned for you to correct the source.",
+            "Render a Typst document, equations or tables into PNG pages. Use Typst syntax, not Markdown or LaTeX. Defaults: 480pt width, automatic height, 12pt Chinese text, 2 pixels/pt; source can override page/text settings. Chinese and mathematical fonts are included. Returns page dimensions, managed media references and ready-to-send Markdown image links; include the returned markdown in your assistant reply to send the images. No image bytes appear in the tool result. Optional images maps relative virtual file names to existing media: references for image(\"name.png\"). File system, package downloads and current date are unavailable. Compilation diagnostics are returned for you to correct the source.",
             serde_json::json!({
                 "type":"object",
                 "properties":{
@@ -256,7 +256,7 @@ pub fn default_routes() -> Vec<Route> {
         ),
         route(
             "image_generate",
-            "Generate one AI image from a detailed visual prompt. Use this for drawing requests; use typst_render for documents, exact equations and tables. Preserve the user's intended subject and requested wording. style is anime (default), photo or none; size is portrait, landscape or square (default). Returns a persistent media reference and a ready-to-send cq image code: copy the cq exactly into your assistant reply, or send it with onebot_send_group_message/onebot_send_private_message. The tool generates and stores the image but does not send it. Endpoint, model, quality and inference steps are administrator settings. seed is optional and only supported by SiliconFlow and SwarmUI. Do not retry a failed or interrupted generation automatically; it may already have been billed.",
+            "Generate one AI image from a detailed visual prompt. Use this for drawing requests; use typst_render for documents, exact equations and tables. Preserve the user's intended subject and requested wording. style is anime (default), photo or none; size is portrait, landscape or square (default). Returns a persistent media reference and a ready-to-send Markdown image link: copy the markdown exactly into your assistant reply, or send it with onebot_send_group_message/onebot_send_private_message. The tool generates and stores the image but does not send it. Endpoint, model, quality and inference steps are administrator settings. seed is optional and only supported by SiliconFlow and SwarmUI. Do not retry a failed or interrupted generation automatically; it may already have been billed.",
             serde_json::json!({
                 "type":"object","properties":{
                     "prompt":{"type":"string","minLength":1,"maxLength":8000},

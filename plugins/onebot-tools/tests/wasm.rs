@@ -98,7 +98,7 @@ async fn invoke(scheduler: &Scheduler, interface: &str, args: Value) -> Result<S
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wasm_tools_query_native_onebot_and_send_managed_cq_with_real_receipts() {
+async fn wasm_tools_query_native_onebot_and_send_markdown_with_real_receipts() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -119,6 +119,8 @@ async fn wasm_tools_query_native_onebot_and_send_managed_cq_with_real_receipts()
                 "forest-media",
                 "-p",
                 "forest-message-output",
+                "-p",
+                "forest-markdown",
                 "--lib"
             ])
             .current_dir(&root)
@@ -160,10 +162,33 @@ async fn wasm_tools_query_native_onebot_and_send_managed_cq_with_real_receipts()
         vec![SubjectPattern::Path("/module/**".parse().unwrap())],
     )
     .unwrap();
+    let markdown = temp.path().join("markdown");
+    package(
+        &root,
+        &markdown,
+        "forest_markdown",
+        forest_markdown::manifest(),
+    );
+    scheduler
+        .register_native(forest_runtime::NativeInterface::new(
+            "/module/typst".parse().unwrap(),
+            "/typeset".parse().unwrap(),
+            false,
+            forest_protocol::manifest::callers(vec![SubjectPattern::Path(
+                "/module/markdown".parse().unwrap(),
+            )]),
+            |_, _: String| async {
+                Err::<Vec<String>, forest_markdown::typst::Error>(
+                    forest_markdown::typst::Error::Execution("unused in messaging test".into()),
+                )
+            },
+        ))
+        .unwrap();
     scheduler
         .load_roots(
             vec![
                 scheduler.package(&media).await.unwrap(),
+                scheduler.package(&markdown).await.unwrap(),
                 scheduler.package(&tools).await.unwrap(),
                 scheduler.package(&output).await.unwrap(),
             ],
@@ -238,7 +263,7 @@ async fn wasm_tools_query_native_onebot_and_send_managed_cq_with_real_receipts()
         .unwrap()
         .unwrap();
     let body = format!(
-        "literal &#91;CQ:at,qq=999&#93;[CQ:at,qq=20][CQ:face,id=14][CQ:image,file={reference}]"
+        "literal [CQ:at,qq=999][user](forest:at/20)[face](forest:face/14)![image]({reference})"
     );
     let sent: Value = serde_json::from_str(
         &invoke(&scheduler, "/send_group_message", json!({"message":body}))
@@ -246,7 +271,7 @@ async fn wasm_tools_query_native_onebot_and_send_managed_cq_with_real_receipts()
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(sent["message_id"], 123);
+    assert_eq!(sent["message_ids"], json!([123]));
     assert_eq!(sent["group_id"], 42);
     assert_eq!(sent["message"], body);
     assert!(!sent.to_string().contains("base64://"));
@@ -269,14 +294,20 @@ async fn wasm_tools_query_native_onebot_and_send_managed_cq_with_real_receipts()
     )
     .await
     .unwrap();
-    assert!(
-        matches!(invoke(&scheduler,"/send_private_message",json!({"user_id":13,"message":"hello"})).await,Err(Error::Execution(error)) if error.contains("Submitted"))
-    );
+    let failure: Value = serde_json::from_str(
+        &invoke(
+            &scheduler,
+            "/send_private_message",
+            json!({"user_id":13,"message":"hello"}),
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(failure["message_ids"], json!([]));
+    assert!(failure["error"].as_str().unwrap().contains("Submitted"));
     let count = gateway.0.lock().unwrap().len();
-    for body in [
-        "[CQ:image,file=https://example.com/image.png]",
-        "[CQ:record,file=anything]",
-    ] {
+    for body in ["[bad](media:invalid)", "[reply](forest:reply/43/-7)"] {
         assert!(
             invoke(&scheduler, "/send_group_message", json!({"message":body}))
                 .await

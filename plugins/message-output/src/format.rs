@@ -3,11 +3,6 @@ use forest_onebot::message::{Message, Node, Segment};
 
 /// Transform only the transport representation; preserve every segment in order.
 pub fn format(input: &GroupOutput, segments: Vec<Segment>, settings: &Settings) -> Message {
-    let enabled = settings
-        .groups
-        .iter()
-        .find(|g| g.group_id == input.group_id)
-        .map_or(settings.enabled_by_default, |g| g.enabled);
     let (mut chars, mut lines) = (0usize, 0usize);
     for segment in &segments {
         if let Segment::Text { text } = segment {
@@ -16,6 +11,21 @@ pub fn format(input: &GroupOutput, segments: Vec<Segment>, settings: &Settings) 
         }
     }
     lines += usize::from(chars != 0);
+    measured(input, segments, settings, chars, lines)
+}
+
+pub fn measured(
+    input: &GroupOutput,
+    segments: Vec<Segment>,
+    settings: &Settings,
+    chars: usize,
+    lines: usize,
+) -> Message {
+    let enabled = settings
+        .groups
+        .iter()
+        .find(|g| g.group_id == input.group_id)
+        .map_or(settings.enabled_by_default, |g| g.enabled);
     if !enabled
         || (chars <= settings.character_threshold as usize
             && lines <= settings.line_threshold as usize)

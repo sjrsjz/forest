@@ -1,4 +1,4 @@
-//! Derived CQ and embedding views. Never rewrites the stored source object.
+//! Derived Markdown and embedding views. Never rewrites the stored source object.
 use crate::{content::*, types::Error};
 use forest_onebot::{
     cq,
@@ -112,10 +112,30 @@ pub fn image_references(unit: &MemoryUnit) -> Result<Vec<String>, Error> {
     result.dedup();
     Ok(result)
 }
-pub fn representations(unit: &MemoryUnit) -> Result<Vec<Representation>, Error> {
+pub async fn representations(unit: &MemoryUnit) -> Result<Vec<Representation>, Error> {
     let projected = projected(unit)?;
     let body = match &projected.content {
-        MemoryContent::GroupMessage(message) => cq::encode(&message.message).map_err(cq_error)?,
+        MemoryContent::GroupMessage(message) => {
+            let encoded: Result<Vec<Vec<crate::markdown::Fragment>>, crate::markdown::Error> =
+                forest_sdk::host::call(
+                    crate::markdown::OBJECT.parse().unwrap(),
+                    "/encode".parse().unwrap(),
+                    &vec![crate::markdown::Encode {
+                        group_id: message.group_id,
+                        message: message.message.clone(),
+                    }],
+                )
+                .await?;
+            encoded
+                .map_err(|e| Error::InvalidInput(format!("{e:?}")))?
+                .into_iter()
+                .flatten()
+                .filter_map(|f| match f {
+                    crate::markdown::Fragment::Text(t) => Some(t),
+                    _ => None,
+                })
+                .collect()
+        }
         MemoryContent::ModelTurn(turn) => {
             let mut body = turn.assistant.content.clone().unwrap_or_default();
             if let Some(refusal) = &turn.assistant.refusal {
@@ -143,15 +163,42 @@ pub fn representations(unit: &MemoryUnit) -> Result<Vec<Representation>, Error> 
     );
     Ok(result)
 }
-/// CQ controls and escape entities are indivisible; long text keeps every scalar.
+
+/// Protocol-only text is retained in storage/indexing, but is not evidence for
+/// relevance ranking. Pure image messages are ranked through their actual pixels.
+pub async fn ranking_representations(unit: &MemoryUnit) -> Result<Vec<Representation>, Error> {
+    let mut has_text = !matches!(&unit.content, MemoryContent::GroupMessage(_));
+    if let MemoryContent::GroupMessage(message) = &unit.content {
+        visit(&message.message, "", &mut |_, segment| match segment {
+            Segment::Text { text } if !text.trim().is_empty() => has_text = true,
+            Segment::Markdown { content } if !content.trim().is_empty() => has_text = true,
+            _ => {}
+        })?;
+    }
+    Ok(representations(unit)
+        .await?
+        .into_iter()
+        .filter(|view| has_text || matches!(view, Representation::Image(_)))
+        .collect())
+}
+/// Protocol links and escapes are indivisible; long text keeps every scalar.
 pub fn chunks(text: &str, limit: usize) -> Vec<String> {
     let mut result = Vec::new();
     let mut current = String::new();
     let mut count = 0;
     let mut rest = text;
     while !rest.is_empty() {
-        let end = if rest.starts_with("[CQ:") {
-            rest.find(']').map(|n| n + 1)
+        let end = if rest.starts_with("![") || rest.starts_with('[') {
+            rest.find("](").and_then(|middle| {
+                let target = &rest[middle + 2..];
+                if target.starts_with("forest:") || target.starts_with("media:") {
+                    target.find(')').map(|end| middle + 2 + end + 1)
+                } else {
+                    None
+                }
+            })
+        } else if rest.starts_with('\\') {
+            rest.chars().nth(1).map(|c| 1 + c.len_utf8())
         } else if rest.starts_with('&') {
             ["&amp;", "&#91;", "&#93;", "&#44;"]
                 .into_iter()
@@ -210,8 +257,8 @@ mod tests {
     use super::*;
     use crate::openai::Assistant;
 
-    #[test]
-    fn stored_model_and_tool_text_do_not_require_valid_cq() {
+    #[tokio::test]
+    async fn stored_model_and_tool_text_do_not_require_valid_cq() {
         let reference = format!("media:{}", "a".repeat(64));
         let body = format!("[CQ:image,file:{reference}] [CQ:at,qq=1,broken] [CQ:unfinished");
         assert!(cq::decode(&body).is_err());
@@ -229,7 +276,7 @@ mod tests {
             }),
         };
         assert_eq!(image_references(&model).unwrap(), vec![reference.clone()]);
-        let views = representations(&model).unwrap();
+        let views = representations(&model).await.unwrap();
         assert!(matches!(&views[0], Representation::Text(text) if text==&body));
         assert!(matches!(&views[1], Representation::Image(image) if image==&reference));
         let tool = MemoryUnit {

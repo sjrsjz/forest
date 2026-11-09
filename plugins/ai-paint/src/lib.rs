@@ -120,7 +120,7 @@ impl Painter {
         .await
         .map_err(|e| Error::Execution(e.to_string()))?;
         let reference = reference.map_err(|e| Error::Execution(format!("{e:?}")))?;
-        Ok(serde_json::json!({"reference":reference,"mime":mime,"cq":format!("[CQ:image,file={reference}]")}).to_string())
+        Ok(serde_json::json!({"reference":reference,"mime":mime,"markdown":format!("![generated image]({reference})")}).to_string())
     }
 }
 

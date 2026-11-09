@@ -149,7 +149,7 @@
                 "Record": {
                   "description": {
                     "Some": {
-                      "String": "Render a Typst document, equations or tables into PNG pages. Use Typst syntax, not Markdown or LaTeX. Defaults: 480pt width, automatic height, 12pt Chinese text, 2 pixels/pt; source can override page/text settings. Chinese and mathematical fonts are included. Returns page dimensions, managed media references and ready-to-send CQ image codes; include the returned cq in your assistant reply to send the images. No image bytes appear in the tool result. Optional images maps relative virtual file names to existing media: references for image(\"name.png\"). File system, package downloads and current date are unavailable. Compilation diagnostics are returned for you to correct the source."
+                      "String": "Render a Typst document, equations or tables into PNG pages. Use Typst syntax, not Markdown or LaTeX. Defaults: 480pt width, automatic height, 12pt Chinese text, 2 pixels/pt; source can override page/text settings. Chinese and mathematical fonts are included. Returns page dimensions, managed media references and ready-to-send Markdown image links; include the returned markdown in your assistant reply to send the images. No image bytes appear in the tool result. Optional images maps relative virtual file names to existing media: references for image(\"name.png\"). File system, package downloads and current date are unavailable. Compilation diagnostics are returned for you to correct the source."
                     }
                   },
                   "name": {
@@ -175,7 +175,7 @@
                 "Record": {
                   "description": {
                     "Some": {
-                      "String": "Generate one AI image from a detailed visual prompt. Use this for drawing requests; use typst_render for documents, exact equations and tables. Preserve the user's intended subject and requested wording. style is anime (default), photo or none; size is portrait, landscape or square (default). Returns a persistent media reference and a ready-to-send cq image code: copy the cq exactly into your assistant reply, or send it with onebot_send_group_message/onebot_send_private_message. The tool generates and stores the image but does not send it. Endpoint, model, quality and inference steps are administrator settings. seed is optional and only supported by SiliconFlow and SwarmUI. Do not retry a failed or interrupted generation automatically; it may already have been billed."
+                      "String": "Generate one AI image from a detailed visual prompt. Use this for drawing requests; use typst_render for documents, exact equations and tables. Preserve the user's intended subject and requested wording. style is anime (default), photo or none; size is portrait, landscape or square (default). Returns a persistent media reference and a ready-to-send Markdown image link: copy the markdown exactly into your assistant reply, or send it with onebot_send_group_message/onebot_send_private_message. The tool generates and stores the image but does not send it. Endpoint, model, quality and inference steps are administrator settings. seed is optional and only supported by SiliconFlow and SwarmUI. Do not retry a failed or interrupted generation automatically; it may already have been billed."
                     }
                   },
                   "name": {
@@ -409,14 +409,14 @@
                 "Record": {
                   "description": {
                     "Some": {
-                      "String": "Immediately send a separate QQ group message and return its actual message_id. Defaults to the current group; an explicit group_id can target another joined group. Supports text and CQ at/reply/face/managed-image codes. Successful calls have already sent the message: do not repeat that content in your assistant reply. Ordinary replies to the current conversation are sent automatically and do not require this tool."
+                      "String": "Immediately send a separate QQ group message and return its actual message_ids and any terminal error. Defaults to the current group; an explicit group_id can target another joined group. Supports Forest Markdown links for mentions, replies, faces and managed images. Successful calls have already sent the message: do not repeat that content in your assistant reply. Ordinary replies to the current conversation are sent automatically and do not require this tool."
                     }
                   },
                   "name": {
                     "String": "onebot_send_group_message"
                   },
                   "parameters_json": {
-                    "String": "{\"additionalProperties\":false,\"properties\":{\"group_id\":{\"description\":\"QQ group ID. Omit to use the current conversation's group.\",\"type\":\"integer\"},\"message\":{\"description\":\"Message text with optional CQ at/reply/face/image codes. Images must use media:<sha256> references returned by tools; never supply base64, URLs or filesystem paths. Literal CQ brackets must be escaped as &#91; and &#93;.\",\"minLength\":1,\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"}"
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"group_id\":{\"description\":\"QQ group ID. Omit to use the current conversation's group.\",\"type\":\"integer\"},\"message\":{\"description\":\"Markdown message with optional [name](forest:at/ACCOUNT), [reply](forest:reply/GROUP/MESSAGE), [face](forest:face/ID), and ![image](media:HASH). Images must use media:<sha256> references returned by tools; never supply base64, URLs or filesystem paths. A thematic break splits messages. Group replies must target the destination group; private messages cannot mention groups or reply to group messages.\",\"minLength\":1,\"type\":\"string\"}},\"required\":[\"message\"],\"type\":\"object\"}"
                   },
                   "strict": "None"
                 }
@@ -435,14 +435,14 @@
                 "Record": {
                   "description": {
                     "Some": {
-                      "String": "Immediately send a separate private QQ message and return its actual message_id. The gateway determines whether the recipient can be reached; do not claim delivery if it fails. Supports text and CQ face/managed-image codes. A successful call has already sent the message; do not repeat it as an assistant reply."
+                      "String": "Immediately send a separate private QQ message and return its actual message_ids and any terminal error. The gateway determines whether the recipient can be reached; do not claim delivery if it fails. Supports Forest Markdown face links and managed images. A successful call has already sent the message; do not repeat it as an assistant reply."
                     }
                   },
                   "name": {
                     "String": "onebot_send_private_message"
                   },
                   "parameters_json": {
-                    "String": "{\"additionalProperties\":false,\"properties\":{\"message\":{\"description\":\"Message text with optional CQ at/reply/face/image codes. Images must use media:<sha256> references returned by tools; never supply base64, URLs or filesystem paths. Literal CQ brackets must be escaped as &#91; and &#93;.\",\"minLength\":1,\"type\":\"string\"},\"user_id\":{\"description\":\"QQ account ID, not a nickname. Use sender IDs from the conversation or query group members.\",\"type\":\"integer\"}},\"required\":[\"user_id\",\"message\"],\"type\":\"object\"}"
+                    "String": "{\"additionalProperties\":false,\"properties\":{\"message\":{\"description\":\"Markdown message with optional [name](forest:at/ACCOUNT), [reply](forest:reply/GROUP/MESSAGE), [face](forest:face/ID), and ![image](media:HASH). Images must use media:<sha256> references returned by tools; never supply base64, URLs or filesystem paths. A thematic break splits messages. Group replies must target the destination group; private messages cannot mention groups or reply to group messages.\",\"minLength\":1,\"type\":\"string\"},\"user_id\":{\"description\":\"QQ account ID, not a nickname. Use sender IDs from the conversation or query group members.\",\"type\":\"integer\"}},\"required\":[\"user_id\",\"message\"],\"type\":\"object\"}"
                   },
                   "strict": "None"
                 }
@@ -1657,6 +1657,11 @@
                                                     }
                                                   }
                                                 },
+                                                "Markdown": {
+                                                  "Named": {
+                                                    "content": "String"
+                                                  }
+                                                },
                                                 "Music": {
                                                   "Unnamed": [
                                                     {
@@ -1911,6 +1916,11 @@
                                                   "title": {
                                                     "Option": "String"
                                                   }
+                                                }
+                                              },
+                                              "Markdown": {
+                                                "Named": {
+                                                  "content": "String"
                                                 }
                                               },
                                               "Music": {
@@ -2288,6 +2298,11 @@
                           }
                         }
                       },
+                      "Markdown": {
+                        "Named": {
+                          "content": "String"
+                        }
+                      },
                       "Music": {
                         "Unnamed": [
                           {
@@ -2542,6 +2557,11 @@
                         "title": {
                           "Option": "String"
                         }
+                      }
+                    },
+                    "Markdown": {
+                      "Named": {
+                        "content": "String"
                       }
                     },
                     "Music": {
@@ -2923,6 +2943,11 @@
                                                         }
                                                       }
                                                     },
+                                                    "Markdown": {
+                                                      "Named": {
+                                                        "content": "String"
+                                                      }
+                                                    },
                                                     "Music": {
                                                       "Unnamed": [
                                                         {
@@ -3177,6 +3202,11 @@
                                                       "title": {
                                                         "Option": "String"
                                                       }
+                                                    }
+                                                  },
+                                                  "Markdown": {
+                                                    "Named": {
+                                                      "content": "String"
                                                     }
                                                   },
                                                   "Music": {
@@ -3556,6 +3586,11 @@
                           }
                         }
                       },
+                      "Markdown": {
+                        "Named": {
+                          "content": "String"
+                        }
+                      },
                       "Music": {
                         "Unnamed": [
                           {
@@ -3810,6 +3845,11 @@
                         "title": {
                           "Option": "String"
                         }
+                      }
+                    },
+                    "Markdown": {
+                      "Named": {
+                        "content": "String"
                       }
                     },
                     "Music": {

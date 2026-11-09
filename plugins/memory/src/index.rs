@@ -156,7 +156,7 @@ impl Memory {
         Ok(())
     }
     pub async fn seeds(&self, query: &MemoryUnit) -> Result<Vec<(MemoryId, f64)>, Error> {
-        let representations = crate::projection::representations(query)?;
+        let representations = crate::projection::ranking_representations(query).await?;
         if representations.is_empty() {
             return Ok(vec![]);
         }
@@ -164,7 +164,7 @@ impl Memory {
         let mut candidates: BTreeMap<MemoryId, f64> = BTreeMap::new();
         for representation in representations {
             let vector = self.embed(representation).await?;
-            let response=self.qdrant("POST","/points/query",json!({"query":vector,"limit":self.retrieval.seed_limit*4,"with_payload":true,"score_threshold":self.retrieval.seed_threshold})).await?;
+            let response=self.qdrant("POST","/points/query",json!({"query":vector,"limit":self.retrieval.candidate_limit*4,"with_payload":true,"score_threshold":self.retrieval.seed_threshold})).await?;
             let response: Envelope<Query> =
                 serde_json::from_value(response).map_err(|e| Error::Index(e.to_string()))?;
             for hit in response.result.points {
@@ -181,16 +181,21 @@ impl Memory {
             }
         }
         let ids = candidates.keys().cloned().collect::<Vec<_>>();
-        let mut seeds = read(&ids, true)
-            .await?
-            .into_iter()
-            .map(|u| {
-                let score = candidates[&u.id];
-                (u.id, score)
-            })
-            .collect::<Vec<_>>();
-        seeds.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        seeds.truncate(self.retrieval.seed_limit);
-        Ok(seeds)
+        let mut units = Vec::new();
+        for unit in read(&ids, true).await? {
+            if !crate::projection::ranking_representations(&unit)
+                .await?
+                .is_empty()
+            {
+                units.push(unit);
+            }
+        }
+        units.sort_by(|a, b| {
+            candidates[&b.id]
+                .total_cmp(&candidates[&a.id])
+                .then(a.id.cmp(&b.id))
+        });
+        units.truncate(self.retrieval.candidate_limit);
+        self.rank_seeds(query, &units).await
     }
 }

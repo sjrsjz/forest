@@ -56,7 +56,5 @@ pub struct ImageInput {
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveSchema, DeriveValue)]
 pub enum Error {
-    Cq(forest_onebot::cq::Error),
-    /// Inline bytes must be managed before appearing as a message file reference.
-    InlineMedia,
+    Projection(String),
 }

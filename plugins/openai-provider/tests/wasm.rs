@@ -47,6 +47,13 @@ fn inspect(body: &Value) {
         body["messages"][4],
         json!({"role":"tool","tool_call_id":"old-call","content":"old-result"})
     );
+    assert_eq!(
+        body["messages"][5],
+        json!({"role":"tool","tool_call_id":"image-call","content":[
+            {"type":"text","text":"rendered image"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,TOOL_IMAGE_BYTES"}}
+        ]})
+    );
     assert_eq!(body["tools"][0]["type"], "function");
     assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
     assert_eq!(
@@ -125,18 +132,41 @@ fn request() -> Request {
             Message::Assistant(Assistant {
                 content: Some("previous body".into()),
                 reasoning_content: Some("retained reasoning".into()),
-                tool_calls: Some(vec![ToolCall::Function {
-                    id: "old-call".into(),
-                    function: FunctionCall {
-                        name: "lookup".into(),
-                        arguments: r#"{"q":"old"}"#.into(),
+                tool_calls: Some(vec![
+                    ToolCall::Function {
+                        id: "old-call".into(),
+                        function: FunctionCall {
+                            name: "lookup".into(),
+                            arguments: r#"{"q":"old"}"#.into(),
+                        },
                     },
-                }]),
+                    ToolCall::Function {
+                        id: "image-call".into(),
+                        function: FunctionCall {
+                            name: "lookup".into(),
+                            arguments: r#"{"q":"image"}"#.into(),
+                        },
+                    },
+                ]),
                 refusal: None,
             }),
             Message::Tool {
                 tool_call_id: "old-call".into(),
-                content: "old-result".into(),
+                content: Content::Text("old-result".into()),
+            },
+            Message::Tool {
+                tool_call_id: "image-call".into(),
+                content: Content::Parts(vec![
+                    ContentPart::Text {
+                        text: "rendered image".into(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "data:image/png;base64,TOOL_IMAGE_BYTES".into(),
+                            detail: None,
+                        },
+                    },
+                ]),
             },
         ],
         tools: vec![Tool {
@@ -409,7 +439,8 @@ async fn scenario() {
         invoke(&scheduler, &request()).await.unwrap_err(),
         Error::Http {
             status: 400,
-            request_id: Some("provider-test".into())
+            request_id: Some("provider-test".into()),
+            body: json!({"error":"unavailable"}).to_string(),
         }
     );
     assert!(matches!(

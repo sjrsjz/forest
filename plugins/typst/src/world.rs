@@ -182,3 +182,27 @@ pub fn render(
     }
     Ok((pages, warnings))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn markdown_templates_are_valid_typst_and_code_is_data() {
+        let fonts = Fonts::new();
+        for source in [
+            "#heading(level: 1)[#text(\"Title\")]\n#strong[#text(\"bold\")] #emph[#text(\"emphasis\")] #strike[#text(\"old\")]",
+            "#list([#text(\"item\")],[#text(\"item 2\")])\n#enum(start: 3,[#text(\"third\")])\n#quote(block: true)[#text(\"quoted\")]",
+            "#set page(width: auto, margin: 6pt)\n$ frac(a,b) + sqrt(x) $",
+            "#raw(\"#panic(1)\\n---\\n[evil](forest:at/1)\", block: true, lang: \"rust\")",
+        ] {
+            let (pages, _) =
+                render(&fonts, &Settings::default(), source.into(), BTreeMap::new()).unwrap();
+            assert!(!pages.is_empty());
+            assert!(
+                pages
+                    .iter()
+                    .all(|p| p.bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+            );
+        }
+    }
+}

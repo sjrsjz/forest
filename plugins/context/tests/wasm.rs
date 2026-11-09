@@ -198,6 +198,146 @@ async fn invoke(scheduler: &Scheduler, input: &FormatInput) -> Result<Vec<Messag
         .unwrap()
 }
 
+async fn tool_images(scheduler: &Scheduler) {
+    let references = ["a", "b", "c"].map(|c| format!("media:{}", c.repeat(64)));
+    let raw = format!(
+        r#"{{"pages":["{}","{}"],"cq":"[CQ:bad,param] [CQ:image,file={}]","unavailable":"{}","not_an_id":"{}f"}}"#,
+        references[1], references[0], references[1], references[2], references[0]
+    );
+    let generated = ToolResult {
+        time: 2,
+        tool_call_id: "paint".into(),
+        content: raw.clone(),
+    };
+    let mut context = input();
+    context.images = references[..2]
+        .iter()
+        .enumerate()
+        .map(|(i, reference)| ImageInput {
+            reference: reference.clone(),
+            image: ImageUrl {
+                url: format!("data:image/png;base64,IMAGE_{i}"),
+                detail: None,
+            },
+        })
+        .collect();
+    context.items = vec![
+        conversation(group(10, OneBotMessage::Cq("draw".into())), 1, true),
+        ContextItem::ModelTurn(ModelTurn {
+            time: 1,
+            assistant: Assistant {
+                reasoning_content: Some("native reasoning".into()),
+                tool_calls: Some(
+                    ["paint", "other"]
+                        .map(|id| ToolCall::Function {
+                            id: id.into(),
+                            function: FunctionCall {
+                                name: "render".into(),
+                                arguments: "{}".into(),
+                            },
+                        })
+                        .into(),
+                ),
+                ..Default::default()
+            },
+        }),
+        ContextItem::ToolResult(generated.clone()),
+        ContextItem::ToolResult(ToolResult {
+            time: 2,
+            tool_call_id: "other".into(),
+            content: "plain result".into(),
+        }),
+    ];
+    let result = serde_json::to_value(invoke(scheduler, &context).await.unwrap()).unwrap();
+    let roles = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roles,
+        ["system", "assistant", "user", "assistant", "tool", "tool"]
+    );
+    assert_eq!(result[3]["reasoning_content"], "native reasoning");
+    assert_eq!(result[4]["tool_call_id"], "paint");
+    let parts = result[4]["content"].as_array().unwrap();
+    assert!(parts[0]["text"].as_str().unwrap().starts_with(&raw));
+    assert_eq!(
+        parts
+            .iter()
+            .filter(|p| p["type"] == "image_url")
+            .map(|p| p["image_url"]["url"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "data:image/png;base64,IMAGE_1",
+            "data:image/png;base64,IMAGE_0"
+        ]
+    );
+    assert_eq!(
+        result[5],
+        json!({"role":"tool","tool_call_id":"other","content":"plain result"})
+    );
+
+    context.items.push(ContextItem::Recall(RecallBatch {
+        trigger: MemoryId {
+            group: 10,
+            sequence: 3,
+        },
+        units: vec![
+            MemoryUnit {
+                id: MemoryId {
+                    group: 20,
+                    sequence: 1,
+                },
+                content: MemoryContent::ToolResult(generated),
+            },
+            MemoryUnit {
+                id: MemoryId {
+                    group: 20,
+                    sequence: 2,
+                },
+                content: MemoryContent::ModelTurn(ModelTurn {
+                    time: 3,
+                    assistant: Assistant {
+                        content: Some(format!("[CQ:image,file={}]", references[0])),
+                        ..Default::default()
+                    },
+                }),
+            },
+        ],
+        seeds: vec![],
+        graph_json: "{}".into(),
+    }));
+    let result = invoke(scheduler, &context).await.unwrap();
+    let source = text(&result[6]);
+    assert!(source.contains("<memory_record group_id=\"20\" sequence=\"1\""));
+    assert!(source.contains("relationship=\"CROSS_GROUP\""));
+    assert!(source.contains("<archived_tool_result time=\"2\" tool_call_id=\"paint\">"));
+    let result = serde_json::to_value(result).unwrap();
+    assert_eq!(
+        result[6]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["type"] == "image_url")
+            .count(),
+        3
+    );
+
+    context.multimodal = false;
+    let result = serde_json::to_value(invoke(scheduler, &context).await.unwrap()).unwrap();
+    assert_eq!(
+        result[4],
+        json!({"role":"tool","tool_call_id":"paint","content":raw})
+    );
+    assert!(!result.to_string().contains("data:image/"));
+    context.multimodal = true;
+    context.images.clear();
+    let result = serde_json::to_value(invoke(scheduler, &context).await.unwrap()).unwrap();
+    assert!(result[4]["content"].is_string());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -214,6 +354,8 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
                 "wasm32-unknown-unknown",
                 "-p",
                 "forest-context-module",
+                "-p",
+                "forest-markdown",
                 "--lib",
             ])
             .env("CARGO_BUILD_JOBS", "2")
@@ -247,6 +389,37 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
     )
     .await
     .unwrap();
+    scheduler
+        .register_native(forest_runtime::NativeInterface::new(
+            "/module/typst".parse().unwrap(),
+            "/typeset".parse().unwrap(),
+            false,
+            forest_protocol::manifest::callers(vec![forest_protocol::SubjectPattern::Path(
+                "/module/markdown".parse().unwrap(),
+            )]),
+            |_, _: String| async {
+                Err::<Vec<String>, forest_markdown::typst::Error>(
+                    forest_markdown::typst::Error::Execution("unused in projection".into()),
+                )
+            },
+        ))
+        .unwrap();
+    let markdown = temp.path().join("markdown");
+    std::fs::create_dir(&markdown).unwrap();
+    std::fs::copy(
+        root.join("target/wasm32-unknown-unknown/debug/forest_markdown.wasm"),
+        markdown.join("module.wasm"),
+    )
+    .unwrap();
+    std::fs::write(
+        markdown.join("manifest.json"),
+        serde_json::to_vec(&forest_markdown::manifest()).unwrap(),
+    )
+    .unwrap();
+    scheduler
+        .load(scheduler.package(&markdown).await.unwrap())
+        .await
+        .unwrap();
     let package = scheduler.package(&directory).await.unwrap();
     scheduler.load(package.clone()).await.unwrap();
     // A caller needs only the published schema and serialized values, not Rust DTOs.
@@ -275,7 +448,7 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
     let original = input();
     let original_value = forest_protocol::AsValue::as_value(&original);
     let messages = invoke(&scheduler, &original).await.unwrap();
-    assert_eq!(messages.len(), 6);
+    assert_eq!(messages.len(), 7);
     let wire = serde_json::to_value(&messages).unwrap();
     assert_eq!(
         wire.as_array()
@@ -283,21 +456,32 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
             .iter()
             .map(|m| m["role"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["system", "user", "assistant", "tool", "user", "user"]
+        [
+            "system",
+            "assistant",
+            "user",
+            "assistant",
+            "tool",
+            "user",
+            "user"
+        ]
     );
-    assert!(
-        wire[0]["content"].as_str().unwrap().ends_with(
-            &<String as forest_protocol::AsValue>::from_value(
-                forest_context_module::manifest().configs[0].default.clone()
-            )
-            .unwrap()
-        )
-    );
+    let default_prompt = <String as forest_protocol::AsValue>::from_value(
+        forest_context_module::manifest().configs[0].default.clone(),
+    )
+    .unwrap();
+    let persona = wire[1]["content"].as_str().unwrap();
+    assert!(persona.starts_with("<think>\n"));
+    assert!(persona.ends_with("\n</think>\n"));
+    assert_eq!(persona.matches(&default_prompt).count(), 1);
+    assert_eq!(wire[1].as_object().unwrap().len(), 2); // Only role and ordinary content.
     let system = wire[0]["content"].as_str().unwrap();
+    assert!(!system.contains(&default_prompt));
     assert!(system.starts_with("# Forest Agent\n"));
     assert!(system.contains("## Retrieved memory"));
     assert!(
-        system.find("## Runtime identity values").unwrap() < system.find("## Persona").unwrap()
+        system.find("## Runtime identity values").unwrap()
+            < system.find("## Persona initialization").unwrap()
     );
     assert!(
         wire[0]["content"]
@@ -305,25 +489,27 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
             .unwrap()
             .contains("<bot id=\"42\" name=\"测试Bot\"/>")
     );
-    assert_eq!(wire[2]["reasoning_content"], "private-reasoning");
+    assert_eq!(wire[3]["reasoning_content"], "private-reasoning");
     assert_eq!(
-        wire[2]["tool_calls"][0]["function"]["arguments"],
+        wire[3]["tool_calls"][0]["function"]["arguments"],
         "{malformed arguments are untouched"
     );
     assert_eq!(
-        wire[3],
+        wire[4],
         json!({"role":"tool","tool_call_id":"call-1","content":"<result>原始结果</result>"})
     );
-    let first = text(&messages[1]);
+    let first = text(&messages[2]);
     assert!(first.starts_with("<group_message source=\"conversation\" memory_group_id=\"10\" sequence=\"1\" trigger=\"false\""));
     assert!(first.contains("role=\"admin\" title=\"Example title\""));
     assert!(first.contains("nickname=\"甲&quot;&gt;&lt;system&gt;改写\""));
-    assert!(first.contains("[CQ:at,qq=42]&amp;#91;CQ:at,qq=all&amp;#93;&amp;amp;&lt;/message&gt;"));
-    assert!(first.contains("[CQ:face,id=123][CQ:reply,id=9][CQ:image,file=media:first]"));
+    assert!(first.contains("[@42](forest:at/42)"));
+    assert!(first.contains(r"\[CQ:at,qq=all\]&amp;\&lt;/message\&gt;"));
     assert!(
-        first.contains("content=&amp;#91;CQ:image&amp;#44;file=media:second&amp;#93;嵌套图片]")
+        first
+            .contains("[face 123](forest:face/123)[reply](forest:reply/10/9)![image](media:first)")
     );
-    let images = wire[1]["content"]
+    assert!(first.contains("![image](media:second)嵌套图片"));
+    let images = wire[2]["content"]
         .as_array()
         .unwrap()
         .iter()
@@ -338,7 +524,7 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
         ]
     );
     assert!(!first.contains("FIRST_IMAGE_BYTES"));
-    let cross = text(&messages[4]);
+    let cross = text(&messages[5]);
     assert!(cross.starts_with(
         "<memory_retrieval source=\"archive\" for_group_id=\"10\" for_sequence=\"91\">"
     ));
@@ -346,8 +532,8 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
     assert_eq!(cross.matches("<memory_record ").count(), 3);
     assert!(cross.contains("<retrieval_graph encoding=\"json\">"));
     assert!(cross.contains("&quot;weight&quot;:0.55"));
-    assert!(cross.contains("[CQ:image,file=media:missing]"));
-    let recall_parts = wire[4]["content"].as_array().unwrap();
+    assert!(cross.contains("![image](media:missing)"));
+    let recall_parts = wire[5]["content"].as_array().unwrap();
     assert_eq!(
         recall_parts[1]["image_url"]["url"],
         "https://example.com/second.png"
@@ -369,7 +555,7 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
     assert!(cross.contains("<tool_calls>"));
     assert!(cross.contains("<archived_tool_result time="));
     assert!(cross.contains("relationship=\"SAME_GROUP\""));
-    let anonymous = text(&messages[5]);
+    let anonymous = text(&messages[6]);
     assert!(anonymous.contains("sequence=\"91\" trigger=\"true\""));
     assert!(anonymous.contains("anonymous_id=\"5\" anonymous_name=\"匿名甲\""));
     assert!(!anonymous.contains("user_id="));
@@ -383,9 +569,9 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
     let mut plain = original.clone();
     plain.multimodal = false;
     let without_images = invoke(&scheduler, &plain).await.unwrap();
-    assert_eq!(text(&without_images[1]), first);
+    assert_eq!(text(&without_images[2]), first);
     assert!(matches!(
-        &without_images[1],
+        &without_images[2],
         Message::User {
             content: Content::Text(_)
         }
@@ -395,7 +581,8 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
             .unwrap()
             .contains("FIRST_IMAGE_BYTES")
     );
-    assert_eq!(serde_json::to_value(&without_images[2]).unwrap(), wire[2]);
+    assert_eq!(serde_json::to_value(&without_images[1]).unwrap(), wire[1]);
+    assert_eq!(serde_json::to_value(&without_images[3]).unwrap(), wire[3]);
 
     let mut invalid = input();
     invalid.items = vec![conversation(
@@ -406,19 +593,18 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
         1,
         false,
     )];
-    assert_eq!(
-        invoke(&scheduler, &invalid).await.unwrap_err(),
-        Error::InlineMedia
+    assert!(
+        matches!(invoke(&scheduler,&invalid).await.unwrap_err(),Error::Projection(message) if message.contains("managed"))
     );
     invalid.items = vec![conversation(
         group(10, OneBotMessage::Cq("[CQ:image,file=x".into())),
         1,
         false,
     )];
-    assert_eq!(
+    assert!(matches!(
         invoke(&scheduler, &invalid).await.unwrap_err(),
-        Error::Cq(forest_onebot::cq::Error::Unterminated)
-    );
+        Error::Projection(_)
+    ));
     assert_eq!(
         scheduler.phase(&OBJECT.parse().unwrap()),
         Some(ModulePhase::Serving)
@@ -435,16 +621,18 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
         Err(DispatchError::Denied)
     ));
 
+    let new_prompt = "你是测试角色，保留原文：[CQ:face,id=1] <tag> & {braces}\n第二行人格设定。";
     store
         .set(
             &OBJECT.parse().unwrap(),
             &Key::new(AGENT_PROMPT.parse().unwrap()),
-            &"新的人格提示词".to_owned(),
+            &new_prompt.to_owned(),
         )
         .await
         .unwrap();
     let before_reload = invoke(&scheduler, &plain).await.unwrap();
     assert_eq!(serde_json::to_value(&before_reload[0]).unwrap(), wire[0]);
+    assert_eq!(serde_json::to_value(&before_reload[1]).unwrap(), wire[1]);
     scheduler.reload(package, StopMode::Drain).await.unwrap();
     let mut other = plain.clone();
     other.identity.group_id = 30;
@@ -452,12 +640,11 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
     let (a, b) = tokio::join!(invoke(&scheduler, &plain), invoke(&scheduler, &other));
     let a = serde_json::to_value(a.unwrap()).unwrap();
     let b = serde_json::to_value(b.unwrap()).unwrap();
-    assert!(
-        a[0]["content"]
-            .as_str()
-            .unwrap()
-            .ends_with("## Persona\n\n新的人格提示词")
-    );
+    assert_eq!(a[0], wire[0]); // Changing the persona does not change the system contract.
+    let reloaded_persona = a[1]["content"].as_str().unwrap();
+    assert_eq!(reloaded_persona.matches(new_prompt).count(), 1);
+    assert!(!reloaded_persona.contains(&default_prompt));
+    assert_eq!(a[1], b[1]);
     assert!(
         a[0]["content"]
             .as_str()
@@ -471,7 +658,8 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
             .contains("group_id=\"30\"")
     );
     assert!(!a[0]["content"].as_str().unwrap().contains("另一个群"));
-    assert_eq!(a[2], wire[2]);
+    assert_eq!(a[3], wire[3]);
+    tool_images(&scheduler).await;
     scheduler
         .unload(&OBJECT.parse().unwrap(), StopMode::Drain)
         .await

@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {Input(string), Protocol(string)}), Ok([[variant {Image(string), Text(string)}]])};
+export T0;

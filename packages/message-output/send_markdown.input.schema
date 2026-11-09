@@ -1,0 +1,2 @@
+schema T0 = {bot_id: i64, bot_name: optional string, group_id: i64, source: string};
+export T0;

@@ -242,6 +242,10 @@ pub fn manifest() -> Manifest {
                 output::OBJECT,
                 output::SEND,
             ),
+            dependency::<output::MarkdownOutput, Result<output::DeliveryReport, output::Error>>(
+                output::OBJECT,
+                output::SEND_MARKDOWN,
+            ),
         ],
         subscriptions: vec![EventSubscription {
             source: onebot::OBJECT.parse().unwrap(),

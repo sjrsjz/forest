@@ -318,20 +318,10 @@ impl Agent {
             tools,
             tool_choice: None,
         };
-        let mut formatted = 0;
         let mut turn = 0;
         loop {
-            let (blocks, end) = {
-                let s = session.borrow();
-                (s.data.window[formatted..].to_vec(), s.data.window.len())
-            };
-            let messages = self.format(session, &blocks, multimodal).await?;
-            request.messages.extend(
-                messages
-                    .into_iter()
-                    .skip(usize::from(!request.messages.is_empty())),
-            );
-            formatted = end;
+            let blocks = session.borrow().data.window.clone();
+            request.messages = self.format(session, &blocks, multimodal).await?;
             turn += 1;
             let result: Result<Result<provider::Completion, provider::Error>, _> = host::call(
                 provider::OBJECT.parse().unwrap(),

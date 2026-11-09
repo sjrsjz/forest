@@ -15,7 +15,7 @@ pub fn routes() -> Vec<Route> {
         },
         "additionalProperties":false
     });
-    let message = json!({"type":"string","minLength":1,"description":"Message text with optional CQ at/reply/face/image codes. Images must use media:<sha256> references returned by tools; never supply base64, URLs or filesystem paths. Literal CQ brackets must be escaped as &#91; and &#93;."});
+    let message = json!({"type":"string","minLength":1,"description":"Markdown message with optional [name](forest:at/ACCOUNT), [reply](forest:reply/GROUP/MESSAGE), [face](forest:face/ID), and ![image](media:HASH). Images must use media:<sha256> references returned by tools; never supply base64, URLs or filesystem paths. A thematic break splits messages. Group replies must target the destination group; private messages cannot mention groups or reply to group messages."});
     vec![
         route(
             "onebot_get_login_info",
@@ -74,14 +74,14 @@ pub fn routes() -> Vec<Route> {
         ),
         route(
             "onebot_send_group_message",
-            "Immediately send a separate QQ group message and return its actual message_id. Defaults to the current group; an explicit group_id can target another joined group. Supports text and CQ at/reply/face/managed-image codes. Successful calls have already sent the message: do not repeat that content in your assistant reply. Ordinary replies to the current conversation are sent automatically and do not require this tool.",
+            "Immediately send a separate QQ group message and return its actual message_ids and any terminal error. Defaults to the current group; an explicit group_id can target another joined group. Supports Forest Markdown links for mentions, replies, faces and managed images. Successful calls have already sent the message: do not repeat that content in your assistant reply. Ordinary replies to the current conversation are sent automatically and do not require this tool.",
             json!({"type":"object","properties":{"group_id":group_id,"message":message},"required":["message"],"additionalProperties":false}),
             OBJECT,
             "/send_group_message",
         ),
         route(
             "onebot_send_private_message",
-            "Immediately send a separate private QQ message and return its actual message_id. The gateway determines whether the recipient can be reached; do not claim delivery if it fails. Supports text and CQ face/managed-image codes. A successful call has already sent the message; do not repeat it as an assistant reply.",
+            "Immediately send a separate private QQ message and return its actual message_ids and any terminal error. The gateway determines whether the recipient can be reached; do not claim delivery if it fails. Supports Forest Markdown face links and managed images. A successful call has already sent the message; do not repeat it as an assistant reply.",
             json!({"type":"object","properties":{"user_id":user_id,"message":message},"required":["user_id","message"],"additionalProperties":false}),
             OBJECT,
             "/send_private_message",

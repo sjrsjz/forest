@@ -83,6 +83,7 @@ impl OpenAi {
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case("x-request-id"))
                     .map(|(_, value)| value.clone()),
+                body: String::from_utf8_lossy(&response.body).into_owned(),
             });
         }
         provider::decode(&response.body)

@@ -108,6 +108,64 @@
             "Path": "/module/agent-tools"
           },
           {
+            "Path": "/module/typst-command"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/typeset",
+      "input": [
+        "String"
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Arguments": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Execution": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "UnknownTool": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Array": "String"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": false,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/markdown"
+          },
+          {
             "Path": "/user/admin"
           }
         ]

@@ -17,7 +17,7 @@ pub enum Message {
     Assistant(Assistant),
     Tool {
         tool_call_id: String,
-        content: String,
+        content: Content,
     },
 }
 

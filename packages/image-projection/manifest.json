@@ -1,0 +1,285 @@
+{
+  "package": {
+    "id": "/module/image-projection",
+    "version": "0.1.0",
+    "name": "Image projection",
+    "description": "Configurable model-input image dimensions; persistent derived images"
+  },
+  "module": "module.wasm",
+  "configs": [
+    {
+      "key": "/settings",
+      "schema": [
+        {
+          "Record": {
+            "decode_memory_mib": "I32",
+            "max_side": "I32"
+          }
+        }
+      ],
+      "default": {
+        "Record": {
+          "decode_memory_mib": {
+            "I32": 64
+          },
+          "max_side": {
+            "I32": 4096
+          }
+        }
+      },
+      "access": {
+        "readers": [
+          "SelfModule"
+        ],
+        "writers": [
+          {
+            "Path": "/user/admin"
+          }
+        ],
+        "callers": []
+      }
+    }
+  ],
+  "provides": [
+    {
+      "path": "/prepare",
+      "input": [
+        "String"
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Image": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Media": {
+                      "Unnamed": [
+                        {
+                          "Variant": {
+                            "Fetch": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "Host": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "InvalidInput": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "NotFound": {
+                              "Unnamed": []
+                            },
+                            "Storage": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "bytes": "ByteBuffer",
+                    "mime": "String"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": false,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/memory"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/thumbnail",
+      "input": [
+        {
+          "Record": {
+            "max_side": "I32",
+            "reference": "String"
+          }
+        }
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Image": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Media": {
+                      "Unnamed": [
+                        {
+                          "Variant": {
+                            "Fetch": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "Host": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "InvalidInput": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            },
+                            "NotFound": {
+                              "Unnamed": []
+                            },
+                            "Storage": {
+                              "Unnamed": [
+                                "String"
+                              ]
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "bytes": "ByteBuffer",
+                    "mime": "String"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "reentrant": false,
+      "access": {
+        "readers": [],
+        "writers": [],
+        "callers": [
+          {
+            "Path": "/module/memory"
+          },
+          {
+            "Path": "/user/admin"
+          }
+        ]
+      }
+    }
+  ],
+  "uses": [
+    {
+      "object": "/module/media",
+      "interface": "/get",
+      "input": [
+        "String"
+      ],
+      "output": [
+        {
+          "Variant": {
+            "Err": {
+              "Unnamed": [
+                {
+                  "Variant": {
+                    "Fetch": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "Host": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "InvalidInput": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    },
+                    "NotFound": {
+                      "Unnamed": []
+                    },
+                    "Storage": {
+                      "Unnamed": [
+                        "String"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "Ok": {
+              "Unnamed": [
+                {
+                  "Record": {
+                    "bytes": "ByteBuffer",
+                    "mime": "String"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "subscriptions": []
+}

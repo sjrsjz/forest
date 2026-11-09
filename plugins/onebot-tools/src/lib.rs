@@ -1,6 +1,7 @@
 //! OneBot tools are a guest package; credentials and transport stay with the host.
 pub mod contract;
 pub mod managed;
+pub mod markdown;
 mod message;
 pub mod output;
 
@@ -241,20 +242,20 @@ impl OneBotTools {
     ) -> Result<String, Error> {
         let args: GroupMessage = arguments(&input)?;
         let group_id = args.group_id.unwrap_or(input.group_id);
-        let sent: Result<SentMessage, output::Error> = host::call(
+        let report: Result<output::DeliveryReport, output::Error> = host::call(
             output::OBJECT.parse().unwrap(),
-            output::SEND.parse().unwrap(),
-            &output::GroupOutput {
+            output::SEND_MARKDOWN.parse().unwrap(),
+            &output::MarkdownOutput {
                 group_id,
                 bot_id: input.bot_id,
                 bot_name: None,
-                message: forest_onebot::message::Message::Cq(args.message.clone()),
+                source: args.message.clone(),
             },
         )
         .await
         .map_err(|e| Error::Execution(e.to_string()))?;
-        let sent = sent.map_err(|e| Error::Execution(format!("{e:?}")))?;
-        Ok(serde_json::json!({"group_id":group_id,"message_id":sent.message_id,"message":args.message}).to_string())
+        let report = report.map_err(|e| Error::Execution(format!("{e:?}")))?;
+        Ok(serde_json::json!({"group_id":group_id,"message_ids":report.sent.iter().map(|s|s.message_id).collect::<Vec<_>>(),"error":report.outcome.err().map(|e|format!("{e:?}")),"message":args.message}).to_string())
     }
     async fn send_private(
         self: Rc<Self>,
@@ -262,20 +263,31 @@ impl OneBotTools {
         input: Invocation,
     ) -> Result<String, Error> {
         let args: PrivateMessage = arguments(&input)?;
-        let message = message::resolve(&args.message).await?;
-        let sent: Result<SentMessage, OneBotError> = host::call(
-            onebot::OBJECT.parse().unwrap(),
-            onebot::SEND_PRIVATE_MESSAGE.parse().unwrap(),
-            &SendPrivateMessage {
-                user_id: args.user_id,
-                message,
-                auto_escape: Some(false),
-            },
-        )
-        .await
-        .map_err(|e| Error::Execution(e.to_string()))?;
-        let sent = sent.map_err(|e| Error::Execution(format!("{e:?}")))?;
-        Ok(serde_json::json!({"user_id":args.user_id,"message_id":sent.message_id,"message":args.message}).to_string())
+        let messages = message::resolve(&args.message).await?;
+        let mut sent_ids = Vec::new();
+        let mut error = None;
+        for message in messages {
+            let sent = host::call::<_, Result<SentMessage, OneBotError>>(
+                onebot::OBJECT.parse().unwrap(),
+                onebot::SEND_PRIVATE_MESSAGE.parse().unwrap(),
+                &SendPrivateMessage {
+                    user_id: args.user_id,
+                    message,
+                    auto_escape: Some(false),
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| format!("{e:?}")));
+            match sent {
+                Ok(sent) => sent_ids.push(sent.message_id),
+                Err(e) => {
+                    error = Some(e);
+                    break;
+                }
+            }
+        }
+        Ok(serde_json::json!({"user_id":args.user_id,"message_ids":sent_ids,"error":error,"message":args.message}).to_string())
     }
 }
 
@@ -296,22 +308,28 @@ pub fn manifest() -> Manifest {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),
             name: Some("OneBot tools".into()),
-            description: Some("Account, group and member queries and explicit CQ messaging".into()),
+            description: Some(
+                "Account, group and member queries and explicit Markdown messaging".into(),
+            ),
         },
         module: "module.wasm".into(),
         configs: vec![],
         provides: OneBotTools::handlers().declarations(),
         uses: vec![
             dependency::<Query, Result<String, OneBotError>>(onebot::OBJECT, onebot::QUERY),
-            dependency::<output::GroupOutput, Result<SentMessage, output::Error>>(
+            dependency::<output::MarkdownOutput, Result<output::DeliveryReport, output::Error>>(
                 output::OBJECT,
-                output::SEND,
+                output::SEND_MARKDOWN,
             ),
             dependency::<SendPrivateMessage, Result<SentMessage, OneBotError>>(
                 onebot::OBJECT,
                 onebot::SEND_PRIVATE_MESSAGE,
             ),
             dependency::<String, Result<managed::Blob, managed::Error>>(managed::OBJECT, "/get"),
+            dependency::<markdown::Format, Result<Vec<markdown::Part>, markdown::Error>>(
+                markdown::OBJECT,
+                "/format",
+            ),
         ],
         subscriptions: vec![],
     }

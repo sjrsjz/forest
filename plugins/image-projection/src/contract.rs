@@ -1,0 +1,20 @@
+use crate::media;
+use forest_serde::{DeriveSchema, DeriveValue};
+
+pub const OBJECT: &str = "/module/image-projection";
+pub const PREPARE: &str = "/prepare";
+pub const THUMBNAIL: &str = "/thumbnail";
+
+#[derive(Clone, Debug, DeriveSchema, DeriveValue)]
+pub struct Thumbnail {
+    pub reference: String,
+    pub max_side: i32,
+}
+
+#[derive(Clone, Debug, DeriveSchema, DeriveValue)]
+pub enum Error {
+    Media(media::Error),
+    Image(String),
+    Storage(String),
+    Host(String),
+}

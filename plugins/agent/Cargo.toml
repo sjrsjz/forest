@@ -16,14 +16,17 @@ forest-onebot = { path = "../../crates/forest-onebot", features = ["forest"] }
 serde.workspace = true
 serde_json.workspace = true
 [dev-dependencies]
+forest-markdown = { path = "../markdown" }
 base64 = "0.22.1"
 forest-message-output = { path = "../message-output" }
 forest-media = { path = "../media" }
+forest-image-projection = { path = "../image-projection" }
 forest-typst = { path = "../typst" }
 forest-memory-module = { path = "../memory" }
 forest-context-module = { path = "../context" }
 forest-openai-provider = { path = "../openai-provider" }
 forest-qwen-vl-embedding = { path = "../qwen-vl-embedding" }
+forest-qwen-vl-reranker = { path = "../qwen-vl-reranker" }
 forest-agent-tools = { path = "../agent-tools" }
 forest-deepseek-web = { path = "../deepseek-web" }
 forest-wolfram-alpha = { path = "../wolfram-alpha" }

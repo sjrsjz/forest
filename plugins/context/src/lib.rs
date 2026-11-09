@@ -1,5 +1,6 @@
 //! Hot-reloadable context formatter; the only instance state is its prompt.
 mod format;
+pub mod markdown;
 pub mod memory;
 pub mod openai;
 pub mod types;
@@ -46,7 +47,41 @@ impl Context {
         _: CallContext,
         input: FormatInput,
     ) -> Result<Vec<Message>, Error> {
-        format::format(&self.prompt, input)
+        let mut messages = std::collections::BTreeMap::new();
+        for item in &input.items {
+            match item {
+                types::ContextItem::GroupMessage { id, message, .. } => {
+                    messages.insert((id.group, id.sequence), message.message.clone());
+                }
+                types::ContextItem::Recall(batch) => {
+                    for unit in &batch.units {
+                        if let memory::MemoryContent::GroupMessage(message) = &unit.content {
+                            messages
+                                .insert((unit.id.group, unit.id.sequence), message.message.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let keys = messages.keys().copied().collect::<Vec<_>>();
+        let inputs = messages
+            .into_iter()
+            .map(|((group_id, _), message)| markdown::Encode { group_id, message })
+            .collect::<Vec<_>>();
+        let encoded: Result<Vec<Vec<markdown::Fragment>>, markdown::Error> = host::call(
+            markdown::OBJECT.parse().unwrap(),
+            "/encode".parse().unwrap(),
+            &inputs,
+        )
+        .await
+        .map_err(|e| Error::Projection(e.to_string()))?;
+        let encoded = encoded.map_err(|e| Error::Projection(format!("{e:?}")))?;
+        Ok(format::format(
+            &self.prompt,
+            input,
+            keys.into_iter().zip(encoded).collect(),
+        ))
     }
 }
 
@@ -74,7 +109,12 @@ pub fn manifest() -> Manifest {
             },
         }],
         provides: Context::handlers().declarations(),
-        uses: vec![],
+        uses: vec![InterfaceUse {
+            object: markdown::OBJECT.parse().unwrap(),
+            interface: "/encode".parse().unwrap(),
+            input: Vec::<markdown::Encode>::as_schema(),
+            output: Result::<Vec<Vec<markdown::Fragment>>, markdown::Error>::as_schema(),
+        }],
         subscriptions: vec![],
     }
 }

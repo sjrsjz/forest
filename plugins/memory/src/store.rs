@@ -120,17 +120,39 @@ pub async fn accept(input: Incoming) -> Result<Accepted, Error> {
     })
 }
 pub async fn archive(ids: &[MemoryId], space: &str) -> Result<(), Error> {
+    let rows = execute(ids.iter().map(|id|stmt(
+        "SELECT group_id,sequence,content,archived FROM units WHERE group_id=? AND sequence=?",
+        vec![int(id.group),int(id.sequence)],
+    )).collect()).await?;
+    if rows.iter().any(|r| r.rows.is_empty()) {
+        return Err(Error::NotFound);
+    }
+    let mut units = Vec::new();
+    for result in rows {
+        let row = &result.rows[0];
+        if number(&row[3])? == 0 {
+            units.push(unit(row)?);
+        }
+    }
+    // Archival is idempotent even when the projection code has changed. Only
+    // explicit reindexing may create new representations for archived records.
+    index_units(units, space).await
+}
+pub async fn reindex(ids: &[MemoryId], space: &str) -> Result<(), Error> {
     let units = read(ids, false).await?;
     if units.len() != ids.len() {
         return Err(Error::NotFound);
     }
+    index_units(units, space).await
+}
+async fn index_units(units: Vec<MemoryUnit>, space: &str) -> Result<(), Error> {
     let mut statements = Vec::new();
     for unit in units {
         statements.push(stmt(
             "UPDATE units SET archived=1 WHERE group_id=? AND sequence=?",
             vec![int(unit.id.group), int(unit.id.sequence)],
         ));
-        for representation in crate::projection::representations(&unit)? {
+        for representation in crate::projection::representations(&unit).await? {
             let encoded = json(&representation);
             let point = crate::projection::point_id(&format!(
                 "{}:{}:{encoded}",

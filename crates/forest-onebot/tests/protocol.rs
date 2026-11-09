@@ -8,6 +8,36 @@ use forest_onebot::{
 };
 use serde_json::json;
 
+#[test]
+fn napcat_markdown_is_typed_and_survives_json_and_cq_roundtrips() {
+    let content = "[@member](mqqapi://markdown/mention?at_type=1&at_tinyid=42)\n![image](https://example.com/a,b.png)";
+    let value = json!([
+        {"type":"markdown","data":{"content":content}},
+        {"type":"text","data":{"text":" tail [literal]"}}
+    ]);
+    let message: Message = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(
+        message,
+        Message::Segments(vec![
+            Segment::Markdown {
+                content: content.into()
+            },
+            Segment::text(" tail [literal]"),
+        ])
+    );
+    assert_eq!(serde_json::to_value(&message).unwrap(), value);
+    #[cfg(feature = "forest")]
+    {
+        use forest_serde::adt::AsValue;
+        assert_eq!(Message::from_value(message.as_value()).unwrap(), message);
+    }
+    let cq = forest_onebot::cq::encode(&message).unwrap();
+    assert_eq!(
+        Message::Segments(forest_onebot::cq::decode(&cq).unwrap()),
+        message
+    );
+}
+
 struct Fixture(&'static [u8]);
 
 impl Transport for Fixture {

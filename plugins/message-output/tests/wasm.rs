@@ -173,6 +173,20 @@ async fn actual_wasm_output_folds_by_group_preserves_cq_and_never_falls_back_to_
         },
     ))
     .unwrap();
+    s.register_native(NativeInterface::new(
+        "/module/markdown".parse().unwrap(),
+        "/format".parse().unwrap(),
+        true,
+        callers(vec![SubjectPattern::Path(
+            "/module/message-output".parse().unwrap(),
+        )]),
+        |_, _: forest_message_output::markdown::Format| async {
+            Err::<Vec<forest_message_output::markdown::Part>, _>(
+                forest_message_output::markdown::Error::Input("not used by native send".into()),
+            )
+        },
+    ))
+    .unwrap();
     let package = s.package(&dir).await.unwrap();
     s.load(package.clone()).await.unwrap();
 

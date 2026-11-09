@@ -1,5 +1,7 @@
 //! Typst rendering in an independent Wasm module.
 pub mod contract;
+#[cfg(test)]
+mod markdown_tests;
 pub mod media;
 mod world;
 
@@ -46,7 +48,7 @@ struct Page {
     reference: String,
     width: u32,
     height: u32,
-    cq: String,
+    markdown: String,
 }
 #[derive(Serialize)]
 struct Answer {
@@ -78,21 +80,48 @@ impl Module for Renderer {
         })
     }
     fn handlers() -> Handlers<Self> {
-        Handlers::new().with(
-            "/render".parse().unwrap(),
-            false,
-            callers(vec![
-                SubjectPattern::Path("/module/agent-tools".parse().unwrap()),
-                SubjectPattern::Path("/user/admin".parse().unwrap()),
-            ]),
-            Self::render,
-        )
+        Handlers::new()
+            .with(
+                "/render".parse().unwrap(),
+                false,
+                callers(vec![
+                    SubjectPattern::Path("/module/agent-tools".parse().unwrap()),
+                    SubjectPattern::Path("/module/typst-command".parse().unwrap()),
+                    SubjectPattern::Path("/user/admin".parse().unwrap()),
+                ]),
+                Self::render,
+            )
+            .with(
+                "/typeset".parse().unwrap(),
+                false,
+                callers(vec![
+                    SubjectPattern::Path("/module/markdown".parse().unwrap()),
+                    SubjectPattern::Path("/user/admin".parse().unwrap()),
+                ]),
+                Self::typeset,
+            )
     }
 }
 impl Renderer {
     async fn render(self: Rc<Self>, _: CallContext, input: Invocation) -> Result<String, Error> {
         let request: Request = serde_json::from_str(&input.arguments_json)
             .map_err(|e| Error::Arguments(e.to_string()))?;
+        serde_json::to_string(&self.document(request).await?)
+            .map_err(|e| Error::Execution(e.to_string()))
+    }
+    async fn typeset(self: Rc<Self>, _: CallContext, source: String) -> Result<Vec<String>, Error> {
+        Ok(self
+            .document(Request {
+                source,
+                images: BTreeMap::new(),
+            })
+            .await?
+            .pages
+            .into_iter()
+            .map(|p| p.reference)
+            .collect())
+    }
+    async fn document(&self, request: Request) -> Result<Answer, Error> {
         if request.source.trim().is_empty() || request.source.len() > 100_000 {
             return Err(Error::Arguments(
                 "source must contain 1–100000 UTF-8 bytes".into(),
@@ -148,13 +177,13 @@ impl Renderer {
             let reference = result.map_err(|e| Error::Execution(format!("{e:?}")))?;
             answer.pages.push(Page {
                 page: index + 1,
-                cq: format!("[CQ:image,file={reference}]"),
+                markdown: format!("![page {}]({reference})", index + 1),
                 reference,
                 width: page.width,
                 height: page.height,
             });
         }
-        serde_json::to_string(&answer).map_err(|e| Error::Execution(e.to_string()))
+        Ok(answer)
     }
 }
 forest_sdk::export_module!(super::Renderer);

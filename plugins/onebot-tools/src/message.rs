@@ -1,43 +1,43 @@
-use crate::{contract::Error, managed};
+use crate::{contract::Error, managed, markdown};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use forest_onebot::{
-    cq,
-    message::{Message, Segment},
-};
+use forest_onebot::message::{Message, Segment};
 use forest_sdk::host;
 
-pub async fn resolve(body: &str) -> Result<Message, Error> {
-    if body.trim().is_empty() {
-        return Err(Error::Arguments("message must not be empty".into()));
+pub async fn resolve(body: &str) -> Result<Vec<Message>, Error> {
+    let parts: Result<Vec<markdown::Part>, markdown::Error> = host::call(
+        markdown::OBJECT.parse().unwrap(),
+        "/format".parse().unwrap(),
+        &markdown::Format {
+            group_id: None,
+            source: body.into(),
+        },
+    )
+    .await
+    .map_err(|e| Error::Execution(e.to_string()))?;
+    let parts = parts.map_err(|e| Error::Arguments(format!("{e:?}")))?;
+    if parts.is_empty() {
+        return Err(Error::Arguments(
+            "message must contain a nonempty part".into(),
+        ));
     }
-    let mut segments = cq::decode(body).map_err(|e| Error::Arguments(e.to_string()))?;
-    for segment in &segments {
-        if !matches!(
-            segment,
-            Segment::Text { .. }
-                | Segment::At { .. }
-                | Segment::Reply { .. }
-                | Segment::Face { .. }
-                | Segment::Image(_)
-        ) {
-            return Err(Error::Arguments(
-                "supported CQ segments: text, at, reply, face, image".into(),
-            ));
+    let mut messages = Vec::new();
+    for part in parts {
+        let mut segments = part.segments;
+        for segment in &mut segments {
+            if let Segment::Image(image) = segment {
+                let data: Result<managed::Blob, managed::Error> = host::call(
+                    managed::OBJECT.parse().unwrap(),
+                    "/get".parse().unwrap(),
+                    &image.file,
+                )
+                .await
+                .map_err(|e| Error::Execution(e.to_string()))?;
+                let data = data.map_err(|e| Error::Execution(format!("{e:?}")))?;
+                image.file = format!("base64://{}", STANDARD.encode(data.bytes));
+                image.options = Default::default();
+            }
         }
+        messages.push(Message::Segments(segments));
     }
-    for segment in &mut segments {
-        if let Segment::Image(image) = segment {
-            let data: Result<managed::Blob, managed::Error> = host::call(
-                managed::OBJECT.parse().unwrap(),
-                "/get".parse().unwrap(),
-                &image.file,
-            )
-            .await
-            .map_err(|e| Error::Execution(e.to_string()))?;
-            let data = data.map_err(|e| Error::Execution(format!("{e:?}")))?;
-            image.file = format!("base64://{}", STANDARD.encode(data.bytes));
-            image.options = Default::default();
-        }
-    }
-    Ok(Message::Segments(segments))
+    Ok(messages)
 }

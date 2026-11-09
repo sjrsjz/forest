@@ -20,6 +20,7 @@ base64 = "0.22.1"
 serde_json.workspace = true
 
 [dev-dependencies]
+forest-markdown = { path = "../markdown" }
 forest-runtime = { path = "../../crates/forest-runtime" }
 tokio.workspace = true
 tempfile = "3.23.0"

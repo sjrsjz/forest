@@ -67,7 +67,7 @@ impl Default for Settings {
         Self {
         endpoint: "http://127.0.0.1:6333".into(), api_key: String::new(),
         collection: "forest_qwen_vl_2048_cq".into(),
-        retrieval_json: r#"{"seed_threshold":0.55,"seed_limit":8,"sequence_weight":0.55,"association_weight":0.9,"activation_min":0.15,"association_limit":16,"node_limit":64,"edge_limit":256,"result_limit":24}"#.into(),
+        retrieval_json: r#"{"seed_threshold":0.35,"candidate_limit":64,"rerank_threshold":0.1,"rerank_batch_size":8,"rerank_image_max_side":1024,"seed_limit":8,"sequence_weight":0.55,"association_weight":0.9,"activation_min":0.15,"association_limit":16,"node_limit":64,"edge_limit":256,"result_limit":24}"#.into(),
     }
     }
 }

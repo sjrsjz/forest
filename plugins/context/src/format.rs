@@ -1,32 +1,43 @@
+use crate::markdown::Fragment;
 use crate::{
     memory::{MemoryContent, MemoryId, MemoryUnit},
-    openai::{Content, ContentPart, ImageUrl, Message},
-    types::{ContextItem, Error, FormatInput, ImageInput, PromptIdentity, RecallBatch},
+    openai::{Assistant, Content, ContentPart, ImageUrl, Message},
+    types::{ContextItem, FormatInput, ImageInput, PromptIdentity, RecallBatch},
 };
-use forest_onebot::{
-    cq,
-    forest::GroupMessage,
-    message::{self, MediaOptions, Node, Segment},
+use forest_onebot::forest::GroupMessage;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Display,
 };
-use std::fmt::Display;
 
 const PROTOCOL: &str = include_str!("system.md");
 
 /// Format every supplied item in order. Selection and persistence belong to callers.
-pub(super) fn format(prompt: &str, input: FormatInput) -> Result<Vec<Message>, Error> {
+pub(super) fn format(
+    prompt: &str,
+    input: FormatInput,
+    encoded: BTreeMap<(i64, i64), Vec<Fragment>>,
+) -> Vec<Message> {
     let projection = Projection {
         images: &input.images,
         multimodal: input.multimodal,
+        encoded,
     };
-    let mut result = vec![Message::System {
-        content: system(prompt, &input.identity),
-    }];
+    let mut result = vec![
+        Message::System {
+            content: system(&input.identity),
+        },
+        Message::Assistant(Assistant {
+            content: Some(format!(include_str!("persona.md"), persona = prompt)),
+            ..Assistant::default()
+        }),
+    ];
     for item in input.items {
         result.push(match item {
             ContextItem::ModelTurn(turn) => Message::Assistant(turn.assistant),
             ContextItem::ToolResult(tool) => Message::Tool {
                 tool_call_id: tool.tool_call_id,
-                content: tool.content,
+                content: projection.tool(&tool.content),
             },
             ContextItem::GroupMessage {
                 id,
@@ -34,17 +45,17 @@ pub(super) fn format(prompt: &str, input: FormatInput) -> Result<Vec<Message>, E
                 trigger,
             } => {
                 let mut body = Body::default();
-                projection.group(&message, &mut body, "conversation", &id, Some(trigger))?;
+                projection.group(&message, &mut body, "conversation", &id, Some(trigger));
                 Message::User {
                     content: body.finish(),
                 }
             }
             ContextItem::Recall(batch) => Message::User {
-                content: projection.recall(&batch, input.identity.group_id)?,
+                content: projection.recall(&batch, input.identity.group_id),
             },
         });
     }
-    Ok(result)
+    result
 }
 
 fn xml(text: &str) -> String {
@@ -59,7 +70,7 @@ fn attr(out: &mut String, name: &str, value: impl Display) {
     out.push_str(&format!(" {name}=\"{}\"", xml(&value.to_string())));
 }
 
-fn system(prompt: &str, identity: &PromptIdentity) -> String {
+fn system(identity: &PromptIdentity) -> String {
     let mut text =
         format!("{PROTOCOL}\n\n## Runtime identity values\n\n```xml\n<runtime_identity>\n<bot");
     attr(&mut text, "id", identity.bot_id);
@@ -71,8 +82,13 @@ fn system(prompt: &str, identity: &PromptIdentity) -> String {
     if let Some(name) = &identity.group_name {
         attr(&mut text, "name", name);
     }
-    text.push_str("/>\n</runtime_identity>\n```\n\n## Persona\n\n");
-    text.push_str(prompt);
+    text.push_str(concat!(
+        "/>\n</runtime_identity>\n```\n\n## Persona initialization\n\n",
+        "Establish your character through an opening assistant self-description before ",
+        "addressing the conversation. That completed self-description is already supplied ",
+        "as the first assistant message. Carry its identity and voice into the conversation ",
+        "that follows; continue directly without repeating the initialization."
+    ));
     text
 }
 
@@ -111,11 +127,50 @@ impl Body {
 }
 
 struct Projection<'a> {
+    encoded: BTreeMap<(i64, i64), Vec<Fragment>>,
     images: &'a [ImageInput],
     multimodal: bool,
 }
 
 impl Projection<'_> {
+    fn tool(&self, text: &str) -> Content {
+        let mut body = Body::default();
+        body.text(text);
+        self.text_images(text, &mut body);
+        body.finish()
+    }
+
+    fn text_images(&self, text: &str, body: &mut Body) {
+        if !self.multimodal {
+            return;
+        }
+        let mut seen = BTreeSet::new();
+        for (start, _) in text.match_indices("media:") {
+            let end = start + "media:".len() + 64;
+            let Some(hash) = text.get(start + "media:".len()..end) else {
+                continue;
+            };
+            if !hash.bytes().all(|b| b.is_ascii_hexdigit())
+                || text.as_bytes().get(end).is_some_and(u8::is_ascii_hexdigit)
+            {
+                continue;
+            }
+            let reference = &text[start..end];
+            if !seen.insert(reference) {
+                continue;
+            }
+            if let Some(image) = self
+                .images
+                .iter()
+                .find(|image| image.reference == reference)
+            {
+                body.text(&format!("\n<media_image reference=\"{reference}\">"));
+                body.image(image.image.clone());
+                body.text("</media_image>");
+            }
+        }
+    }
+
     fn group(
         &self,
         message: &GroupMessage,
@@ -123,7 +178,7 @@ impl Projection<'_> {
         source: &str,
         id: &MemoryId,
         trigger: Option<bool>,
-    ) -> Result<(), Error> {
+    ) {
         let mut header = String::from("<group_message");
         attr(&mut header, "source", source);
         attr(&mut header, "memory_group_id", id.group);
@@ -162,14 +217,33 @@ impl Projection<'_> {
                 attr(&mut header, "age", age);
             }
         }
-        header.push_str(">\n<body encoding=\"cq\">");
+        attr(
+            &mut header,
+            "reply_link",
+            format!(
+                "[reply](forest:reply/{}/{})",
+                message.group_id, message.message_id
+            ),
+        );
+        if message.anonymous.is_none() {
+            attr(
+                &mut header,
+                "author_mention",
+                format!("[@{}](forest:at/{})", message.user_id, message.user_id),
+            );
+        }
+        header.push_str(">\n<body encoding=\"forest-markdown\">");
         body.text(&header);
-        self.message(&message.message, body, 0)?;
+        for fragment in &self.encoded[&(id.group, id.sequence)] {
+            match fragment {
+                Fragment::Text(text) => body.text(&xml(text)),
+                Fragment::Image(reference) => self.image(reference, body),
+            }
+        }
         body.text("</body>\n</group_message>");
-        Ok(())
     }
 
-    fn recall(&self, batch: &RecallBatch, current_group: i64) -> Result<Content, Error> {
+    fn recall(&self, batch: &RecallBatch, current_group: i64) -> Content {
         let mut header = String::from("<memory_retrieval source=\"archive\"");
         attr(&mut header, "for_group_id", batch.trigger.group);
         attr(&mut header, "for_sequence", batch.trigger.sequence);
@@ -182,21 +256,15 @@ impl Projection<'_> {
                 current_group,
                 batch.seeds.contains(&unit.id),
                 &mut body,
-            )?;
+            );
         }
         body.text("</records>\n<retrieval_graph encoding=\"json\">");
         body.text(&xml(&batch.graph_json));
         body.text("</retrieval_graph>\n</memory_retrieval>");
-        Ok(body.finish())
+        body.finish()
     }
 
-    fn record(
-        &self,
-        unit: &MemoryUnit,
-        current_group: i64,
-        seed: bool,
-        body: &mut Body,
-    ) -> Result<(), Error> {
+    fn record(&self, unit: &MemoryUnit, current_group: i64, seed: bool, body: &mut Body) {
         let mut header = String::from("<memory_record");
         attr(&mut header, "group_id", unit.id.group);
         attr(&mut header, "sequence", unit.id.sequence);
@@ -223,7 +291,7 @@ impl Projection<'_> {
         body.text(&header);
         match &unit.content {
             MemoryContent::GroupMessage(message) => {
-                self.group(message, body, "archive", &unit.id, None)?
+                self.group(message, body, "archive", &unit.id, None)
             }
             MemoryContent::ModelTurn(turn) => {
                 let mut header = String::from("<archived_assistant");
@@ -234,6 +302,7 @@ impl Projection<'_> {
                     body.text("<content>");
                     body.text(&xml(content));
                     body.text("</content>");
+                    self.text_images(content, body);
                 }
                 if let Some(calls) = &turn.assistant.tool_calls {
                     body.text("<tool_calls>");
@@ -256,11 +325,11 @@ impl Projection<'_> {
                 header.push('>');
                 body.text(&header);
                 body.text(&xml(&tool.content));
+                self.text_images(&tool.content, body);
                 body.text("</archived_tool_result>");
             }
         }
         body.text("\n</memory_record>\n");
-        Ok(())
     }
 
     fn image(&self, reference: &str, body: &mut Body) {
@@ -273,109 +342,4 @@ impl Projection<'_> {
             body.image(input.image.clone());
         }
     }
-
-    fn message(
-        &self,
-        message: &message::Message,
-        body: &mut Body,
-        nesting: usize,
-    ) -> Result<(), Error> {
-        for part in cq::segments(message).map_err(Error::Cq)?.iter() {
-            match part {
-                Segment::Image(image) => {
-                    managed(&image.file)?;
-                    let projected = Segment::Image(message::Image {
-                        file: image.file.clone(),
-                        kind: image.kind.clone(),
-                        options: MediaOptions::default(),
-                    });
-                    cq_text(
-                        body,
-                        &cq::encode_segment(&projected).map_err(Error::Cq)?,
-                        nesting,
-                    );
-                    self.image(&image.file, body);
-                }
-                Segment::Record(record) => {
-                    managed(&record.file)?;
-                    let projected = Segment::Record(message::Record {
-                        file: record.file.clone(),
-                        magic: record.magic.clone(),
-                        options: MediaOptions::default(),
-                    });
-                    cq_text(
-                        body,
-                        &cq::encode_segment(&projected).map_err(Error::Cq)?,
-                        nesting,
-                    );
-                }
-                Segment::Video(video) => {
-                    managed(&video.file)?;
-                    let projected = Segment::Video(message::Media {
-                        file: video.file.clone(),
-                        options: MediaOptions::default(),
-                    });
-                    cq_text(
-                        body,
-                        &cq::encode_segment(&projected).map_err(Error::Cq)?,
-                        nesting,
-                    );
-                }
-                Segment::Node(Node::Custom {
-                    user_id,
-                    nickname,
-                    content,
-                }) => {
-                    cq_text(
-                        body,
-                        &format!(
-                            "[CQ:node,user_id={},nickname={},content=",
-                            cq::escape_parameter(user_id),
-                            cq::escape_parameter(nickname)
-                        ),
-                        nesting,
-                    );
-                    self.message(content, body, nesting + 1)?;
-                    cq_text(body, "]", nesting);
-                }
-                Segment::Share { image, .. } => {
-                    if let Some(reference) = image {
-                        managed(reference)?;
-                    }
-                    cq_text(body, &cq::encode_segment(part).map_err(Error::Cq)?, nesting);
-                    if let Some(reference) = image {
-                        self.image(reference, body);
-                    }
-                }
-                Segment::Music(message::Music::Custom { audio, image, .. }) => {
-                    managed(audio)?;
-                    if let Some(reference) = image {
-                        managed(reference)?;
-                    }
-                    cq_text(body, &cq::encode_segment(part).map_err(Error::Cq)?, nesting);
-                    if let Some(reference) = image {
-                        self.image(reference, body);
-                    }
-                }
-                _ => cq_text(body, &cq::encode_segment(part).map_err(Error::Cq)?, nesting),
-            }
-        }
-        Ok(())
-    }
-}
-
-fn managed(reference: &str) -> Result<(), Error> {
-    if reference.starts_with("base64://") || reference.starts_with("data:") {
-        Err(Error::InlineMedia)
-    } else {
-        Ok(())
-    }
-}
-
-fn cq_text(body: &mut Body, text: &str, nesting: usize) {
-    let mut text = text.to_owned();
-    for _ in 0..nesting {
-        text = cq::escape_parameter(&text);
-    }
-    body.text(&xml(&text));
 }

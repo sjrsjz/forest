@@ -49,6 +49,7 @@ async fn main() -> SetupResult<()> {
         "media",
         "typst",
         "qwen-vl-embedding",
+        "qwen-vl-reranker",
         "openai-provider",
         "context",
         "memory",
@@ -98,7 +99,25 @@ async fn main() -> SetupResult<()> {
         &EmbeddingConnection {
             endpoint: env::var("FOREST_EMBED_ENDPOINT")
                 .unwrap_or_else(|_| "https://api.siliconflow.cn/v1/embeddings".into()),
-            api_key: embedding_key,
+            api_key: embedding_key.clone(),
+        },
+    )
+    .await?;
+    #[derive(forest_serde::DeriveSchema, forest_serde::DeriveValue)]
+    struct RerankerConnection {
+        endpoint: String,
+        api_key: String,
+        batch_size: i64,
+    }
+    set(
+        &store,
+        "/module/qwen-vl-reranker",
+        "/connection",
+        &RerankerConnection {
+            endpoint: env::var("FOREST_RERANK_ENDPOINT")
+                .unwrap_or_else(|_| "https://api.siliconflow.cn/v1/rerank".into()),
+            api_key: env::var("FOREST_RERANK_KEY").unwrap_or(embedding_key),
+            batch_size: 64,
         },
     )
     .await?;

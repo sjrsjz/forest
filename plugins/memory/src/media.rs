@@ -1,4 +1,4 @@
-use crate::{Memory, managed, openai::ImageUrl, store::*, types::*};
+use crate::{Memory, image_projection, managed, openai::ImageUrl, store::*, types::*};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use forest_protocol::service::LogLevel;
 use forest_sdk::host;
@@ -16,6 +16,17 @@ pub async fn register(source: crate::projection::Source) -> Result<(), Error> {
     .await?;
     result.map_err(|e| Error::Media(format!("{e:?}")))
 }
+
+async fn prepared_image(reference: &str) -> Result<managed::Blob, Error> {
+    let projected: Result<managed::Blob, image_projection::Error> = host::call(
+        image_projection::OBJECT.parse().unwrap(),
+        image_projection::PREPARE.parse().unwrap(),
+        &reference.to_owned(),
+    )
+    .await?;
+    projected.map_err(|e| Error::Media(format!("{e:?}")))
+}
+
 impl Memory {
     pub async fn image(&self, reference: &str) -> Result<String, Error> {
         // Raw message associations remain Memory's authority; bytes belong to Media.
@@ -74,10 +85,17 @@ impl Memory {
                 refs.extend(crate::projection::image_references(unit)?);
             }
             for reference in refs {
-                match self.image(&reference).await {
-                    Ok(url) => images.push(ImageInput {
+                match prepared_image(&reference).await {
+                    Ok(blob) => images.push(ImageInput {
                         reference,
-                        image: ImageUrl { url, detail: None },
+                        image: ImageUrl {
+                            url: format!(
+                                "data:{};base64,{}",
+                                blob.mime,
+                                STANDARD.encode(blob.bytes)
+                            ),
+                            detail: None,
+                        },
                     }),
                     Err(error) => {
                         let _ = host::log(

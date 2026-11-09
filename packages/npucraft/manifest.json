@@ -180,6 +180,11 @@
                               }
                             }
                           },
+                          "Markdown": {
+                            "Named": {
+                              "content": "String"
+                            }
+                          },
                           "Music": {
                             "Unnamed": [
                               {
@@ -434,6 +439,11 @@
                             "title": {
                               "Option": "String"
                             }
+                          }
+                        },
+                        "Markdown": {
+                          "Named": {
+                            "content": "String"
                           }
                         },
                         "Music": {
@@ -742,6 +752,11 @@
                           }
                         }
                       },
+                      "Markdown": {
+                        "Named": {
+                          "content": "String"
+                        }
+                      },
                       "Music": {
                         "Unnamed": [
                           {
@@ -996,6 +1011,11 @@
                         "title": {
                           "Option": "String"
                         }
+                      }
+                    },
+                    "Markdown": {
+                      "Named": {
+                        "content": "String"
                       }
                     },
                     "Music": {
@@ -1305,6 +1325,11 @@
                               }
                             }
                           },
+                          "Markdown": {
+                            "Named": {
+                              "content": "String"
+                            }
+                          },
                           "Music": {
                             "Unnamed": [
                               {
@@ -1559,6 +1584,11 @@
                             "title": {
                               "Option": "String"
                             }
+                          }
+                        },
+                        "Markdown": {
+                          "Named": {
+                            "content": "String"
                           }
                         },
                         "Music": {
@@ -1828,6 +1858,11 @@
                           }
                         }
                       },
+                      "Markdown": {
+                        "Named": {
+                          "content": "String"
+                        }
+                      },
                       "Music": {
                         "Unnamed": [
                           {
@@ -2082,6 +2117,11 @@
                         "title": {
                           "Option": "String"
                         }
+                      }
+                    },
+                    "Markdown": {
+                      "Named": {
+                        "content": "String"
                       }
                     },
                     "Music": {

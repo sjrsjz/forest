@@ -29,7 +29,7 @@ pub enum Message {
     Assistant(Assistant),
     Tool {
         tool_call_id: String,
-        content: String,
+        content: Content,
     },
 }
 
@@ -196,6 +196,7 @@ pub enum Error {
     Http {
         status: i32,
         request_id: Option<String>,
+        body: String,
     },
     ToolSchema {
         name: String,

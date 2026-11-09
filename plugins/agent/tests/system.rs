@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use support::*;
 use tokio::sync::oneshot;
 
+const TEST_IMAGE: &str = "base64://iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_wasm_agent_memory_context_provider_and_tools() {
     let mut h = Harness::new().await;
@@ -56,7 +58,7 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
     let (started, waiting) = oneshot::channel();
     let (release, blocked) = oneshot::channel();
     h.remote.lock().unwrap().slow = Some((started, blocked));
-    let mut first = Reply::text("我查一下[CQ:face,id=1]");
+    let mut first = Reply::text("我查一下[face](forest:face/1)");
     first.body["choices"][0]["finish_reason"] = json!("tool_calls");
     first.body["choices"][0]["message"]["tool_calls"] = json!([{"id":"fetch-1","type":"function","function":{"name":"http_request","arguments":json!({"url":format!("{}/slow",h.endpoint)}).to_string()}}]);
     h.reply(10, first);
@@ -128,6 +130,14 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
         assert_eq!(requests.len(), 2);
         let before = requests[0]["messages"].as_array().unwrap();
         let after = requests[1]["messages"].as_array().unwrap();
+        assert_eq!(before[1]["role"], "assistant");
+        assert!(
+            before[1]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("<think>\n")
+        );
+        assert!(before[1].get("reasoning_content").is_none());
         assert_eq!(&after[..before.len()], before.as_slice());
         assert_eq!(after[before.len()]["role"], "assistant");
         assert_eq!(after[before.len()]["reasoning_content"], "PRIVATE_THOUGHT");
@@ -330,7 +340,51 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
     memory_index_and_media(&mut h).await;
     bounded_graph(&h).await;
     typst_render_and_delivery(&mut h).await;
+    markdown_rich_delivery(&mut h).await;
+    reranked_memory(&h).await;
     h.finish().await;
+}
+
+async fn markdown_rich_delivery(h: &mut Harness) {
+    let source = "[reply](forest:reply/10/-33)[name](forest:at/7)\n\n$$\\frac{a}{b}+\\sqrt{x}$$\n\n|column|value|\n|:-|--:|\n|**row**|$x^2$|\n\n```rust\nlet message = \"#panic(1)\";\n```\n\n---\n\n$$\\definitelyNotACommand{x}$$";
+    let delivered: Result<
+        forest_message_output::contract::DeliveryReport,
+        forest_message_output::contract::Error,
+    > = h
+        .call(
+            "/module/message-output",
+            "/send_markdown",
+            &forest_message_output::contract::MarkdownOutput {
+                group_id: 10,
+                bot_id: 42,
+                bot_name: None,
+                source: source.into(),
+            },
+        )
+        .await;
+    let report = delivered.unwrap();
+    assert_eq!(report.sent.len(), 2);
+    report.outcome.unwrap();
+    let first = bounded(h.sent.recv()).await.unwrap();
+    let parts = cq::segments(&first.message).unwrap();
+    assert!(matches!(&parts[0],Segment::Reply {id} if id=="-33"));
+    assert_eq!(
+        parts
+            .iter()
+            .filter(|p| matches!(p, Segment::Image(_)))
+            .count(),
+        3,
+        "all three supported blocks must actually typeset"
+    );
+    assert!(
+        parts
+            .iter()
+            .any(|p| matches!(p,Segment::At {qq} if qq=="7"))
+    );
+    let second = bounded(h.sent.recv()).await.unwrap();
+    assert!(cq::segments(&second.message).unwrap().iter().any(
+        |p| matches!(p,Segment::Text {text} if text.contains("$$\\definitelyNotACommand{x}$$"))
+    ));
 }
 
 async fn typst_render_and_delivery(h: &mut Harness) {
@@ -419,7 +473,10 @@ async fn typst_render_and_delivery(h: &mut Harness) {
     tool_reply.body["choices"][0]["finish_reason"] = json!("tool_calls");
     tool_reply.body["choices"][0]["message"]["tool_calls"] = json!([{"id":"render-1","type":"function","function":{"name":"typst_render","arguments":invocation.arguments_json}}]);
     h.reply(20, tool_reply);
-    h.reply(20, Reply::text(answer["pages"][0]["cq"].as_str().unwrap()));
+    h.reply(
+        20,
+        Reply::text(answer["pages"][0]["markdown"].as_str().unwrap()),
+    );
     h.input(&message(20, 9000, 9, "请排版积分结果", true))
         .await
         .unwrap();
@@ -447,8 +504,18 @@ async fn typst_render_and_delivery(h: &mut Harness) {
         .iter()
         .find(|m| m["role"] == "tool" && m["tool_call_id"] == "render-1")
         .unwrap();
-    assert!(tool["content"].as_str().unwrap().contains(&reference));
-    assert!(!tool["content"].as_str().unwrap().contains("base64"));
+    let parts = tool["content"].as_array().unwrap();
+    let texts = parts
+        .iter()
+        .filter_map(|part| part["text"].as_str())
+        .collect::<String>();
+    assert!(texts.contains(&reference));
+    assert!(!texts.contains("base64"));
+    assert!(parts.iter().any(|part| {
+        part["image_url"]["url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("data:image/png;base64,"))
+    }));
     assert!(h.sent.try_recv().is_err());
 }
 
@@ -635,10 +702,7 @@ async fn wolfram_tool(h: &Harness) {
 
 async fn memory_index_and_media(h: &mut Harness) {
     let mut picture = message(20, 50, 9, "", false);
-    picture.message = Message::Segments(vec![
-        Segment::at("42"),
-        Segment::image("base64://iVBORw0KGgo="),
-    ]);
+    picture.message = Message::Segments(vec![Segment::at("42"), Segment::image(TEST_IMAGE)]);
     let accepted: Result<memory::Accepted, memory::Error> = h
         .call(
             memory::OBJECT,
@@ -753,6 +817,14 @@ async fn memory_index_and_media(h: &mut Harness) {
         h.call(memory::OBJECT, "/recall", &image.id).await;
     let result = result.unwrap();
     assert!(!result.seeds.is_empty());
+    assert!(h.remote.lock().unwrap().reranks.iter().any(|request| {
+        request["query"]["image"].is_string()
+            && request["documents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|document| document["image"].is_string())
+    }));
     let graph: Value = serde_json::from_str(&result.graph_json).unwrap();
     assert!(graph["nodes"].as_array().unwrap().len() <= 64);
     let count = h.remote.lock().unwrap().embeddings.len();
@@ -776,7 +848,7 @@ async fn memory_index_and_media(h: &mut Harness) {
     let Message::Segments(parts) = &mut incoming.message else {
         unreachable!()
     };
-    parts.push(Segment::image("base64://iVBORw0KGgo="));
+    parts.push(Segment::image(TEST_IMAGE));
     h.reply(20, Reply::text("text model"));
     h.input(&incoming).await.unwrap();
     bounded(h.sent.recv()).await.unwrap();
@@ -792,11 +864,7 @@ async fn memory_index_and_media(h: &mut Harness) {
                     .is_none_or(|parts| parts.iter().all(|part| part["type"] != "image_url"))
             })
     );
-    assert!(
-        request["messages"]
-            .to_string()
-            .contains("[CQ:image,file=media:")
-    );
+    assert!(request["messages"].to_string().contains("![image](media:"));
     h.configure(
         provider::OBJECT,
         "/settings",
@@ -816,10 +884,7 @@ async fn memory_index_and_media(h: &mut Harness) {
         .unwrap();
     h.reply(
         20,
-        Reply::text(&format!(
-            "[CQ:image,file={}]",
-            projected.images[0].reference
-        )),
+        Reply::text(&format!("![image]({})", projected.images[0].reference)),
     );
     incoming.message_id = 52;
     h.input(&incoming).await.unwrap();
@@ -837,8 +902,76 @@ async fn memory_index_and_media(h: &mut Harness) {
     );
 }
 
+async fn reranked_memory(h: &Harness) {
+    h.remote.lock().unwrap().points.clear();
+    h.remote.lock().unwrap().seed_filter = None;
+    let mut ids = Vec::new();
+    let mut examples = vec![
+        (300, "BAD_CANDIDATE"),
+        (301, "GOOD_CANDIDATE"),
+        (302, " "),
+        (303, "LOW_CANDIDATE"),
+    ];
+    examples.extend((305..318).map(|group| (group, "BAD_CANDIDATE")));
+    for (group, body) in examples {
+        let unit: Result<memory::Accepted, memory::Error> = h
+            .call(
+                memory::OBJECT,
+                "/accept",
+                &memory::Incoming::Group(Box::new(message(group, 1, 9, body, true))),
+            )
+            .await;
+        ids.push(unit.unwrap().unit.id);
+    }
+    let result: Result<(), memory::Error> = h.call(memory::OBJECT, "/archive", &ids).await;
+    result.unwrap();
+    let result: Result<(), memory::Error> = h.call(memory::OBJECT, "/index/advance", &()).await;
+    result.unwrap();
+    let query: Result<memory::Accepted, memory::Error> = h
+        .call(
+            memory::OBJECT,
+            "/accept",
+            &memory::Incoming::Group(Box::new(message(304, 1, 9, "semantic query", true))),
+        )
+        .await;
+    let query = query.unwrap().unit.id;
+    {
+        let mut remote = h.remote.lock().unwrap();
+        remote.rerank_scores = [
+            ("BAD_CANDIDATE".into(), 0.02),
+            ("GOOD_CANDIDATE".into(), 0.92),
+            ("LOW_CANDIDATE".into(), 0.05),
+        ]
+        .into();
+        remote.reranks.clear();
+    }
+    let region: Result<memory::Region, memory::Error> =
+        h.call(memory::OBJECT, "/recall", &query).await;
+    let region = region.unwrap();
+    assert_eq!(region.seeds, vec![ids[1].clone()]);
+    let graph: Value = serde_json::from_str(&region.graph_json).unwrap();
+    assert_eq!(graph["seed_score_kind"], "rerank");
+    assert_eq!(graph["nodes"][0]["seed_score"], 0.92);
+    {
+        let remote = h.remote.lock().unwrap();
+        assert_eq!(remote.reranks.len(), 2);
+        assert_eq!(remote.reranks[0]["documents"].as_array().unwrap().len(), 8);
+    }
+    h.remote.lock().unwrap().rerank_failure = true;
+    let failed: Result<memory::Region, memory::Error> =
+        h.call(memory::OBJECT, "/recall", &query).await;
+    assert!(matches!(failed, Err(memory::Error::Index(reason)) if reason.contains("402")));
+    assert_eq!(h.remote.lock().unwrap().reranks.len(), 3);
+    // A pure mention has no semantic query and cannot recall other pure mentions.
+    let empty: Result<memory::Region, memory::Error> =
+        h.call(memory::OBJECT, "/recall", &ids[2]).await;
+    assert!(empty.unwrap().seeds.is_empty());
+    assert_eq!(h.remote.lock().unwrap().reranks.len(), 3);
+    h.remote.lock().unwrap().rerank_failure = false;
+}
+
 async fn bounded_graph(h: &Harness) {
-    let settings=memory::Settings {endpoint:h.endpoint.clone(),retrieval_json:r#"{"seed_threshold":0.55,"seed_limit":1,"sequence_weight":0.55,"association_weight":0.9,"activation_min":0.1,"association_limit":2,"node_limit":8,"edge_limit":12,"result_limit":8}"#.into(),..Default::default()};
+    let settings=memory::Settings {endpoint:h.endpoint.clone(),retrieval_json:r#"{"seed_threshold":0.55,"candidate_limit":64,"rerank_threshold":0.1,"rerank_batch_size":8,"rerank_image_max_side":1024,"seed_limit":1,"sequence_weight":0.55,"association_weight":0.9,"activation_min":0.1,"association_limit":2,"node_limit":8,"edge_limit":12,"result_limit":8}"#.into(),..Default::default()};
     h.configure(memory::OBJECT, "/settings", &settings).await;
     h.scheduler
         .reload(h.packages[memory::OBJECT].clone(), StopMode::Drain)
