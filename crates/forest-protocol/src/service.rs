@@ -1,5 +1,6 @@
 //! Each structure belongs to a dedicated host import, not a string opcode.
 use crate::{Token, Value};
+use forest_serde::{DeriveSchema, DeriveValue};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,7 +93,9 @@ pub struct LogRecord {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, thiserror::Error)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, DeriveSchema, DeriveValue,
+)]
 pub enum ServiceError {
     #[error("invalid input: {0}")]
     InvalidInput(String),

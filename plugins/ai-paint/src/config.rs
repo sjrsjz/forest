@@ -5,7 +5,7 @@ pub const OPENAI_IMAGES: &str = "/openai-images";
 pub const SILICONFLOW: &str = "/siliconflow";
 pub const SWARM_UI: &str = "/swarm-ui";
 
-#[derive(Clone, DeriveSchema, DeriveValue)]
+#[derive(Clone, Debug, DeriveSchema, DeriveValue)]
 pub enum Backend {
     OpenAiImages,
     SiliconFlow,

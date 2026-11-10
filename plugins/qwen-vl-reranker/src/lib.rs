@@ -11,16 +11,28 @@ pub struct Reranker {
     connection: Connection,
     batch_size: usize,
 }
+#[derive(Clone, Debug, forest_serde::DeriveSchema, forest_serde::DeriveValue)]
+pub enum LifecycleError {
+    Host(forest_sdk::HostError),
+    InvalidBatchSize(i64),
+}
+impl From<forest_sdk::HostError> for LifecycleError {
+    fn from(error: forest_sdk::HostError) -> Self {
+        Self::Host(error)
+    }
+}
 impl Module for Reranker {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = LifecycleError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         let connection: Connection = host::config_get(context.object, CONNECTION.parse().unwrap())
             .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+            .map_err(forest_sdk::HostError::Dispatch)?
+            .map_err(forest_sdk::HostError::Service)?;
         let batch_size = usize::try_from(connection.batch_size)
             .ok()
             .filter(|size| *size > 0)
-            .ok_or("batch_size must be positive")?;
+            .ok_or(LifecycleError::InvalidBatchSize(connection.batch_size))?;
         Ok(Self {
             connection,
             batch_size,
@@ -91,8 +103,10 @@ pub fn manifest() -> Manifest {
             version: "0.1.0".into(),
             name: Some("Qwen VL Reranker".into()),
             description: Some("Qwen3-VL-Reranker-8B text/image relevance scoring".into()),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Reranker as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: CONNECTION.parse().unwrap(),
             schema: Connection::as_schema(),

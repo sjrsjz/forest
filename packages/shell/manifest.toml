@@ -1,0 +1,120 @@
+[package]
+id = "/module/shell"
+version = "0.1.0"
+name = "Group shell"
+description = "Authorized Forest administration over group messages"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[configs]]
+key = "/settings"
+schema = "generated/configs/0.schema"
+default = "generated/configs/0.value"
+
+[configs.access]
+readers = ["self"]
+writers = ["/user/admin"]
+
+[[provides]]
+path = "/group_message"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = true
+
+[provides.access]
+callers = ["/core/onebot"]
+
+[[uses]]
+object = "/core/control"
+interface = "/snapshot"
+input = "generated/uses/0.input.schema"
+output = "generated/uses/0.output.schema"
+
+[[uses]]
+object = "/core/control"
+interface = "/packages"
+input = "generated/uses/1.input.schema"
+output = "generated/uses/1.output.schema"
+
+[[uses]]
+object = "/core/control"
+interface = "/load"
+input = "generated/uses/2.input.schema"
+output = "generated/uses/2.output.schema"
+
+[[uses]]
+object = "/core/control"
+interface = "/reload"
+input = "generated/uses/3.input.schema"
+output = "generated/uses/3.output.schema"
+
+[[uses]]
+object = "/core/control"
+interface = "/unload"
+input = "generated/uses/4.input.schema"
+output = "generated/uses/4.output.schema"
+
+[[uses]]
+object = "/core/control"
+interface = "/force"
+input = "generated/uses/5.input.schema"
+output = "generated/uses/5.output.schema"
+
+[[uses]]
+object = "/core/control"
+interface = "/config/keys"
+input = "generated/uses/6.input.schema"
+output = "generated/uses/6.output.schema"
+
+[[uses]]
+object = "/core/control"
+interface = "/config/get"
+input = "generated/uses/7.input.schema"
+output = "generated/uses/7.output.schema"
+
+[[uses]]
+object = "/core/control"
+interface = "/config/set"
+input = "generated/uses/8.input.schema"
+output = "generated/uses/8.output.schema"
+
+[[uses]]
+object = "/core/onebot"
+interface = "/send_group_message"
+input = "generated/uses/9.input.schema"
+output = "generated/uses/9.output.schema"
+
+[[subscriptions]]
+source = "/core/onebot"
+event = "/group_message"
+interface = "/group_message"
+
+[sha256]
+"generated/configs/0.schema" = "4af5fd04aa4850597598d73bd2ce91aa4a99308c235b8311a5fa7ef2ff228226"
+"generated/configs/0.value" = "b858d1bddc8aff492da3b65407f96342ae3a69fa2aa652c1dde4b7734b0d0fe3"
+"generated/lifecycle-error.schema" = "2a1ebbb129c248162cadc05beda93cfbfd9e7219485f1dc83e12f47946db0648"
+"generated/provides/0.input.schema" = "0fb47ece9fe29014ae572e9bd5f5aaee5248e81d68c6385f5e416581422048fe"
+"generated/provides/0.output.schema" = "42c17661422958d2eadc811723a8fb07f7875d89f52469b77bfdf5ebeee60261"
+"generated/uses/0.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/uses/0.output.schema" = "8c0e5b01f20951a10c7557ca4a8b69de3b4729394138d317975b3201bf4899ab"
+"generated/uses/1.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/uses/1.output.schema" = "94acaec0371ce375450b5c72a91fc1c5c7b38cb6f726a52f4f8fbe8567c2d945"
+"generated/uses/2.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/uses/2.output.schema" = "524c4fa3d5efbd96e779f7cfaf7041b777d3fc8fccdf2fc771a36bffb4db20d7"
+"generated/uses/3.input.schema" = "77f121a1a0e0e459ebe96e17c95e8bc5d38b0b5b38e48fe8e1522f12278db228"
+"generated/uses/3.output.schema" = "524c4fa3d5efbd96e779f7cfaf7041b777d3fc8fccdf2fc771a36bffb4db20d7"
+"generated/uses/4.input.schema" = "77f121a1a0e0e459ebe96e17c95e8bc5d38b0b5b38e48fe8e1522f12278db228"
+"generated/uses/4.output.schema" = "524c4fa3d5efbd96e779f7cfaf7041b777d3fc8fccdf2fc771a36bffb4db20d7"
+"generated/uses/5.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/uses/5.output.schema" = "524c4fa3d5efbd96e779f7cfaf7041b777d3fc8fccdf2fc771a36bffb4db20d7"
+"generated/uses/6.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/uses/6.output.schema" = "c3d87358c763667eaab3fdb39a21396d3a4f275b4da233af98848975bf57ab06"
+"generated/uses/7.input.schema" = "b1ffc7e074d39b95b30ec89d4ce0901731009c8e9fc9581640ee1300eb154ad8"
+"generated/uses/7.output.schema" = "7c4dfd1f83e44dfebd9cafce7d18300c84a6870ef10ca1d9a407bc9da0afb329"
+"generated/uses/8.input.schema" = "f3e6d2e5a17a3a399c4a327cfc47cf2048f2e9ad815a05f20382e41de66672c0"
+"generated/uses/8.output.schema" = "524c4fa3d5efbd96e779f7cfaf7041b777d3fc8fccdf2fc771a36bffb4db20d7"
+"generated/uses/9.input.schema" = "d5e578a594814cf7fe162cb497110d22abc5d04f8436af0085255b3113d37841"
+"generated/uses/9.output.schema" = "27d66d278af0d580ff4c2058f85012e950201dc8cb7c2ee8e92a9ee494d39584"
+"module.wasm" = "66450417b2dddc97d1635a910b6d94ff7384965b4e39b1ae5a0a4253a23c6148"

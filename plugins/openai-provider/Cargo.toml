@@ -28,3 +28,6 @@ forest-config = { path = "../../crates/forest-config" }
 tokio.workspace = true
 tempfile = "3.23.0"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+forest-package = { path = "../../crates/forest-package" }

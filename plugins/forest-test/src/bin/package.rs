@@ -27,10 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspace.join("target/wasm32-unknown-unknown/debug/forest_test.wasm"),
         package.join("module.wasm"),
     )?;
-    std::fs::write(
-        package.join("manifest.json"),
-        serde_json::to_vec_pretty(&forest_test::manifest())?,
-    )?;
+    forest_package::write(&package, &forest_test::manifest())?;
     println!("{}", package.display());
     Ok(())
 }

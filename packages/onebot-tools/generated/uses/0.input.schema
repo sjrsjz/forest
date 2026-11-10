@@ -1,0 +1,2 @@
+schema T0 = variant {FriendList, GroupInfo {group_id: i64, no_cache: bool}, GroupList, GroupMemberInfo {group_id: i64, no_cache: bool, user_id: i64}, GroupMemberList {group_id: i64}, LoginInfo, StrangerInfo {no_cache: bool, user_id: i64}};
+export T0;

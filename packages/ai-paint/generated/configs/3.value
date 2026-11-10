@@ -1,0 +1,1 @@
+{"anime_model": "text-to-image-anime", "anime_negative_prompt": "", "auth_token": "", "default_model": "text-to-image", "endpoint": "http://127.0.0.1:7801", "photo_model": "text-to-image-photo", "photo_negative_prompt": "", "sizes": {"landscape": "1440x720", "portrait": "720x1440", "square": "1024x1024"}, "steps": 30}

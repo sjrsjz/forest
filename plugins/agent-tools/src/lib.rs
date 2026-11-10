@@ -27,23 +27,74 @@ struct ResolvedRoute {
     object: Token,
     interface: Token,
 }
+#[derive(Clone, Debug, forest_serde::DeriveSchema, forest_serde::DeriveValue)]
+pub enum LifecycleError {
+    Host(forest_sdk::HostError),
+    InvalidParameters {
+        tool: String,
+        line: i64,
+        column: i64,
+        message: String,
+    },
+    InvalidObject {
+        tool: String,
+        object: String,
+    },
+    InvalidInterface {
+        tool: String,
+        interface: String,
+    },
+    DuplicateTool {
+        tool: String,
+    },
+}
+impl From<forest_sdk::HostError> for LifecycleError {
+    fn from(error: forest_sdk::HostError) -> Self {
+        Self::Host(error)
+    }
+}
 impl Module for Gateway {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = LifecycleError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         let routes: Vec<Route> = host::config_get(context.object, "/routes".parse().unwrap())
             .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+            .map_err(forest_sdk::HostError::Dispatch)?
+            .map_err(forest_sdk::HostError::Service)?;
         let mut table = BTreeMap::new();
         for route in routes {
             let _: serde_json::Value =
-                serde_json::from_str(&route.tool.parameters_json).map_err(|e| e.to_string())?;
+                serde_json::from_str(&route.tool.parameters_json).map_err(|error| {
+                    LifecycleError::InvalidParameters {
+                        tool: route.tool.name.clone(),
+                        line: error.line() as i64,
+                        column: error.column() as i64,
+                        message: error.to_string(),
+                    }
+                })?;
+            let object = route
+                .object
+                .parse()
+                .map_err(|_| LifecycleError::InvalidObject {
+                    tool: route.tool.name.clone(),
+                    object: route.object.clone(),
+                })?;
+            let interface =
+                route
+                    .interface
+                    .parse()
+                    .map_err(|_| LifecycleError::InvalidInterface {
+                        tool: route.tool.name.clone(),
+                        interface: route.interface.clone(),
+                    })?;
+            let tool = route.tool.name.clone();
             let route = ResolvedRoute {
                 tool: route.tool,
-                object: route.object.parse().map_err(|e| format!("{e}"))?,
-                interface: route.interface.parse().map_err(|e| format!("{e}"))?,
+                object,
+                interface,
             };
             if table.insert(route.tool.name.clone(), route).is_some() {
-                return Err("duplicate tool name".into());
+                return Err(LifecycleError::DuplicateTool { tool });
             }
         }
         Ok(Self { routes: table })
@@ -320,8 +371,10 @@ pub fn manifest_with_routes(routes: Vec<Route>) -> Manifest {
             version: "0.1.0".into(),
             name: Some("Agent tool gateway".into()),
             description: Some("Native tool calls to explicit module interfaces".into()),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Gateway as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: "/routes".parse().unwrap(),
             schema: Vec::<Route>::as_schema(),

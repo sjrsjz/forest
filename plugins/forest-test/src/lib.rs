@@ -12,12 +12,11 @@ pub struct Hello {
     replies: Cell<i64>,
 }
 impl Module for Hello {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = forest_sdk::HostError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         let replies: i64 =
-            host::config_get(context.object.clone(), "/state/replies".parse().unwrap())
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+            host::config_get(context.object.clone(), "/state/replies".parse().unwrap()).await??;
         Ok(Self {
             object: context.object,
             replies: Cell::new(replies),
@@ -92,8 +91,10 @@ pub fn manifest() -> Manifest {
             version: "0.1.0".into(),
             name: Some("Forest Test".into()),
             description: Some("Reply hello world to #forest-test".into()),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Hello as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: "/state/replies".parse().unwrap(),
             schema: i64::as_schema(),

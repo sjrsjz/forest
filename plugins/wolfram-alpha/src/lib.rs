@@ -49,13 +49,26 @@ pub struct WolframAlpha {
     connection: Connection,
 }
 
+#[derive(Clone, Debug, forest_serde::DeriveSchema, forest_serde::DeriveValue)]
+pub enum LifecycleError {
+    Host(forest_sdk::HostError),
+    InvalidEndpoint,
+}
+impl From<forest_sdk::HostError> for LifecycleError {
+    fn from(error: forest_sdk::HostError) -> Self {
+        Self::Host(error)
+    }
+}
 impl Module for WolframAlpha {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = LifecycleError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         let connection: Connection = host::config_get(context.object, CONNECTION.parse().unwrap())
             .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
-        let url = url::Url::parse(&connection.endpoint).map_err(|e| e.to_string())?;
+            .map_err(forest_sdk::HostError::Dispatch)?
+            .map_err(forest_sdk::HostError::Service)?;
+        let url =
+            url::Url::parse(&connection.endpoint).map_err(|_| LifecycleError::InvalidEndpoint)?;
         if !matches!(url.scheme(), "http" | "https")
             || !url.has_host()
             || !url.username().is_empty()
@@ -63,9 +76,7 @@ impl Module for WolframAlpha {
             || url.query().is_some()
             || url.fragment().is_some()
         {
-            return Err(
-                "endpoint must be an HTTP(S) URL without credentials, query or fragment".into(),
-            );
+            return Err(LifecycleError::InvalidEndpoint);
         }
         Ok(Self { connection })
     }
@@ -159,8 +170,10 @@ pub fn manifest() -> Manifest {
             description: Some(
                 "Exact computation and scientific knowledge via the Wolfram Alpha LLM API".into(),
             ),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <WolframAlpha as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: CONNECTION.parse().unwrap(),
             schema: Connection::as_schema(),

@@ -13,8 +13,8 @@ async fn sql(sql: &str, parameters: Vec<SqlValue>) -> Result<SqlRows, Error> {
     .remove(0))
 }
 
-pub async fn initialize() -> Result<(), Error> {
-    sql("CREATE TABLE IF NOT EXISTS projections (reference TEXT NOT NULL, max_side INTEGER NOT NULL, mime TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(reference,max_side))", vec![]).await?;
+pub async fn initialize() -> Result<(), forest_sdk::HostError> {
+    host::sqlite(vec![SqlStatement { sql: "CREATE TABLE IF NOT EXISTS projections (reference TEXT NOT NULL, max_side INTEGER NOT NULL, mime TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(reference,max_side))".into(), parameters: vec![] }]).await??;
     Ok(())
 }
 

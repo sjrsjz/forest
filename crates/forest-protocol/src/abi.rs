@@ -40,6 +40,6 @@ pub const fn split_buffer(buffer: u64) -> (u32, u32) {
 pub enum Step {
     Pending,
     Output(Value),
-    Lifecycle(Result<(), String>),
+    Lifecycle(Result<(), Value>),
     FrameTooLarge,
 }

@@ -19,8 +19,13 @@ pub struct Retrieval {
     pub result_limit: usize,
 }
 impl Retrieval {
-    pub fn parse(text: &str) -> Result<Self, String> {
-        let result: Self = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    pub fn parse(text: &str) -> Result<Self, crate::LifecycleError> {
+        let result: Self =
+            serde_json::from_str(text).map_err(|error| crate::LifecycleError::RetrievalJson {
+                line: error.line() as i64,
+                column: error.column() as i64,
+                message: error.to_string(),
+            })?;
         if !(0.0..=1.0).contains(&result.seed_threshold)
             || !(0.0..=1.0).contains(&result.rerank_threshold)
             || result.candidate_limit < result.seed_limit
@@ -33,7 +38,7 @@ impl Retrieval {
             || result.result_limit < result.seed_limit
             || result.node_limit < result.result_limit
         {
-            return Err("invalid recall bounds/weights".into());
+            return Err(crate::LifecycleError::InvalidRetrievalBounds);
         }
         Ok(result)
     }

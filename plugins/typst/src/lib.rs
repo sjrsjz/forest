@@ -14,6 +14,22 @@ use std::{collections::BTreeMap, rc::Rc};
 
 pub const OBJECT: &str = "/module/typst";
 
+#[derive(Clone, Debug, DeriveSchema, DeriveValue)]
+pub enum LifecycleError {
+    Host(forest_sdk::HostError),
+    InvalidSetting {
+        field: String,
+        value: i64,
+        minimum: i64,
+        maximum: i64,
+    },
+}
+impl From<forest_sdk::HostError> for LifecycleError {
+    fn from(error: forest_sdk::HostError) -> Self {
+        Self::Host(error)
+    }
+}
+
 #[derive(Clone, DeriveSchema, DeriveValue)]
 pub struct Settings {
     pub page_width_pt: i32,
@@ -61,18 +77,38 @@ pub struct Renderer {
     settings: Settings,
 }
 impl Module for Renderer {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = LifecycleError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         let settings: Settings = host::config_get(context.object, "/settings".parse().unwrap())
             .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
-        if !(120..=1440).contains(&settings.page_width_pt)
-            || !(6..=48).contains(&settings.font_size_pt)
-            || !(1..=3).contains(&settings.pixels_per_point)
-            || !(1..=32).contains(&settings.max_pages)
-            || !(1..=16_000_000).contains(&settings.max_page_pixels)
-        {
-            return Err("invalid Typst output settings".into());
+            .map_err(forest_sdk::HostError::Dispatch)?
+            .map_err(forest_sdk::HostError::Service)?;
+        for (field, value, minimum, maximum) in [
+            (
+                "page_width_pt",
+                i64::from(settings.page_width_pt),
+                120,
+                1440,
+            ),
+            ("font_size_pt", i64::from(settings.font_size_pt), 6, 48),
+            (
+                "pixels_per_point",
+                i64::from(settings.pixels_per_point),
+                1,
+                3,
+            ),
+            ("max_pages", i64::from(settings.max_pages), 1, 32),
+            ("max_page_pixels", settings.max_page_pixels, 1, 16_000_000),
+        ] {
+            if !(minimum..=maximum).contains(&value) {
+                return Err(LifecycleError::InvalidSetting {
+                    field: field.into(),
+                    value,
+                    minimum,
+                    maximum,
+                });
+            }
         }
         Ok(Self {
             fonts: world::Fonts::new(),
@@ -195,8 +231,10 @@ pub fn manifest() -> Manifest {
             version: "0.1.0".into(),
             name: Some("Typst".into()),
             description: Some("Typeset documents and equations into managed PNG references".into()),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Renderer as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: "/settings".parse().unwrap(),
             schema: Settings::as_schema(),

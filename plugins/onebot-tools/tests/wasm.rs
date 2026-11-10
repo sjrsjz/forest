@@ -73,11 +73,7 @@ fn package(root: &Path, destination: &Path, artifact: &str, manifest: forest_pro
         destination.join("module.wasm"),
     )
     .unwrap();
-    std::fs::write(
-        destination.join("manifest.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&destination, &manifest).unwrap();
 }
 
 async fn invoke(scheduler: &Scheduler, interface: &str, args: Value) -> Result<String, Error> {

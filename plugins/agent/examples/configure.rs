@@ -1,7 +1,7 @@
 //! Local setup utility. It edits declarations through ConfigStore, never prints credentials.
 use forest_agent_module::{memory, provider, types::Settings};
 use forest_config::{ConfigStore, Declaration, Key};
-use forest_protocol::{AsSchema, AsValue, Manifest};
+use forest_protocol::{AsSchema, AsValue};
 use std::{env, path::PathBuf};
 type SetupResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn required(name: &str) -> SetupResult<String> {
@@ -58,8 +58,7 @@ async fn main() -> SetupResult<()> {
         "agent-tools",
         "agent",
     ] {
-        let manifest: Manifest =
-            serde_json::from_slice(&std::fs::read(format!("packages/{name}/manifest.json"))?)?;
+        let manifest = forest_package::read_manifest(format!("packages/{name}"))?;
         if !entities.contains(&manifest.package.id) {
             store
                 .register(

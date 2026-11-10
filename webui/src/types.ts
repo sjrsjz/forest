@@ -1,6 +1,15 @@
 export type Phase = 'creating' | 'serving' | 'stopping' | 'destroying' | 'releasing' | 'failed'
 export type StopMode = 'drain' | 'at_yield' | 'force'
-export interface Release {
+export interface PackageMetadata {
+  authors?: string[]
+  repository?: string | null
+  license?: string | null
+  readme?: string | null
+  homepage?: string | null
+  documentation?: string | null
+  keywords?: string[]
+}
+export interface Release extends PackageMetadata {
   version: string
   name: string | null
   description: string | null
@@ -8,7 +17,11 @@ export interface Release {
 export interface Instance {
   id: string
   release: Release
+  sha256: string
 }
+export type InstanceFailure =
+  | { kind: 'dispatch'; error: unknown }
+  | { kind: 'lifecycle'; phase: 'create' | 'destroy'; schema: unknown; error: unknown }
 export type Lifecycle =
   | { phase: 'creating' | 'serving'; instance: Instance }
   | {
@@ -18,7 +31,7 @@ export type Lifecycle =
       replacement: Release | null
     }
   | { phase: 'destroying' | 'releasing'; instance: Instance; replacement: Release | null }
-  | { phase: 'failed'; reason: string }
+  | { phase: 'failed'; reason: string; failure: InstanceFailure }
 export interface Interface {
   path: string
   reentrant: boolean
@@ -52,15 +65,22 @@ export interface Snapshot {
   hosts: Host[]
 }
 export interface Manifest {
-  package: { id: string; version: string; name?: string; description?: string }
+  package: PackageMetadata & {
+    id: string
+    version: string
+    name?: string
+    description?: string
+    'license-file'?: string
+  }
   module: string
+  lifecycle_error: unknown
   configs: { key: string; schema: unknown; default: unknown; access: unknown }[]
   provides: { path: string; input: unknown; output: unknown; reentrant: boolean; access: unknown }[]
   uses: { object: string; interface: string; input: unknown; output: unknown }[]
   subscriptions: { source: string; event: string; interface: string }[]
 }
 export type LocalPackage =
-  | { status: 'ready'; directory: string; manifest: Manifest }
+  | { status: 'ready'; directory: string; manifest: Manifest; source: string }
   | { status: 'invalid'; directory: string; message: string }
 export interface LoadPlan {
   object: string

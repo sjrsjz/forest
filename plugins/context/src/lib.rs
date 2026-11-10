@@ -20,11 +20,10 @@ pub struct Context {
 }
 
 impl Module for Context {
-    async fn create(context: CreateContext) -> Result<Self, String> {
-        let prompt = host::config_get(context.object, AGENT_PROMPT.parse().unwrap())
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
+    type LifecycleError = forest_sdk::HostError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
+        let prompt = host::config_get(context.object, AGENT_PROMPT.parse().unwrap()).await??;
         Ok(Self { prompt })
     }
 
@@ -96,8 +95,10 @@ pub fn manifest() -> Manifest {
             description: Some(
                 "Ordered content to OpenAI messages with a configurable Agent prompt".into(),
             ),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Context as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: AGENT_PROMPT.parse().unwrap(),
             schema: String::as_schema(),

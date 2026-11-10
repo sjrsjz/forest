@@ -17,6 +17,30 @@ use crate::adt::{
 
 // ==== Default implementations for primitive types and collection wrappers ====
 
+impl AsSchema for std::convert::Infallible {
+    fn register_dependencies_and_self(
+        cache: &mut HashMap<TypeId, GlobalSchemaEnum>,
+        _: &mut Vec<TypeId>,
+    ) -> GlobalSchemaEnum {
+        let schema = GlobalSchemaEnum::Variant(BTreeMap::new());
+        GlobalSchemaEnum::alloc::<Self>(schema.clone(), cache);
+        schema
+    }
+}
+
+impl AsValue for std::convert::Infallible {
+    fn as_value(&self) -> Value {
+        match *self {}
+    }
+
+    fn from_value(value: Value) -> Result<Self, DecodeError> {
+        match value {
+            Value::Variant(tag, _) => Err(DecodeError::UnknownVariant { tag }),
+            other => Err(DecodeError::expected(ValueKind::Variant, &other)),
+        }
+    }
+}
+
 macro_rules! __impl_as_schema_for_primitive {
     ($t:ty, $variant:ident) => {
         impl AsSchema for $t {

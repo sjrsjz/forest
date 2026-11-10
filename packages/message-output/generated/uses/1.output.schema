@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {Fetch(string), Host(string), InvalidInput(string), NotFound, Storage(string)}), Ok({"bytes": bytes, mime: string})};
+export T0;

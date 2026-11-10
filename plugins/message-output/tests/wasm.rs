@@ -132,11 +132,7 @@ async fn actual_wasm_output_folds_by_group_preserves_cq_and_never_falls_back_to_
         dir.join("module.wasm"),
     )
     .unwrap();
-    std::fs::write(
-        dir.join("manifest.json"),
-        serde_json::to_vec(&forest_message_output::manifest()).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&dir, &forest_message_output::manifest()).unwrap();
     let s = Scheduler::new(
         temp.path().join("config.sqlite3"),
         RuntimeOptions {

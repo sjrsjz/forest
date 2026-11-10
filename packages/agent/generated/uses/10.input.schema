@@ -1,0 +1,2 @@
+schema T0 = {arguments_json: string, bot_id: i64, group_id: i64, name: string};
+export T0;

@@ -6,6 +6,8 @@
 
 阶段转换收敛为 Creating、Serving、Stopping、Destroying、Releasing、Failed，具体载荷、入口规则及所有权证明见[调度器状态机](12-scheduler-state-machine.md)。重载是停止后的明确去向，不另叠加 reloading 布尔值。
 
+create/destroy 使用模块声明的同一个生命周期错误类型，Schema 通过 TOML 的 `module.lifecycle-error` 文件引用公开，解析后位于 Manifest 的 `lifecycle_error`。宿主校验错误值并保留阶段、Schema 和载荷，不解释模块错误的含义。create 主动失败后释放候选资源并进入 Failed；正常卸载中的 destroy 主动失败仍完成资源释放，并向管理调用者返回该错误。模块主动失败与 Wasm trap、契约错误和外部中断分别表示，具体编码见[运行与 ABI](13-runtime-and-sdk.md)。
+
 ## 1. 身份、资源与静态注册
 
 逻辑模块的 Token 和已保存配置独立于 Wasm 执行实例。连接、等待操作、实例内任务及缓存属于具体执行实例；模块可主动释放，实例销毁或失败时由宿主回收其名下资源，不为下一实例维持连接。

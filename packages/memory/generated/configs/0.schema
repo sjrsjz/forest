@@ -1,0 +1,2 @@
+schema T0 = {api_key: string, collection: string, endpoint: string, retrieval_json: string};
+export T0;

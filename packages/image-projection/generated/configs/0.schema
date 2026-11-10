@@ -1,0 +1,2 @@
+schema T0 = {decode_memory_mib: i32, max_side: i32};
+export T0;

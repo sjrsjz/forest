@@ -1,0 +1,2 @@
+schema T0 = {app_id: string, endpoint: string};
+export T0;

@@ -72,11 +72,7 @@ fn package(parent: &Path, name: &str, object: &str, second: bool) -> PathBuf {
     .unwrap();
     let mut manifest = forest_scheduler_probe::manifest(object.parse().unwrap());
     manifest.package.version = if second { "2".into() } else { "1".into() };
-    std::fs::write(
-        path.join("manifest.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&path, &manifest).unwrap();
     path
 }
 #[derive(Default)]
@@ -156,6 +152,142 @@ fn observe(s: &Scheduler) -> Arc<Observations> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn lifecycle_rejections_preserve_schema_value_and_stage() {
+    use forest_runtime::{InstanceFailure, LifecyclePhase};
+    use forest_scheduler_probe::{FailureStage, LifecycleError};
+    for (stage, wanted) in [
+        (FailureStage::Create, LifecyclePhase::Create),
+        (FailureStage::Destroy, LifecyclePhase::Destroy),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = Scheduler::in_memory(RuntimeOptions {
+            data_directory: temp.path().join("data"),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        observe(&scheduler);
+        let object: Token = "/module/lifecycle".parse().unwrap();
+        let path = package(temp.path(), "package", &object.to_string(), false);
+        let mut manifest = forest_scheduler_probe::manifest(object.clone());
+        manifest
+            .configs
+            .iter_mut()
+            .find(|c| c.key.to_string() == "/counter")
+            .unwrap()
+            .default = 73i64.as_value();
+        manifest
+            .configs
+            .iter_mut()
+            .find(|c| c.key.to_string() == "/lifecycle/failure")
+            .unwrap()
+            .default = stage.as_value();
+        forest_package::write(&path, &manifest).unwrap();
+        let package = scheduler.package(path).await.unwrap();
+        let result = scheduler.load(package).await;
+        let error = if wanted == LifecyclePhase::Create {
+            result.unwrap_err()
+        } else {
+            result.unwrap();
+            scheduler
+                .unload(&object, StopMode::Drain)
+                .await
+                .unwrap_err()
+        };
+        let failure = error
+            .downcast_ref::<InstanceFailure>()
+            .expect("typed management failure");
+        let InstanceFailure::Lifecycle {
+            phase: actual,
+            schema,
+            error,
+        } = failure
+        else {
+            panic!("module rejection was confused with dispatch failure: {failure:?}")
+        };
+        assert_eq!(*actual, wanted);
+        assert!(manifest::equivalent(schema, &LifecycleError::as_schema()));
+        assert_eq!(
+            LifecycleError::from_value(error.clone()).unwrap(),
+            match wanted {
+                LifecyclePhase::Create => LifecycleError::CreateRejected { counter: 73 },
+                LifecyclePhase::Destroy => LifecycleError::DestroyRejected { counter: 73 },
+            }
+        );
+        if wanted == LifecyclePhase::Create {
+            phase(&scheduler, &object.to_string(), ModulePhase::Failed).await;
+            assert!(matches!(
+                scheduler.failure(&object),
+                Some(InstanceFailure::Lifecycle { .. })
+            ));
+            let snapshot = scheduler.inspector().snapshot().unwrap();
+            let json = serde_json::to_value(snapshot).unwrap();
+            assert_eq!(
+                json["modules"][0]["lifecycle"]["failure"]["kind"],
+                "lifecycle"
+            );
+        } else {
+            assert_eq!(scheduler.phase(&object), None);
+        }
+        scheduler.shutdown(StopMode::Drain).await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lifecycle_host_errors_stay_typed_and_invalid_payloads_are_contract_failures() {
+    use forest_runtime::InstanceFailure;
+    use forest_scheduler_probe::LifecycleError;
+    for mismatched_schema in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = Scheduler::in_memory(RuntimeOptions {
+            data_directory: temp.path().join("data"),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        observe(&scheduler);
+        let object: Token = "/module/lifecycle".parse().unwrap();
+        let path = package(temp.path(), "package", &object.to_string(), false);
+        let mut manifest = forest_scheduler_probe::manifest(object);
+        manifest
+            .configs
+            .iter_mut()
+            .find(|c| c.key.to_string() == "/counter")
+            .unwrap()
+            .access
+            .readers
+            .clear();
+        if mismatched_schema {
+            manifest.lifecycle_error = bool::as_schema();
+        }
+        forest_package::write(&path, &manifest).unwrap();
+        let error = scheduler
+            .load(scheduler.package(path).await.unwrap())
+            .await
+            .unwrap_err();
+        let failure = error.downcast_ref::<InstanceFailure>().unwrap();
+        if mismatched_schema {
+            assert!(matches!(
+                failure,
+                InstanceFailure::Dispatch {
+                    error: DispatchError::OutputContract
+                }
+            ));
+        } else {
+            let InstanceFailure::Lifecycle { error, .. } = failure else {
+                panic!("{failure:?}")
+            };
+            let LifecycleError::Host(host) = LifecycleError::from_value(error.clone()).unwrap()
+            else {
+                panic!("host error lost its category")
+            };
+            assert_eq!(host, DispatchError::Denied.into());
+        }
+        scheduler.shutdown(StopMode::Drain).await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
     let temp = tempfile::tempdir().unwrap();
     let scheduler = Scheduler::new(
@@ -185,11 +317,7 @@ async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
         input: String::as_schema(),
         output: <Result<String, String>>::as_schema(),
     });
-    std::fs::write(
-        other_path.join("manifest.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&other_path, &manifest).unwrap();
     let other = scheduler.package(other_path).await.unwrap();
     let plan = scheduler
         .plan_load(
@@ -522,19 +650,14 @@ async fn reloading_defaults_preserves_destroyed_state_and_rejects_schema_changes
         call::<_, i64>(&scheduler, object, "/increment", &()).await,
         1
     );
-    let mut declaration: Manifest =
-        serde_json::from_slice(&std::fs::read(path.join("manifest.json")).unwrap()).unwrap();
+    let mut declaration: Manifest = forest_package::read_manifest(&path).unwrap();
     let counter = declaration
         .configs
         .iter_mut()
         .find(|c| c.key.to_string() == "/counter")
         .unwrap();
     counter.default = 99i64.as_value();
-    std::fs::write(
-        path.join("manifest.json"),
-        serde_json::to_vec(&declaration).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&path, &declaration).unwrap();
     let replacement = scheduler.package(&path).await.unwrap();
     scheduler
         .reload(replacement, StopMode::Drain)
@@ -560,11 +683,7 @@ async fn reloading_defaults_preserves_destroyed_state_and_rejects_schema_changes
         .unwrap();
     counter.schema = bool::as_schema();
     counter.default = true.as_value();
-    std::fs::write(
-        path.join("manifest.json"),
-        serde_json::to_vec(&declaration).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&path, &declaration).unwrap();
     let incompatible = scheduler.package(&path).await.unwrap();
     assert!(
         scheduler
@@ -630,8 +749,7 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
     let mut candidates = Vec::new();
     for (second, name) in [(false, "variance-old"), (true, "variance-new")] {
         let path = package(temp.path(), name, object, second);
-        let mut declaration: Manifest =
-            serde_json::from_slice(&std::fs::read(path.join("manifest.json")).unwrap()).unwrap();
+        let mut declaration: Manifest = forest_package::read_manifest(&path).unwrap();
         let interface = declaration
             .provides
             .iter_mut()
@@ -651,19 +769,14 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
             event: "/number".parse().unwrap(),
             interface: "/variance".parse().unwrap(),
         });
-        std::fs::write(
-            path.join("manifest.json"),
-            serde_json::to_vec(&declaration).unwrap(),
-        )
-        .unwrap();
+        forest_package::write(&path, &declaration).unwrap();
         candidates.push(scheduler.package(&path).await.unwrap());
     }
     let first = candidates.remove(0);
     let second = candidates.remove(0);
     let caller = "/module/variance-consumer";
     let path = package(temp.path(), "variance-caller", caller, false);
-    let mut declaration: Manifest =
-        serde_json::from_slice(&std::fs::read(path.join("manifest.json")).unwrap()).unwrap();
+    let mut declaration: Manifest = forest_package::read_manifest(&path).unwrap();
     for target in [object, "/core/variance"] {
         declaration.uses.push(InterfaceUse {
             object: target.parse().unwrap(),
@@ -672,11 +785,7 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
             output: <Result<i64, i64>>::as_schema(),
         });
     }
-    std::fs::write(
-        path.join("manifest.json"),
-        serde_json::to_vec(&declaration).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&path, &declaration).unwrap();
     let consumer = scheduler.package(&path).await.unwrap();
     scheduler.load(first.clone()).await.unwrap();
     scheduler.load(consumer.clone()).await.unwrap();
@@ -809,19 +918,14 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
     // A guest that lies about a narrowed output must fail even for a deferred
     // request that was admitted while the old, broader contract was published.
     let path = temp.path().join("variance-new");
-    let mut declaration: Manifest =
-        serde_json::from_slice(&std::fs::read(path.join("manifest.json")).unwrap()).unwrap();
+    let mut declaration: Manifest = forest_package::read_manifest(&path).unwrap();
     declaration
         .provides
         .iter_mut()
         .find(|i| i.path.to_string() == "/implementation")
         .unwrap()
         .output = <Result<i32, String>>::as_schema();
-    std::fs::write(
-        path.join("manifest.json"),
-        serde_json::to_vec(&declaration).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&path, &declaration).unwrap();
     let dishonest = scheduler.package(&path).await.unwrap();
     let offset = observations.count();
     let active_scheduler = scheduler.clone();

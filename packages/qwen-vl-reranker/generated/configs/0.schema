@@ -1,0 +1,2 @@
+schema T0 = {api_key: string, batch_size: i64, endpoint: string};
+export T0;

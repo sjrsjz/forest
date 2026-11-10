@@ -1,5 +1,40 @@
 use forest_protocol::{AsSchema, InterfaceDeclaration, manifest::callers};
 
+#[test]
+fn framework_errors_keep_their_variants_and_token_payloads_as_forest_values() {
+    use forest_protocol::{AsValue, DispatchError, service::ServiceError};
+    for error in [
+        DispatchError::ObjectNotFound("/module/missing".parse().unwrap()),
+        DispatchError::InterfaceNotFound("/some/interface".parse().unwrap()),
+        DispatchError::Unavailable("/module/stopped".parse().unwrap()),
+        DispatchError::Denied,
+        DispatchError::LifecycleRestricted,
+        DispatchError::QueueFull,
+        DispatchError::InputContract,
+        DispatchError::OutputContract,
+        DispatchError::ExecutionFailed("runtime diagnostic".into()),
+        DispatchError::Interrupted,
+        DispatchError::HostStopped,
+        DispatchError::FrameTooLarge,
+    ] {
+        let value = error.as_value();
+        assert!(value.check(&DispatchError::as_schema(), false));
+        assert_eq!(DispatchError::from_value(value).unwrap(), error);
+    }
+    for error in [
+        ServiceError::InvalidInput("bad argument".into()),
+        ServiceError::NotFound,
+        ServiceError::InUse,
+        ServiceError::Transport("transport diagnostic".into()),
+        ServiceError::Storage("storage diagnostic".into()),
+    ] {
+        let value = error.as_value();
+        assert!(value.check(&ServiceError::as_schema(), false));
+        assert_eq!(ServiceError::from_value(value).unwrap(), error);
+    }
+    assert!(forest_protocol::Token::from_value("relative/path".to_owned().as_value()).is_err());
+}
+
 fn interface<I: AsSchema, T: AsSchema, E: AsSchema>() -> InterfaceDeclaration {
     InterfaceDeclaration {
         path: "/example".parse().unwrap(),

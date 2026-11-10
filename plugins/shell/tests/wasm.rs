@@ -94,11 +94,6 @@ async fn real_wasm_group_authorization_management_configuration_and_school_help(
     ] {
         let path = catalog_root.join(name);
         std::fs::create_dir_all(&path).unwrap();
-        std::fs::write(
-            path.join("manifest.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
         std::fs::copy(
             workspace.join(format!(
                 "target/wasm32-unknown-unknown/debug/{artifact}.wasm"
@@ -106,10 +101,11 @@ async fn real_wasm_group_authorization_management_configuration_and_school_help(
             path.join("module.wasm"),
         )
         .unwrap();
+        forest_package::write(&path, &manifest).unwrap();
     }
     let bad = catalog_root.join("invalid");
     std::fs::create_dir(&bad).unwrap();
-    std::fs::write(bad.join("manifest.json"), "bad manifest").unwrap();
+    std::fs::write(bad.join("manifest.toml"), "bad manifest").unwrap();
     let store = ConfigStore::open(temp.path().join("config.sqlite3"))
         .await
         .unwrap();

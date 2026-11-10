@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Module, Host, Snapshot } from '../types'
 import { bytes, phaseLabel } from '../types'
+import { webLink } from '../metadata'
 defineProps<{ module?: Module; host?: Host; snapshot: Snapshot }>()
 const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', force: '强制中断' }
 </script>
@@ -56,6 +57,12 @@ const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', fo
           </div>
           <template v-if="module.lifecycle.phase !== 'failed'">
             <div>
+              <dt>Wasm SHA-256</dt>
+              <dd style="overflow-wrap: anywhere">
+                <code>{{ module.lifecycle.instance.sha256 }}</code>
+              </dd>
+            </div>
+            <div>
               <dt>实例编号</dt>
               <dd>
                 <code>{{ module.lifecycle.instance.id }}</code>
@@ -68,6 +75,26 @@ const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', fo
               </dd>
             </div>
           </template>
+          <div v-if="module.published.authors?.length">
+            <dt>作者</dt>
+            <dd>{{ module.published.authors.join('、') }}</dd>
+          </div>
+          <div v-if="module.published.license">
+            <dt>许可证</dt>
+            <dd>{{ module.published.license }}</dd>
+          </div>
+          <div v-if="module.published.repository">
+            <dt>仓库</dt>
+            <dd>
+              <a
+                :href="webLink(module.published.repository)"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {{ module.published.repository }}
+              </a>
+            </dd>
+          </div>
           <div>
             <dt>输入容量</dt>
             <dd>

@@ -20,3 +20,6 @@ base64 = "0.22.1"
 futures.workspace = true
 url = "2.5.8"
 serde_json.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+forest-package = { path = "../../crates/forest-package" }

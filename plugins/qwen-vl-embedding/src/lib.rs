@@ -12,11 +12,10 @@ pub struct QwenVl {
 }
 
 impl Module for QwenVl {
-    async fn create(context: CreateContext) -> Result<Self, String> {
-        let connection = host::config_get(context.object, CONNECTION.parse().unwrap())
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
+    type LifecycleError = forest_sdk::HostError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
+        let connection = host::config_get(context.object, CONNECTION.parse().unwrap()).await??;
         Ok(Self { connection })
     }
 
@@ -84,8 +83,10 @@ pub fn manifest() -> Manifest {
             version: "0.1.0".into(),
             name: Some("Qwen VL Embedding".into()),
             description: Some("Qwen3-VL-Embedding-8B, 2048 dimensions, L2 normalized".into()),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <QwenVl as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: CONNECTION.parse().unwrap(),
             schema: Connection::as_schema(),

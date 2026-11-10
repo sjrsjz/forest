@@ -19,26 +19,42 @@ use state::*;
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use types::*;
 
+#[derive(Clone, Debug, forest_serde::DeriveSchema, forest_serde::DeriveValue)]
+pub enum LifecycleError {
+    Host(forest_sdk::HostError),
+    InvalidWindow { high_water: i64, low_water: i64 },
+}
+impl From<forest_sdk::HostError> for LifecycleError {
+    fn from(error: forest_sdk::HostError) -> Self {
+        Self::Host(error)
+    }
+}
+
 pub struct Agent {
     object: Token,
     settings: Settings,
     sessions: RefCell<BTreeMap<i64, Shared>>,
 }
 impl Module for Agent {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = LifecycleError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         let settings: Settings =
             host::config_get(context.object.clone(), "/settings".parse().unwrap())
                 .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+                .map_err(forest_sdk::HostError::Dispatch)?
+                .map_err(forest_sdk::HostError::Service)?;
         if settings.low_water <= 0 || settings.high_water <= settings.low_water {
-            return Err("require 0 < low_water < high_water".into());
+            return Err(LifecycleError::InvalidWindow {
+                high_water: settings.high_water,
+                low_water: settings.low_water,
+            });
         }
         let snapshots: Vec<Snapshot> =
             host::config_get(context.object.clone(), "/state/sessions".parse().unwrap())
                 .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+                .map_err(forest_sdk::HostError::Dispatch)?
+                .map_err(forest_sdk::HostError::Service)?;
         Ok(Self {
             object: context.object,
             settings,
@@ -65,7 +81,7 @@ impl Module for Agent {
                 Self::status,
             )
     }
-    async fn destroy(self: Rc<Self>) -> Result<(), String> {
+    async fn destroy(self: Rc<Self>) -> Result<(), Self::LifecycleError> {
         let snapshots = self
             .sessions
             .borrow()
@@ -78,8 +94,9 @@ impl Module for Agent {
             &snapshots,
         )
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+        .map_err(forest_sdk::HostError::Dispatch)?
+        .map_err(forest_sdk::HostError::Service)?;
+        Ok(())
     }
 }
 impl Agent {
@@ -181,8 +198,10 @@ pub fn manifest() -> Manifest {
                 "One working loop per group, queued continuation and append-only active context"
                     .into(),
             ),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Agent as Module>::LifecycleError::as_schema(),
         configs: vec![
             ConfigDeclaration {
                 key: "/settings".parse().unwrap(),

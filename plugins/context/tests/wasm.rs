@@ -372,11 +372,7 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
         directory.join("module.wasm"),
     )
     .unwrap();
-    std::fs::write(
-        directory.join("manifest.json"),
-        serde_json::to_vec(&forest_context_module::manifest()).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&directory, &forest_context_module::manifest()).unwrap();
     let store = ConfigStore::open(temp.path().join("config.sqlite3"))
         .await
         .unwrap();
@@ -411,11 +407,7 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
         markdown.join("module.wasm"),
     )
     .unwrap();
-    std::fs::write(
-        markdown.join("manifest.json"),
-        serde_json::to_vec(&forest_markdown::manifest()).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&markdown, &forest_markdown::manifest()).unwrap();
     scheduler
         .load(scheduler.package(&markdown).await.unwrap())
         .await

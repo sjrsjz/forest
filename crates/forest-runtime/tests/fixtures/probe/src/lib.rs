@@ -10,8 +10,27 @@ pub struct Probe {
     serial: Cell<bool>,
     sequence: Cell<i64>,
 }
+#[derive(Clone, Debug, PartialEq, Eq, forest_sdk::DeriveSchema, forest_sdk::DeriveValue)]
+pub enum FailureStage {
+    None,
+    Create,
+    Destroy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, forest_sdk::DeriveSchema, forest_sdk::DeriveValue)]
+pub enum LifecycleError {
+    Host(forest_sdk::HostError),
+    CreateRejected { counter: i64 },
+    DestroyRejected { counter: i64 },
+}
+impl From<forest_sdk::HostError> for LifecycleError {
+    fn from(error: forest_sdk::HostError) -> Self {
+        Self::Host(error)
+    }
+}
 impl Module for Probe {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = LifecycleError;
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         let denied: DispatchResult<Result<i64, String>> = host::call(
             "/core/probe".parse().unwrap(),
             "/observe".parse().unwrap(),
@@ -28,8 +47,20 @@ impl Module for Probe {
             .await,
             Err(DispatchError::LifecycleRestricted)
         ));
-        let counter =
-            flatten(host::config_get(context.object.clone(), "/counter".parse().unwrap()).await)?;
+        let counter = host::config_get(context.object.clone(), "/counter".parse().unwrap())
+            .await
+            .map_err(forest_sdk::HostError::Dispatch)?
+            .map_err(forest_sdk::HostError::Service)?;
+        let stage: FailureStage = host::config_get(
+            context.object.clone(),
+            "/lifecycle/failure".parse().unwrap(),
+        )
+        .await
+        .map_err(forest_sdk::HostError::Dispatch)?
+        .map_err(forest_sdk::HostError::Service)?;
+        if stage == FailureStage::Create {
+            return Err(LifecycleError::CreateRejected { counter });
+        }
         Ok(Self {
             object: context.object,
             counter: Cell::new(counter),
@@ -95,7 +126,7 @@ impl Module for Probe {
                 Self::atomic_write,
             )
     }
-    async fn destroy(self: Rc<Self>) -> Result<(), String> {
+    async fn destroy(self: Rc<Self>) -> Result<(), Self::LifecycleError> {
         let denied: DispatchResult<Result<i64, String>> = host::call(
             "/core/probe".parse().unwrap(),
             "/observe".parse().unwrap(),
@@ -103,16 +134,29 @@ impl Module for Probe {
         )
         .await;
         assert!(matches!(denied, Err(DispatchError::LifecycleRestricted)));
-        let count: i64 =
-            flatten(host::config_get(self.object.clone(), "/destroyed".parse().unwrap()).await)?;
-        flatten(
-            host::config_set(
-                self.object.clone(),
-                "/destroyed".parse().unwrap(),
-                &(count + 1),
-            )
-            .await,
+        let stage: FailureStage =
+            host::config_get(self.object.clone(), "/lifecycle/failure".parse().unwrap())
+                .await
+                .map_err(forest_sdk::HostError::Dispatch)?
+                .map_err(forest_sdk::HostError::Service)?;
+        if stage == FailureStage::Destroy {
+            return Err(LifecycleError::DestroyRejected {
+                counter: self.counter.get(),
+            });
+        }
+        let count: i64 = host::config_get(self.object.clone(), "/destroyed".parse().unwrap())
+            .await
+            .map_err(forest_sdk::HostError::Dispatch)?
+            .map_err(forest_sdk::HostError::Service)?;
+        host::config_set(
+            self.object.clone(),
+            "/destroyed".parse().unwrap(),
+            &(count + 1),
         )
+        .await
+        .map_err(forest_sdk::HostError::Dispatch)?
+        .map_err(forest_sdk::HostError::Service)?;
+        Ok(())
     }
 }
 forest_sdk::export_module!(super::Probe);
@@ -302,7 +346,7 @@ fn flatten<T>(result: HostResult<T>) -> Result<T, String> {
 }
 
 pub fn manifest(object: Token) -> Manifest {
-    let configs = ["/counter", "/destroyed"]
+    let mut configs = ["/counter", "/destroyed"]
         .map(|key| ConfigDeclaration {
             key: key.parse().unwrap(),
             schema: i64::as_schema(),
@@ -314,6 +358,16 @@ pub fn manifest(object: Token) -> Manifest {
             },
         })
         .to_vec();
+    configs.push(ConfigDeclaration {
+        key: "/lifecycle/failure".parse().unwrap(),
+        schema: FailureStage::as_schema(),
+        default: FailureStage::None.as_value(),
+        access: AccessPolicy {
+            readers: vec![SubjectPattern::SelfModule],
+            writers: vec![SubjectPattern::SelfModule],
+            callers: vec![],
+        },
+    });
     Manifest {
         package: PackageInfo {
             id: object,
@@ -324,8 +378,10 @@ pub fn manifest(object: Token) -> Manifest {
             },
             name: Some("Scheduler test fixture".into()),
             description: None,
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Probe as Module>::LifecycleError::as_schema(),
         configs,
         provides: Probe::handlers().declarations(),
         subscriptions: vec![],

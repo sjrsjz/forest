@@ -1,0 +1,60 @@
+[package]
+id = "/module/image-projection"
+version = "0.1.0"
+name = "Image projection"
+description = "Configurable model-input image dimensions; persistent derived images"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[configs]]
+key = "/settings"
+schema = "generated/configs/0.schema"
+default = "generated/configs/0.value"
+
+[configs.access]
+readers = ["self"]
+writers = ["/user/admin"]
+
+[[provides]]
+path = "/prepare"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = false
+
+[provides.access]
+callers = [
+    "/module/memory",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/thumbnail"
+input = "generated/provides/1.input.schema"
+output = "generated/provides/1.output.schema"
+reentrant = false
+
+[provides.access]
+callers = [
+    "/module/memory",
+    "/user/admin",
+]
+
+[[uses]]
+object = "/module/media"
+interface = "/get"
+input = "generated/uses/0.input.schema"
+output = "generated/uses/0.output.schema"
+
+[sha256]
+"generated/configs/0.schema" = "443cf822a8d6a50e9c1ea5aa299fd2ea3aa9c517a5271aa93c4268d7da0d3a68"
+"generated/configs/0.value" = "37a5b1137b2339a7a64759c6f8da3b17577ac4626016774dac9026220e96b9bd"
+"generated/lifecycle-error.schema" = "0abd3a760bcac984442768d77c65d1ed0aa599a52a7eb8fe5bd9f3ebbd8f3bed"
+"generated/provides/0.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/provides/0.output.schema" = "18b198487fa29abc5f9f605923f5dbca632747fb28bc12d11bb4a71bb09d949f"
+"generated/provides/1.input.schema" = "b202f100da9a4222e7b3023d6d5460a1358441e08242821077d7753118ee148c"
+"generated/provides/1.output.schema" = "18b198487fa29abc5f9f605923f5dbca632747fb28bc12d11bb4a71bb09d949f"
+"generated/uses/0.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/uses/0.output.schema" = "4d980205471782dbd4195c353ecf862074599807c7b4f6cfd2fa94ac98f54e20"
+"module.wasm" = "eb7c1600662fc0dd940ac491aed56e7e74a3662879312711140fe7d06b581882"

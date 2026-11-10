@@ -161,11 +161,6 @@ async fn actual_wasm_command_renders_delivers_reports_errors_and_reloads() {
     ] {
         let path = temp.path().join(artifact);
         std::fs::create_dir(&path).unwrap();
-        std::fs::write(
-            path.join("manifest.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
         std::fs::copy(
             root.join(format!(
                 "target/wasm32-unknown-unknown/{profile}/{artifact}.wasm"
@@ -173,6 +168,7 @@ async fn actual_wasm_command_renders_delivers_reports_errors_and_reloads() {
             path.join("module.wasm"),
         )
         .unwrap();
+        forest_package::write(&path, &manifest).unwrap();
         let package = scheduler.package(&path).await.unwrap();
         scheduler.load(package.clone()).await.unwrap();
         if manifest.package.id.to_string() == forest_typst_command::OBJECT {

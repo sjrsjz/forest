@@ -3,6 +3,7 @@ import { computed, ref, shallowRef, watch, watchEffect } from 'vue'
 import { command, HttpError, request } from '../api'
 import type { Loadable, LoadPlan, LocalPackage, Snapshot, StopMode } from '../types'
 import { phaseLabel } from '../types'
+import { webLink } from '../metadata'
 
 const props = defineProps<{
   open: boolean
@@ -47,6 +48,9 @@ const candidates = computed(() =>
 const selected = computed(() => entries.value.find((p) => p.directory === directory.value))
 const manifest = computed(() =>
   selected.value?.status === 'ready' ? selected.value.manifest : null,
+)
+const manifestSource = computed(() =>
+  selected.value?.status === 'ready' ? selected.value.source : '',
 )
 const targetModule = computed(() => props.snapshot.modules.find((m) => m.object === props.target))
 const operationModule = computed(() =>
@@ -212,12 +216,10 @@ async function force() {
                 声明概览
               </button>
               <button :class="{ active: details === 'manifest' }" @click="details = 'manifest'">
-                Manifest
+                manifest.toml
               </button>
             </div>
-            <pre v-if="details === 'manifest'" class="manifest-text">{{
-              JSON.stringify(manifest, null, 2)
-            }}</pre>
+            <pre v-if="details === 'manifest'" class="manifest-text">{{ manifestSource }}</pre>
             <div v-else class="package-summary">
               <h3>{{ manifest.package.name || manifest.package.id }}</h3>
               <code>{{ manifest.package.id }}</code>
@@ -232,6 +234,26 @@ async function force() {
                 <div v-if="targetModule">
                   <dt>当前版本</dt>
                   <dd>{{ targetModule.published.version }}</dd>
+                </div>
+                <div v-if="manifest.package.authors?.length">
+                  <dt>作者</dt>
+                  <dd>{{ manifest.package.authors.join('、') }}</dd>
+                </div>
+                <div v-if="manifest.package.license">
+                  <dt>许可证</dt>
+                  <dd>{{ manifest.package.license }}</dd>
+                </div>
+                <div v-if="manifest.package.repository">
+                  <dt>仓库</dt>
+                  <dd>
+                    <a
+                      :href="webLink(manifest.package.repository)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {{ manifest.package.repository }}
+                    </a>
+                  </dd>
                 </div>
                 <div>
                   <dt>Wasm</dt>

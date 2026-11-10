@@ -1,0 +1,38 @@
+[package]
+id = "/module/qwen-vl-reranker"
+version = "0.1.0"
+name = "Qwen VL Reranker"
+description = "Qwen3-VL-Reranker-8B text/image relevance scoring"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[configs]]
+key = "/connection"
+schema = "generated/configs/0.schema"
+default = "generated/configs/0.value"
+
+[configs.access]
+readers = ["self"]
+writers = ["/user/admin"]
+
+[[provides]]
+path = "/rank"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/**",
+    "/user/admin",
+]
+
+[sha256]
+"generated/configs/0.schema" = "f4d637ef4a5af2ab88a9bf0734eef4720e0dabcef7452c2e43f089be90540f18"
+"generated/configs/0.value" = "248d76838790667c2f017a7d6cd7be58f4d886cbc5695aa440fc8ba18042f983"
+"generated/lifecycle-error.schema" = "ab383fb186a59e62d3eeb4a0bb36240e02e72241735dcccd9dd2155aed96527f"
+"generated/provides/0.input.schema" = "00867696c7382d09307585072378a11fc1feca4bb544aa7a18456daa00e5f5b5"
+"generated/provides/0.output.schema" = "7e278eb305706e79a28102eebf4c3e4a12966c183cd6d818d33f2cbcf9e4f5c2"
+"module.wasm" = "72792ff9c7284a346404b1713bb86f60c7a32e819e9e3c76c8442063c5d978ed"

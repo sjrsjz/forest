@@ -1,0 +1,2 @@
+schema T0 = {max_side: i32, reference: string};
+export T0;

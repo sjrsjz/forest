@@ -26,11 +26,10 @@ pub struct Command {
 }
 
 impl Module for Command {
-    async fn create(context: CreateContext) -> Result<Self, String> {
-        let settings = host::config_get(context.object, "/settings".parse().unwrap())
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+    type LifecycleError = forest_sdk::HostError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
+        let settings = host::config_get(context.object, "/settings".parse().unwrap()).await??;
         Ok(Self { settings })
     }
 
@@ -166,8 +165,10 @@ pub fn manifest() -> Manifest {
             version: "0.1.0".into(),
             name: Some("Typst group command".into()),
             description: Some("Render /typst source directly from group messages".into()),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Command as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: "/settings".parse().unwrap(),
             schema: Settings::as_schema(),

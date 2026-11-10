@@ -1,0 +1,38 @@
+[package]
+id = "/module/wolfram-alpha"
+version = "0.1.0"
+name = "Wolfram Alpha"
+description = "Exact computation and scientific knowledge via the Wolfram Alpha LLM API"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[configs]]
+key = "/connection"
+schema = "generated/configs/0.schema"
+default = "generated/configs/0.value"
+
+[configs.access]
+readers = ["self"]
+writers = ["/user/admin"]
+
+[[provides]]
+path = "/query"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/user/admin",
+]
+
+[sha256]
+"generated/configs/0.schema" = "ee6661ea16140a7a2b82e70873d4a6478ce2f5a85cb3b2bc48ed8c1be77f6bca"
+"generated/configs/0.value" = "4999619d7469ebe61ea532a5beb21cd8b3ffd59515ac7db822fd8614e0a91c96"
+"generated/lifecycle-error.schema" = "47e3497dc397c49f4881887fa4bdd31f4ab7ca1e2611473354df63c5c35a24dc"
+"generated/provides/0.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/0.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"module.wasm" = "85890acfd406791f9dde547cc25ffe736a22ded82336afe8e61eaa525dff5db6"

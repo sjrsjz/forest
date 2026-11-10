@@ -1,0 +1,179 @@
+[package]
+id = "/module/onebot-tools"
+version = "0.1.0"
+name = "OneBot tools"
+description = "Account, group and member queries and explicit Markdown messaging"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[provides]]
+path = "/get_friend_list"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/get_group_info"
+input = "generated/provides/1.input.schema"
+output = "generated/provides/1.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/get_group_list"
+input = "generated/provides/2.input.schema"
+output = "generated/provides/2.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/get_group_member_info"
+input = "generated/provides/3.input.schema"
+output = "generated/provides/3.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/get_group_member_list"
+input = "generated/provides/4.input.schema"
+output = "generated/provides/4.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/get_login_info"
+input = "generated/provides/5.input.schema"
+output = "generated/provides/5.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/get_stranger_info"
+input = "generated/provides/6.input.schema"
+output = "generated/provides/6.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/send_group_message"
+input = "generated/provides/7.input.schema"
+output = "generated/provides/7.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/send_private_message"
+input = "generated/provides/8.input.schema"
+output = "generated/provides/8.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/user/admin",
+]
+
+[[uses]]
+object = "/core/onebot"
+interface = "/query"
+input = "generated/uses/0.input.schema"
+output = "generated/uses/0.output.schema"
+
+[[uses]]
+object = "/module/message-output"
+interface = "/send_markdown"
+input = "generated/uses/1.input.schema"
+output = "generated/uses/1.output.schema"
+
+[[uses]]
+object = "/core/onebot"
+interface = "/send_private_message"
+input = "generated/uses/2.input.schema"
+output = "generated/uses/2.output.schema"
+
+[[uses]]
+object = "/module/media"
+interface = "/get"
+input = "generated/uses/3.input.schema"
+output = "generated/uses/3.output.schema"
+
+[[uses]]
+object = "/module/markdown"
+interface = "/format"
+input = "generated/uses/4.input.schema"
+output = "generated/uses/4.output.schema"
+
+[sha256]
+"generated/lifecycle-error.schema" = "2a1ebbb129c248162cadc05beda93cfbfd9e7219485f1dc83e12f47946db0648"
+"generated/provides/0.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/0.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/provides/1.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/1.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/provides/2.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/2.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/provides/3.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/3.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/provides/4.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/4.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/provides/5.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/5.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/provides/6.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/6.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/provides/7.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/7.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/provides/8.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/8.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/uses/0.input.schema" = "b895131d97002252b5635d7acd18a8a40db4e3241b4dcae1f0f124ed8b996af3"
+"generated/uses/0.output.schema" = "54279e6b79a23351f642b2f6ac07a37e6528ae83cffd556cf6d557b1f6057204"
+"generated/uses/1.input.schema" = "2f4a8795e3adab7f5160cf7000e5da042021fece7a7c468be3c729657c47b982"
+"generated/uses/1.output.schema" = "4ec8b26e014658ea6ebb3fbc59abe061ad3e6734b9db826694c160c83d451cf8"
+"generated/uses/2.input.schema" = "f94ee35a2946aeb9220703bbfa27bd1c55a0ca320594d38d2d022f4f3bb64201"
+"generated/uses/2.output.schema" = "27d66d278af0d580ff4c2058f85012e950201dc8cb7c2ee8e92a9ee494d39584"
+"generated/uses/3.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/uses/3.output.schema" = "4d980205471782dbd4195c353ecf862074599807c7b4f6cfd2fa94ac98f54e20"
+"generated/uses/4.input.schema" = "1b52b18d01f6b7db54d7253ccc8742722d3ac41e665cf2baf78335f2b6ac8485"
+"generated/uses/4.output.schema" = "a90dc8f0ea9e433e46698f24bbdbef0e36147d770f448fe2581973a78f15c472"
+"module.wasm" = "6ec5b98426a5d409c585cc565f8bbbfb708965db38d5f80ace6af00604ac1f79"

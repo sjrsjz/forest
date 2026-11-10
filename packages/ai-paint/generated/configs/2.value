@@ -1,0 +1,1 @@
+{"api_key": "", "endpoint": "https://api.siliconflow.cn/v1/images/generations", "model": "Kwai-Kolors/Kolors", "sizes": {"landscape": "1440x720", "portrait": "720x1440", "square": "1024x1024"}, "steps": 20}

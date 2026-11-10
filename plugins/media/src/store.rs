@@ -12,8 +12,8 @@ async fn sql(sql: &str, parameters: Vec<SqlValue>) -> Result<SqlRows, Error> {
     .remove(0))
 }
 
-pub async fn initialize() -> Result<(), Error> {
-    sql("CREATE TABLE IF NOT EXISTS media (reference TEXT PRIMARY KEY, source TEXT, mime TEXT, bytes BLOB, error TEXT, CHECK ((mime IS NULL) = (bytes IS NULL)), CHECK (source IS NOT NULL OR bytes IS NOT NULL))", vec![]).await?;
+pub async fn initialize() -> Result<(), forest_sdk::HostError> {
+    host::sqlite(vec![SqlStatement { sql: "CREATE TABLE IF NOT EXISTS media (reference TEXT PRIMARY KEY, source TEXT, mime TEXT, bytes BLOB, error TEXT, CHECK ((mime IS NULL) = (bytes IS NULL)), CHECK (source IS NOT NULL OR bytes IS NOT NULL))".into(), parameters: vec![] }]).await??;
     Ok(())
 }
 

@@ -1,0 +1,2 @@
+schema T0 = {allowed_groups: [i64], bot_name: optional string, high_water: i64, low_water: i64};
+export T0;

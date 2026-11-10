@@ -99,11 +99,7 @@ fn package(
         destination.join("module.wasm"),
     )
     .unwrap();
-    std::fs::write(
-        destination.join("manifest.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&destination, &manifest).unwrap();
 }
 async fn configure<T: AsValue + AsSchema>(store: &ConfigStore, key: &str, value: &T) {
     store

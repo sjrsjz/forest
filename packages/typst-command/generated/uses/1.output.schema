@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {Dispatch(string), InvalidConfiguration(string), InvalidMessage(string), Media(string), OneBot(variant {Api {message: optional string, retcode: i32, wording: optional string}, Decode(string), Encode(string), GroupDenied, Protocol(string), Submitted, Transport(string)})}), Ok({message_id: i32})};
+export T0;

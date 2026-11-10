@@ -1,0 +1,48 @@
+[package]
+id = "/module/npucraft"
+version = "0.1.0"
+name = "NPUCraft help"
+description = "Exact map and server help replies"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[configs]]
+key = "/settings"
+schema = "generated/configs/0.schema"
+default = "generated/configs/0.value"
+
+[configs.access]
+readers = ["self"]
+writers = ["/user/admin"]
+
+[[provides]]
+path = "/group_message"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = true
+
+[provides.access]
+callers = ["/core/onebot"]
+
+[[uses]]
+object = "/core/onebot"
+interface = "/send_group_message"
+input = "generated/uses/0.input.schema"
+output = "generated/uses/0.output.schema"
+
+[[subscriptions]]
+source = "/core/onebot"
+event = "/group_message"
+interface = "/group_message"
+
+[sha256]
+"generated/configs/0.schema" = "faf2c074a2ea96224febe2dc1f37e5d648e2d7bff8652fcb53a65b65e2797c25"
+"generated/configs/0.value" = "f945c21cf9168cc4e48f658b681fbe257437dca8bd455949f6fd61d7a8f054b0"
+"generated/lifecycle-error.schema" = "096a225fb87b29283f239e73446179199723e3808cfb9b9b4efdc2b7925ae7db"
+"generated/provides/0.input.schema" = "0fb47ece9fe29014ae572e9bd5f5aaee5248e81d68c6385f5e416581422048fe"
+"generated/provides/0.output.schema" = "42c17661422958d2eadc811723a8fb07f7875d89f52469b77bfdf5ebeee60261"
+"generated/uses/0.input.schema" = "d5e578a594814cf7fe162cb497110d22abc5d04f8436af0085255b3113d37841"
+"generated/uses/0.output.schema" = "27d66d278af0d580ff4c2058f85012e950201dc8cb7c2ee8e92a9ee494d39584"
+"module.wasm" = "478e975206215c71c6cdad7fa2ee5ebc137b16096a5871a10468d5655b93c723"

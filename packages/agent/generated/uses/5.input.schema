@@ -1,0 +1,2 @@
+schema T0 = {ids: [{group: i64, sequence: i64}], images: bool};
+export T0;

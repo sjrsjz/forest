@@ -1,0 +1,2 @@
+schema T0 = {api_key: string, endpoint: string, model: string, multimodal: bool, output_limit: variant {CompletionTokens(i64), ProviderDefault, Tokens(i64)}, reasoning_effort: optional string};
+export T0;

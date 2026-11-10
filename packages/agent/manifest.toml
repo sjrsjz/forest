@@ -1,0 +1,166 @@
+[package]
+id = "/module/agent"
+version = "0.1.0"
+name = "Group Agent"
+description = "One working loop per group, queued continuation and append-only active context"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[configs]]
+key = "/settings"
+schema = "generated/configs/0.schema"
+default = "generated/configs/0.value"
+
+[configs.access]
+readers = ["self"]
+writers = ["/user/admin"]
+
+[[configs]]
+key = "/state/sessions"
+schema = "generated/configs/1.schema"
+default = "generated/configs/1.value"
+
+[configs.access]
+readers = ["self"]
+writers = ["self"]
+
+[[provides]]
+path = "/group_message"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = true
+
+[provides.access]
+callers = ["/core/onebot"]
+
+[[provides]]
+path = "/status"
+input = "generated/provides/1.input.schema"
+output = "generated/provides/1.output.schema"
+reentrant = true
+
+[provides.access]
+callers = ["/user/admin"]
+
+[[uses]]
+object = "/module/memory"
+interface = "/accept"
+input = "generated/uses/0.input.schema"
+output = "generated/uses/0.output.schema"
+
+[[uses]]
+object = "/module/memory"
+interface = "/archive"
+input = "generated/uses/1.input.schema"
+output = "generated/uses/1.output.schema"
+
+[[uses]]
+object = "/module/memory"
+interface = "/link"
+input = "generated/uses/2.input.schema"
+output = "generated/uses/2.output.schema"
+
+[[uses]]
+object = "/module/memory"
+interface = "/delivery"
+input = "generated/uses/3.input.schema"
+output = "generated/uses/3.output.schema"
+
+[[uses]]
+object = "/module/memory"
+interface = "/recall"
+input = "generated/uses/4.input.schema"
+output = "generated/uses/4.output.schema"
+
+[[uses]]
+object = "/module/memory"
+interface = "/project"
+input = "generated/uses/5.input.schema"
+output = "generated/uses/5.output.schema"
+
+[[uses]]
+object = "/module/context"
+interface = "/format"
+input = "generated/uses/6.input.schema"
+output = "generated/uses/6.output.schema"
+
+[[uses]]
+object = "/module/openai-provider"
+interface = "/capabilities"
+input = "generated/uses/7.input.schema"
+output = "generated/uses/7.output.schema"
+
+[[uses]]
+object = "/module/openai-provider"
+interface = "/complete"
+input = "generated/uses/8.input.schema"
+output = "generated/uses/8.output.schema"
+
+[[uses]]
+object = "/module/agent-tools"
+interface = "/describe"
+input = "generated/uses/9.input.schema"
+output = "generated/uses/9.output.schema"
+
+[[uses]]
+object = "/module/agent-tools"
+interface = "/invoke"
+input = "generated/uses/10.input.schema"
+output = "generated/uses/10.output.schema"
+
+[[uses]]
+object = "/module/message-output"
+interface = "/send"
+input = "generated/uses/11.input.schema"
+output = "generated/uses/11.output.schema"
+
+[[uses]]
+object = "/module/message-output"
+interface = "/send_markdown"
+input = "generated/uses/12.input.schema"
+output = "generated/uses/12.output.schema"
+
+[[subscriptions]]
+source = "/core/onebot"
+event = "/group_message"
+interface = "/group_message"
+
+[sha256]
+"generated/configs/0.schema" = "75353109b1ef3d0755d9fe44e5972be0a0826c3d93ceee9b660f3375d908d5af"
+"generated/configs/0.value" = "0a1d0e2be7f2f5e939dbf24e2daa5f460df4b9b4aa9a75955caeab0da5c3488d"
+"generated/configs/1.schema" = "7789420b34cb5dba5705e4deee5d66201d84ffcb6c01ead806c299a51754c825"
+"generated/configs/1.value" = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+"generated/lifecycle-error.schema" = "4449c55994c31d38618ab8dec33533d44370271392eee7cf4b6927c430edcbcc"
+"generated/provides/0.input.schema" = "0fb47ece9fe29014ae572e9bd5f5aaee5248e81d68c6385f5e416581422048fe"
+"generated/provides/0.output.schema" = "441f23aebad904c0cbbea6c268fd56fcade43d080f74929a1f947897acdc6eea"
+"generated/provides/1.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/provides/1.output.schema" = "ba4f362e6a22e603f55fcf5ac0a5b17c1cc0d5637a56cebe07274b901ed2b6cc"
+"generated/uses/0.input.schema" = "5e8587b63b0ff0ce75621b867b3b044078f798afc98438968d160fde16b21d90"
+"generated/uses/0.output.schema" = "cb6159ae95ccff9f9d9687ac853b321e3957036f21742d79a13bc1165b14d4d8"
+"generated/uses/1.input.schema" = "f245aa9be1cc9dd79b1ce84359bf43a3650c9b2f072ff9334e52bf526beda971"
+"generated/uses/1.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
+"generated/uses/10.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/uses/10.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/uses/11.input.schema" = "5cafdedb374c5999aae12caa4c9d14a7a4b8d51625e9a2423566175e0256523d"
+"generated/uses/11.output.schema" = "faccf627556765863ac86619e88778a123fbc4f3884ae665fb7a412ff7499d01"
+"generated/uses/12.input.schema" = "2f4a8795e3adab7f5160cf7000e5da042021fece7a7c468be3c729657c47b982"
+"generated/uses/12.output.schema" = "4ec8b26e014658ea6ebb3fbc59abe061ad3e6734b9db826694c160c83d451cf8"
+"generated/uses/2.input.schema" = "9e679638649f9e5d97a08ae998e04a7df43b7b51b1f79d73be69207ff5b8183e"
+"generated/uses/2.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
+"generated/uses/3.input.schema" = "4732bf399813b8b94e2c14a5911253185f6d2c5c45eaa50ea435e4e2998d6b39"
+"generated/uses/3.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
+"generated/uses/4.input.schema" = "b5c5c734fa8fdb8778ac40f843d87a26b112ae5300ec797690681d1d872ab231"
+"generated/uses/4.output.schema" = "0191ea943f25a403d9cff17d5e1d25785ee36e2a326c8067d681ed316037c55f"
+"generated/uses/5.input.schema" = "b580dfed16a613170eb4f89da6ca8644f9625074f49f08237fcbae0ddd11dfce"
+"generated/uses/5.output.schema" = "7c6f528adda1fb7477f37e833cae673e93233d922427a61b04aa8a3bdf347377"
+"generated/uses/6.input.schema" = "86c1c998b4e7e175a3ee30bbe847ae8720db8fe848e0caca61ea6791299fbe65"
+"generated/uses/6.output.schema" = "b7a536fd0d7014eef6efbc1719d300de595fa1089ced7d30484e1ce8888ed0e6"
+"generated/uses/7.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/uses/7.output.schema" = "373308d2b9992b852772f26b7ae184963d27974fa7087662af858b5a82f06499"
+"generated/uses/8.input.schema" = "54289721ec74eb1068076c943729f11b43c7475444695e4b750c2ee286c74009"
+"generated/uses/8.output.schema" = "1929375b15a2d02e3f233e3bdb571da0be4d2594c0e663d799eca3f4f7b67c11"
+"generated/uses/9.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/uses/9.output.schema" = "c3ecdf449969f0e70891bdcdfb95c9811f3012454d9ea2a955148f9988444695"
+"module.wasm" = "bebed6a2bcfe9cc7334e1b0155c307c79ec805a55a41168b3012059109395a0b"

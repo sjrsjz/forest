@@ -1,0 +1,69 @@
+[package]
+id = "/module/typst"
+version = "0.1.0"
+name = "Typst"
+description = "Typeset documents and equations into managed PNG references"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[configs]]
+key = "/settings"
+schema = "generated/configs/0.schema"
+default = "generated/configs/0.value"
+
+[configs.access]
+readers = ["self"]
+writers = ["/user/admin"]
+
+[[provides]]
+path = "/render"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = false
+
+[provides.access]
+callers = [
+    "/module/agent-tools",
+    "/module/typst-command",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/typeset"
+input = "generated/provides/1.input.schema"
+output = "generated/provides/1.output.schema"
+reentrant = false
+
+[provides.access]
+callers = [
+    "/module/markdown",
+    "/user/admin",
+]
+
+[[uses]]
+object = "/module/media"
+interface = "/put"
+input = "generated/uses/0.input.schema"
+output = "generated/uses/0.output.schema"
+
+[[uses]]
+object = "/module/media"
+interface = "/get"
+input = "generated/uses/1.input.schema"
+output = "generated/uses/1.output.schema"
+
+[sha256]
+"generated/configs/0.schema" = "baff5b4ae4b36ae807a0133d0a969372528fd26978e076c4a8ee527b8de54fbb"
+"generated/configs/0.value" = "99d09b43d1b5e3c2b9860757fc066623c0724fae1aaa5a849a8db16717176dfc"
+"generated/lifecycle-error.schema" = "f3f6ecc916257093d629cb46d8d239c08f5db65d4b0789ee33d3e49621e25c6f"
+"generated/provides/0.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
+"generated/provides/0.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
+"generated/provides/1.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/provides/1.output.schema" = "4850e767c897c34c66c0a7744cb340250c3514d0c8c066bcc064ef7f82b64ee5"
+"generated/uses/0.input.schema" = "cff0a1a18caf701633563cd5622d4a49e1e3eb4fc33326c1c3b37257e2b4ed22"
+"generated/uses/0.output.schema" = "3800a6ddd2264b2d2570bd230d9bf00de97e3bcc731fb45fe48feb5a30a53c9f"
+"generated/uses/1.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/uses/1.output.schema" = "4d980205471782dbd4195c353ecf862074599807c7b4f6cfd2fa94ac98f54e20"
+"module.wasm" = "3d4560fa7641b727194d48a0698ee0e2aada0ae92dbd2d3fc5cf847717696c59"

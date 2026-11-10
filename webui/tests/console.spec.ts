@@ -89,7 +89,7 @@ test('module management: inspect local package, reload, unload and load', async 
     const packages = page.getByRole('dialog', { name: '本地包', exact: true })
     await packages.getByLabel('包目录').selectOption('forest-test')
     await expect(packages.locator('.load-plan')).toContainText('已加载')
-    await packages.getByRole('button', { name: 'Manifest', exact: true }).click()
+    await packages.getByRole('button', { name: 'manifest.toml', exact: true }).click()
     await expect(packages.locator('.manifest-text')).toContainText(object)
     await page.screenshot({ path: 'test-results/packages.png' })
     await page.keyboard.press('Escape')

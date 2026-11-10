@@ -86,7 +86,7 @@ impl Core {
         object: &Token,
         mode: StopMode,
         package: Option<Package>,
-    ) -> Result<oneshot::Receiver<std::result::Result<(), String>>> {
+    ) -> Result<oneshot::Receiver<std::result::Result<(), crate::InstanceFailure>>> {
         let (completion, receive) = oneshot::channel();
         let mut directory = self.directory.lock().unwrap();
         if let Some(package) = &package {
@@ -127,7 +127,10 @@ impl Core {
                 inbox: VecDeque::new(),
                 completion,
             },
-            None => After::Unload(completion),
+            None => After::Unload {
+                completion,
+                failure: None,
+            },
         };
         if mode == StopMode::Force {
             live.instance.force.store(true, Ordering::Release);
@@ -304,8 +307,14 @@ impl Core {
         );
         true
     }
-    pub(crate) fn begin_releasing(&self, instance: &Arc<Instance>, error: Option<DispatchError>) {
-        let error = error.unwrap_or(DispatchError::Interrupted);
+    pub(crate) fn begin_releasing(
+        &self,
+        instance: &Arc<Instance>,
+        error: Option<crate::InstanceFailure>,
+    ) {
+        let reported = error.clone();
+        let failure = error.unwrap_or_else(|| DispatchError::Interrupted.into());
+        let error = failure.dispatch_error(&instance.object);
         let mut directory = self.directory.lock().unwrap();
         let Slot {
             published,
@@ -322,17 +331,24 @@ impl Core {
                         request.outcome.settle(Err(error.clone()));
                     }
                 }
-                let _ = completion.send(Err(error.to_string()));
-                After::Fail(error.to_string())
+                let _ = completion.send(Err(failure.clone()));
+                After::Fail(failure)
             }
             State::Serving(live) => {
                 live.reject_queued(&error);
-                After::Fail(error.to_string())
+                After::Fail(failure)
             }
             State::Stopping { live, after, .. } => {
                 live.reject_queued(&error);
                 after
             }
+            State::Destroying {
+                after: After::Unload { completion, .. },
+                ..
+            } => After::Unload {
+                completion,
+                failure: reported,
+            },
             State::Destroying { after, .. } => after,
             _ => unreachable!("driver releases its live instance once"),
         };
@@ -367,8 +383,11 @@ impl Core {
             };
             assert_eq!(current.id, instance.id);
             match after {
-                After::Unload(completion) => {
-                    let _ = completion.send(Ok(()));
+                After::Unload {
+                    completion,
+                    failure,
+                } => {
+                    let _ = completion.send(failure.map_or(Ok(()), Err));
                     None
                 }
                 After::Fail(reason) => {
@@ -438,8 +457,10 @@ mod tests {
                 version: "test".into(),
                 name: None,
                 description: None,
+                ..Default::default()
             },
             module: "module.wasm".into(),
+            lifecycle_error: <std::convert::Infallible>::as_schema(),
             configs: vec![],
             uses: vec![],
             subscriptions: vec![],
@@ -456,6 +477,7 @@ mod tests {
         let access = Arc::new(AccessTables::compile(&manifest).unwrap());
         let instance = core
             .instance(Package {
+                sha256: "0".repeat(64),
                 manifest: manifest.clone(),
                 access: access.clone(),
                 // This test exercises admission and ownership; it never executes guest code.

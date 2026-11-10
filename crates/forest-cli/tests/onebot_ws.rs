@@ -52,11 +52,7 @@ async fn run(root: &std::path::Path, restricted: bool) {
         package.join("module.wasm"),
     )
     .unwrap();
-    std::fs::write(
-        package.join("manifest.json"),
-        serde_json::to_vec(&forest_test::manifest()).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&package, &forest_test::manifest()).unwrap();
     let second_package = temp.path().join("second-package");
     std::fs::create_dir(&second_package).unwrap();
     std::fs::copy(
@@ -67,11 +63,7 @@ async fn run(root: &std::path::Path, restricted: bool) {
     let mut second_manifest = forest_test::manifest();
     second_manifest.package.id = "/module/second-root".parse().unwrap();
     second_manifest.subscriptions.clear();
-    std::fs::write(
-        second_package.join("manifest.json"),
-        serde_json::to_vec(&second_manifest).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&second_package, &second_manifest).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (ready, initialized) = tokio::sync::oneshot::channel();

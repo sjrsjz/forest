@@ -50,12 +50,8 @@ fn artifacts(destination: &Path) -> [PathBuf; 2] {
 }
 fn write_package(path: &Path, manifest: &Manifest, artifact: &Path) {
     std::fs::create_dir_all(path).unwrap();
-    std::fs::write(
-        path.join("manifest.json"),
-        serde_json::to_vec(manifest).unwrap(),
-    )
-    .unwrap();
     std::fs::copy(artifact, path.join("module.wasm")).unwrap();
+    forest_package::write(&path, manifest).unwrap();
 }
 async fn phase(scheduler: &Scheduler, object: &str, expected: ModulePhase) {
     let object = object.parse().unwrap();
@@ -131,7 +127,7 @@ async fn local_packages_load_dependencies_and_replace_code_without_losing_config
     write_package(&packages.join("consumer"), &consumer, &first);
     let invalid = packages.join("invalid");
     std::fs::create_dir(&invalid).unwrap();
-    std::fs::write(invalid.join("manifest.json"), "bad manifest").unwrap();
+    std::fs::write(invalid.join("manifest.toml"), "bad manifest").unwrap();
     let bad_wasm = packages.join("bad-wasm");
     write_package(
         &bad_wasm,

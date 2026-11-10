@@ -91,16 +91,12 @@ async fn real_wasm_scoring_batches_errors_and_drain_reload() {
     let temp = tempfile::tempdir().unwrap();
     let directory = temp.path().join("package");
     std::fs::create_dir(&directory).unwrap();
-    std::fs::write(
-        directory.join("manifest.json"),
-        serde_json::to_vec(&manifest()).unwrap(),
-    )
-    .unwrap();
     std::fs::copy(
         workspace.join("target/wasm32-unknown-unknown/debug/forest_qwen_vl_reranker.wasm"),
         directory.join("module.wasm"),
     )
     .unwrap();
+    forest_package::write(&directory, &manifest()).unwrap();
     let (started, waiting) = oneshot::channel();
     let (release, blocked) = oneshot::channel();
     let remote: Remote = Arc::new(Mutex::new((

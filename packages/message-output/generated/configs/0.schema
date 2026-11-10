@@ -1,0 +1,2 @@
+schema T0 = {character_threshold: i64, enabled_by_default: bool, groups: [{enabled: bool, group_id: i64}], line_threshold: i64};
+export T0;

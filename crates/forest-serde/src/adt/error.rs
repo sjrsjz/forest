@@ -29,6 +29,9 @@ pub enum PayloadKind {
 /// Conversion failures are data; formatting does not determine their meaning.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecodeError {
+    InvalidValue {
+        message: String,
+    },
     TypeMismatch {
         expected: ValueKind,
         actual: ValueKind,
@@ -84,6 +87,7 @@ impl DecodeError {
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidValue { message } => f.write_str(message),
             Self::TypeMismatch { expected, actual } => {
                 write!(f, "expected {expected:?}, got {actual:?}")
             }

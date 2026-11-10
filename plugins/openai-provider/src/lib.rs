@@ -14,11 +14,10 @@ pub struct OpenAi {
 }
 
 impl Module for OpenAi {
-    async fn create(context: CreateContext) -> Result<Self, String> {
-        let settings = host::config_get(context.object, SETTINGS.parse().unwrap())
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
+    type LifecycleError = forest_sdk::HostError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
+        let settings = host::config_get(context.object, SETTINGS.parse().unwrap()).await??;
         Ok(Self { settings })
     }
 
@@ -102,8 +101,10 @@ pub fn manifest() -> Manifest {
                 "Typed messages and native function tools; configured model and image capability"
                     .into(),
             ),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <OpenAi as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: SETTINGS.parse().unwrap(),
             schema: Settings::as_schema(),

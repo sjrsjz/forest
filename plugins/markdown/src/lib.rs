@@ -11,7 +11,9 @@ use std::rc::Rc;
 
 pub struct Markdown;
 impl Module for Markdown {
-    async fn create(_: CreateContext) -> Result<Self, String> {
+    type LifecycleError = std::convert::Infallible;
+
+    async fn create(_: CreateContext) -> Result<Self, Self::LifecycleError> {
         Ok(Self)
     }
     fn handlers() -> Handlers<Self> {
@@ -95,8 +97,10 @@ pub fn manifest() -> Manifest {
             description: Some(
                 "Source-preserving Markdown, typed message links and rich blocks".into(),
             ),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Markdown as Module>::LifecycleError::as_schema(),
         configs: vec![],
         provides: Markdown::handlers().declarations(),
         uses: vec![InterfaceUse {

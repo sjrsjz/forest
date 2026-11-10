@@ -20,6 +20,7 @@ pub enum LocalPackage {
     Ready {
         directory: String,
         manifest: Manifest,
+        source: String,
     },
     Invalid {
         directory: String,
@@ -60,12 +61,9 @@ impl Packages {
         );
         Ok(path)
     }
-    async fn manifest(&self, name: &str) -> Result<Manifest> {
+    async fn manifest(&self, name: &str) -> Result<forest_package::Description> {
         let path = self.directory(name).await?;
-        let manifest: Manifest =
-            serde_json::from_slice(&tokio::fs::read(path.join("manifest.json")).await?)?;
-        manifest.validate()?;
-        Ok(manifest)
+        Ok(tokio::task::spawn_blocking(move || forest_package::describe(path)).await??)
     }
     pub async fn list(&self) -> Result<Vec<LocalPackage>> {
         let mut directories = tokio::fs::read_dir(&self.root).await?;
@@ -79,9 +77,10 @@ impl Packages {
                 .into_string()
                 .map_err(|_| anyhow::anyhow!("package directory name is not UTF-8"))?;
             result.push(match self.manifest(&directory).await {
-                Ok(manifest) => LocalPackage::Ready {
+                Ok(description) => LocalPackage::Ready {
                     directory,
-                    manifest,
+                    manifest: description.manifest,
+                    source: description.source,
                 },
                 Err(error) => LocalPackage::Invalid {
                     directory,
@@ -100,13 +99,14 @@ impl Packages {
         Ok(result)
     }
     pub async fn plan(&self, name: &str) -> Result<Plan> {
-        let root = self.manifest(name).await?.package.id;
+        let root = self.manifest(name).await?.manifest.package.id;
         let mut manifests = Vec::new();
         let mut directories = HashMap::new();
         for package in self.list().await? {
             if let LocalPackage::Ready {
                 directory,
                 manifest,
+                ..
             } = package
             {
                 directories.insert(manifest.package.id.clone(), directory);
@@ -172,6 +172,7 @@ impl Packages {
             LocalPackage::Ready {
                 directory,
                 manifest,
+                ..
             } if &manifest.package.id == object => Some(directory),
             _ => None,
         });

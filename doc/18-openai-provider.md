@@ -75,7 +75,7 @@ cargo run --offline --locked -p forest-openai-provider --bin package-openai-prov
 cargo test --offline --locked -p forest-openai-provider --test wasm
 ```
 
-生成包位于 `packages/openai-provider`。Manifest 从相同处理器注册表生成，并同时输出 `complete.input.schema`、`complete.output.schema`、`capabilities.input.schema`、`capabilities.output.schema`，供独立读取接口的 Schema 语言契约。Wasm 工件忽略提交。管理台可以发现并加载该包；配置表中的连接设置可经 `/user/admin` 来源和 writers 鉴权后编辑，保存后显式重载 Provider 使用新连接，见[宿主调试台](14-inspection-webui.md)。
+生成包位于 `packages/openai-provider`。`manifest.toml` 从相同处理器注册表生成，引用 `generated/provides/` 下的输入、输出 Schema 和 `generated/configs/` 下的配置 Schema/Value，供独立读取 Forest 文本契约；引用文件均纳入 SHA-256 索引。Wasm 工件忽略提交。管理台可以发现并加载该包；配置表中的连接设置可经 `/user/admin` 来源和 writers 鉴权后编辑，保存后显式重载 Provider 使用新连接，见[宿主调试台](14-inspection-webui.md)。
 
 隔离在线验证程序读取上述 Settings JSON，加载实际 Wasm 包，以两次模型调用完成一个本地 echo 工具往返：
 

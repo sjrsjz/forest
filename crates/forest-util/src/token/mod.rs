@@ -20,6 +20,8 @@ mod pattern;
 #[cfg(feature = "serde")]
 mod serde;
 mod text;
+#[cfg(feature = "forest")]
+mod value;
 
 pub use path::Token;
 pub use pattern::{PatternSegment, TokenPattern};

@@ -28,22 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         package.join("module.wasm"),
     )?;
     let manifest = forest_typst_command::manifest();
-    std::fs::write(
-        package.join("manifest.json"),
-        serde_json::to_vec_pretty(&manifest)?,
-    )?;
-    for interface in &manifest.provides {
-        let name = interface.path.to_string();
-        for (direction, schema) in [("input", &interface.input), ("output", &interface.output)] {
-            std::fs::write(
-                package.join(format!(
-                    "{}.{direction}.schema",
-                    name.trim_start_matches('/')
-                )),
-                schema.to_string(),
-            )?;
-        }
-    }
+    forest_package::write(&package, &manifest)?;
     println!("{}", package.display());
     Ok(())
 }

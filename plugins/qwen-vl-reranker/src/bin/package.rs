@@ -29,22 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         directory.join("module.wasm"),
     )?;
     let manifest = forest_qwen_vl_reranker::manifest();
-    std::fs::write(
-        directory.join("manifest.json"),
-        serde_json::to_vec_pretty(&manifest)?,
-    )?;
-    for interface in &manifest.provides {
-        let name = interface.path.to_string();
-        for (direction, schema) in [("input", &interface.input), ("output", &interface.output)] {
-            std::fs::write(
-                directory.join(format!(
-                    "{}.{direction}.schema",
-                    name.trim_start_matches('/')
-                )),
-                schema.to_string(),
-            )?;
-        }
-    }
+    forest_package::write(&directory, &manifest)?;
     println!("{}", directory.display());
     Ok(())
 }

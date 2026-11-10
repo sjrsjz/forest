@@ -1,0 +1,2 @@
+schema T0 = i64;
+export T0;

@@ -27,7 +27,7 @@ Agent 由多个独立 Wasm 包协作实现：Agent 管理工作循环，Memory �
 | `/module/qwen-vl-embedding` | `/embed` | 固定模型、2048 维文本或图片向量 |
 | `/module/qwen-vl-reranker` | `/rank` | 文本或图片相关性评分，供 Memory 筛选种子 |
 
-公共契约见各包中的 `manifest.json` 和 `*.schema`。Rust 调用方持有本地类型映射，不链接其他插件实现；其他语言使用同一 Schema/Value 和固定 Wasm ABI。
+公共契约见各包中的 `manifest.toml` 和 `*.schema`。Rust 调用方持有本地类型映射，不链接其他插件实现；其他语言使用同一 Schema/Value 和固定 Wasm ABI。
 
 ## 2. 实际会话流程
 

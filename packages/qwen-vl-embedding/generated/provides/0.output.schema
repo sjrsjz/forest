@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {Count {actual: i64, expected: i64}, Dimensions {actual: i64, index: i64}, Host(string), Http {request_id: optional string, status: i32}, InvalidVector {index: i64}, ModelMismatch(string), NotConfigured, Response(string)}), Ok({json: string})};
+export T0;

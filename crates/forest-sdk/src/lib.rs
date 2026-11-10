@@ -5,6 +5,7 @@ mod operation;
 #[doc(hidden)]
 pub mod runtime;
 
+pub use forest_protocol::service::ServiceError;
 pub use forest_protocol::{
     self as protocol, AsSchema, AsValue, CallContext, CreateContext, DispatchError, DispatchResult,
     Invocation, Token, Value,
@@ -13,14 +14,35 @@ pub use forest_serde::{DeriveSchema, DeriveValue};
 pub use handlers::Handlers;
 pub use operation::Operation;
 
+/// Keeps the dispatch and resource failure layers intact in module error types.
+#[derive(Clone, Debug, PartialEq, Eq, DeriveSchema, DeriveValue)]
+pub enum HostError {
+    Dispatch(DispatchError),
+    Service(ServiceError),
+}
+
+impl From<DispatchError> for HostError {
+    fn from(error: DispatchError) -> Self {
+        Self::Dispatch(error)
+    }
+}
+impl From<ServiceError> for HostError {
+    fn from(error: ServiceError) -> Self {
+        Self::Service(error)
+    }
+}
+
 use std::{future::Future, rc::Rc};
 
 /// An owned Rc enters each async handler: no whole-module mutable borrow is
 /// retained across a yield. State mutation uses ordinary scoped Rust borrowing.
 pub trait Module: Sized + 'static {
-    fn create(context: CreateContext) -> impl Future<Output = Result<Self, String>> + 'static;
+    type LifecycleError: AsSchema + AsValue;
+    fn create(
+        context: CreateContext,
+    ) -> impl Future<Output = Result<Self, Self::LifecycleError>> + 'static;
     fn handlers() -> Handlers<Self>;
-    fn destroy(self: Rc<Self>) -> impl Future<Output = Result<(), String>> + 'static {
+    fn destroy(self: Rc<Self>) -> impl Future<Output = Result<(), Self::LifecycleError>> + 'static {
         async { Ok(()) }
     }
 }

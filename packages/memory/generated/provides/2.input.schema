@@ -1,0 +1,2 @@
+schema T0 = {message_id: i32, self_id: i64, turn: {group: i64, sequence: i64}};
+export T0;

@@ -8,6 +8,7 @@ pub struct Package {
     pub(crate) manifest: Arc<Manifest>,
     pub(crate) module: wasmtime::Module,
     pub(crate) access: Arc<AccessTables>,
+    pub(crate) sha256: String,
 }
 pub(crate) struct AccessTables {
     pub config: AclTable,
@@ -37,18 +38,12 @@ impl Package {
         &self.manifest
     }
     pub(crate) async fn read(engine: &wasmtime::Engine, root: &Path) -> Result<Self> {
-        let root = tokio::fs::canonicalize(root)
-            .await
-            .context("package directory")?;
-        let manifest: Manifest =
-            serde_json::from_slice(&tokio::fs::read(root.join("manifest.json")).await?)?;
-        manifest.validate()?;
-        let artifact = tokio::fs::canonicalize(root.join(&manifest.module)).await?;
-        ensure!(
-            artifact.starts_with(&root),
-            "Wasm artifact escapes package directory"
-        );
-        let bytes = tokio::fs::read(&artifact).await?;
+        let root = root.to_owned();
+        let forest_package::PackageData {
+            manifest,
+            module: bytes,
+            sha256,
+        } = tokio::task::spawn_blocking(move || forest_package::read(root)).await??;
         let engine = engine.clone();
         let module =
             tokio::task::spawn_blocking(move || wasmtime::Module::new(&engine, bytes)).await??;
@@ -124,6 +119,7 @@ impl Package {
             manifest: Arc::new(manifest),
             module,
             access,
+            sha256,
         })
     }
 

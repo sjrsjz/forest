@@ -1,0 +1,2 @@
+schema T0 = {font_size_pt: i32, max_page_pixels: i64, max_pages: i32, page_width_pt: i32, pixels_per_point: i32};
+export T0;

@@ -64,4 +64,4 @@ let restored = State::<String>::from_value(value)?;
 - 原生目标保留 `stacksafe` 调用栈增长；Wasm 目标不依赖原生栈切换，递归受其执行栈限制。当前不承诺任意深度的输入可成功处理。
 - 尚未扩展浮点数和无符号整数。
 - 文本中的字符串由迭代扫描确定边界，再按 JSON 规则解码；较长的转义字符串不递归推进词法器，配置提示词可按同一无损文本格式编辑。
-- JSON 用于外部声明及可读 SQLite 数据，固定 bincode 编码用于[Wasm ABI](13-runtime-and-sdk.md)。ABI 没有版本协商，宿主、SDK 和插件应配套构建。单例身份由 Manifest 的对象 Token 确定；热重载要求配置键集合与 Schema 等价，允许更新默认值并保留当前值。
+- 包声明使用 TOML，引用的 Schema 和默认 Value 使用 Forest 文本；JSON 用于可读 SQLite 数据，固定 bincode 编码用于[Wasm ABI](13-runtime-and-sdk.md)。ABI 没有版本协商，宿主、SDK 和插件应配套构建。单例身份由 Manifest 的对象 Token 确定；热重载要求配置键集合与 Schema 等价，允许更新默认值并保留当前值。

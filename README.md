@@ -2,7 +2,7 @@
 
 Forest 是基于 Rust 与 WebAssembly 的模块化 Bot 框架。微内核负责调度、生命周期、接口契约、访问控制和宿主资源；消息处理、Agent、记忆、模型调用及工具由独立 Wasm 插件实现。
 
-模块通过外部 Manifest 声明身份、接口、依赖、配置和事件订阅，以 Forest Schema/Value 作为跨语言契约。调用方只依赖接口声明，不链接目标模块的实现。
+模块通过外部 `manifest.toml` 声明身份、元信息、接口、依赖、配置和事件订阅。Schema 与默认值引用 Forest 文本文件，包内文件使用 SHA-256 校验。调用方只依赖语言无关的接口契约，不链接目标模块的实现。
 
 ## 特性
 
@@ -44,7 +44,7 @@ cargo build --locked -j 2 -p forest-cli
 cargo run --locked -j 2 -p forest-test --bin package
 ```
 
-最后一条命令生成示例包的 `module.wasm`、`manifest.json` 和接口 Schema。构建 WebUI：
+最后一条命令生成示例包的 `module.wasm`、`manifest.toml`，以及 `generated/` 下的 Schema 和默认 Value 文本。包格式见[模块 Manifest](doc/07-module-manifest.md)。构建 WebUI：
 
 ```sh
 pnpm --dir webui install --frozen-lockfile
@@ -106,9 +106,9 @@ Shell 需要单独配置授权用户和群。Agent 输出使用 Markdown 专用�
 
 | 路径 | 内容 |
 | --- | --- |
-| `crates/` | 序列化、配置、协议、SDK、运行时、宿主管理与 CLI |
+| `crates/` | 序列化、配置、协议、包读写、SDK、运行时、宿主管理与 CLI |
 | `plugins/` | 独立 Wasm 插件及其本地接口类型映射 |
-| `packages/` | 插件 Manifest、接口 Schema 和生成的 Wasm 工件 |
+| `packages/` | 插件 TOML Manifest、Forest Schema/Value 和生成的 Wasm 工件 |
 | `webui/` | Vue/TypeScript 管理前端 |
 | `scripts/` | 插件构建脚本 |
 | `deploy/` | Linux 服务模板和部署配置 |

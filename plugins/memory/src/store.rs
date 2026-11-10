@@ -38,15 +38,15 @@ pub fn decode<T: DeserializeOwned>(value: &str) -> Result<T, Error> {
 pub async fn execute(statements: Vec<SqlStatement>) -> Result<Vec<SqlRows>, Error> {
     Ok(host::sqlite(statements).await??)
 }
-pub async fn initialize() -> Result<(), Error> {
-    execute(
+pub async fn initialize() -> Result<(), forest_sdk::HostError> {
+    host::sqlite(
         include_str!("schema.sql")
             .split(';')
             .filter(|s| !s.trim().is_empty())
             .map(|s| stmt(s, vec![]))
             .collect(),
     )
-    .await?;
+    .await??;
     Ok(())
 }
 pub fn unit(row: &[SqlValue]) -> Result<MemoryUnit, Error> {

@@ -274,7 +274,7 @@ impl Control {
                         LifecycleSnapshot::Stopping { .. } => Phase::Stopping,
                         LifecycleSnapshot::Destroying { .. } => Phase::Destroying,
                         LifecycleSnapshot::Releasing { .. } => Phase::Releasing,
-                        LifecycleSnapshot::Failed { reason } => Phase::Failed(reason),
+                        LifecycleSnapshot::Failed { reason, .. } => Phase::Failed(reason),
                     },
                     queued: (m.queued_next + m.interfaces.iter().map(|i| i.queued).sum::<usize>())
                         as i64,
@@ -301,6 +301,7 @@ impl Control {
                 CatalogPackage::Ready {
                     directory,
                     manifest,
+                    ..
                 } => LocalPackage::Ready {
                     directory,
                     object: manifest.package.id.to_string(),

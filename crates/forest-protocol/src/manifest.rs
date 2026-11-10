@@ -7,13 +7,14 @@ use std::collections::HashSet;
 pub struct Manifest {
     pub package: PackageInfo,
     pub module: String,
+    pub lifecycle_error: Schema,
     pub configs: Vec<ConfigDeclaration>,
     pub provides: Vec<InterfaceDeclaration>,
     pub uses: Vec<InterfaceUse>,
     pub subscriptions: Vec<EventSubscription>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackageInfo {
     pub id: Token,
@@ -22,6 +23,22 @@ pub struct PackageInfo {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(rename = "license-file", skip_serializing_if = "Option::is_none")]
+    pub license_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

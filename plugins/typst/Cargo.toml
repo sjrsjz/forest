@@ -29,3 +29,6 @@ forest-runtime = { path = "../../crates/forest-runtime" }
 forest-config = { path = "../../crates/forest-config" }
 tempfile = "3.23.0"
 tokio.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+forest-package = { path = "../../crates/forest-package" }

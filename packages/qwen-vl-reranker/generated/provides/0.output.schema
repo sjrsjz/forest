@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {Host(string), Http {body: string, request_id: optional string, status: i32}, NotConfigured, Response(string)}), Ok({json: string})};
+export T0;

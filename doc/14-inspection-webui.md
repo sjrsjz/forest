@@ -71,6 +71,8 @@ CLI 在创建控制台时授予 `scheduler.config_writer("/user/admin")`；来�
 | 对象 Token、名称、发布标记 | 已发布 Manifest |
 | 生命周期 | 当前 State 的只读投影 |
 | 执行实例标识、实例工件标记 | 当前实例；重载时与已发布声明分别显示 |
+| Wasm SHA-256 | 当前实例实际装载并校验的工件字节 |
+| 作者、仓库、许可证 | 已发布 Manifest 中的可选元信息 |
 | 旧集合排队数 | 当前 Live 的各接口 FIFO |
 | 下一实例排队数 | Reload/Creating 的交接队列 |
 | 已占用请求名额、输入字节及上限 | 当前对象 Budget 的观测 |
@@ -182,13 +184,13 @@ WebUI 通过宿主控制接口访问运行时，不为界面引入专用 Wasm �
 
 ### 6.1 本地包与装卸入口
 
-宿主通过 `--packages-directory` 指定包根目录，默认 `packages`。控制台枚举其直接子目录中的 Manifest，不执行 Wasm、不缓存编译结果或维护第二份已加载目录。列表保留无效 Manifest 的具体错误；一个无关坏包不妨碍其他包加载。同一对象出现多个候选时拒绝有歧义的装载规划。
+宿主通过 `--packages-directory` 指定包根目录，默认 `packages`。控制台通过统一的 `forest-package` 读取其直接子目录中的 `manifest.toml`，校验并解析引用的声明文件，不执行 Wasm、不缓存编译结果或维护第二份已加载目录。列表保留无效 Manifest 的具体错误；一个无关坏包不妨碍其他包加载。同一对象出现多个候选时拒绝有歧义的装载规划。
 
-包以根目录下的目录名选择，模块身份始终来自 Manifest 的 package.id。服务器限制路径在指定根目录内；接口不接受任意宿主文件路径。查看 Manifest 和依赖预览只读取声明；执行时才编译所需 Wasm。依赖顺序复用调度器的纯规划算法，执行时重新检查实际编译包和当前目录，不把预览视为预留。
+包以根目录下的目录名选择，模块身份始终来自 Manifest 的 package.id。服务器限制路径在指定根目录内；接口不接受任意宿主文件路径。查看 Manifest 展示原始 TOML，依赖预览使用已解析的声明；执行时先校验包的全部索引文件，再编译所需 Wasm。依赖顺序复用调度器的纯规划算法，执行时重新检查实际编译包和当前目录，不把预览视为预留。
 
 | 接口 | 行为 |
 |---|---|
-| GET /api/modules/packages | 列出本地包及完整 Manifest，坏包显示错误 |
+| GET /api/modules/packages | 列出本地包、已解析 Manifest 及 TOML 原文，坏包显示错误 |
 | POST /api/modules/plan | 按目录选择根包，返回依赖优先的装载顺序 |
 | POST /api/modules/load | 编译根包所需闭包，交给现有 load_roots |
 | POST /api/modules/reload | 指定目标对象、候选目录及 StopMode，执行现有 reload |

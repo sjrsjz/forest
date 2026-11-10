@@ -27,3 +27,6 @@ forest-media = { path = "../media" }
 tokio.workspace = true
 axum = "0.8.8"
 tempfile = "3.23.0"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+forest-package = { path = "../../crates/forest-package" }

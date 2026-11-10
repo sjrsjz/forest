@@ -1,0 +1,2 @@
+schema T0 = {anime_model: string, anime_negative_prompt: string, auth_token: string, default_model: string, endpoint: string, photo_model: string, photo_negative_prompt: string, sizes: {landscape: string, portrait: string, square: string}, steps: i32};
+export T0;

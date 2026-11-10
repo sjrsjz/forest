@@ -17,7 +17,9 @@ pub const OBJECT: &str = "/module/onebot-tools";
 pub struct OneBotTools;
 
 impl Module for OneBotTools {
-    async fn create(_: CreateContext) -> Result<Self, String> {
+    type LifecycleError = std::convert::Infallible;
+
+    async fn create(_: CreateContext) -> Result<Self, Self::LifecycleError> {
         Ok(Self)
     }
 
@@ -311,8 +313,10 @@ pub fn manifest() -> Manifest {
             description: Some(
                 "Account, group and member queries and explicit Markdown messaging".into(),
             ),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <OneBotTools as Module>::LifecycleError::as_schema(),
         configs: vec![],
         provides: OneBotTools::handlers().declarations(),
         uses: vec![

@@ -4,7 +4,8 @@
 
 | crate | 职责 |
 |---|---|
-| forest-protocol | 外部 Manifest、调度异常、操作数据和固定字节编码 |
+| forest-protocol | 已解析的 Manifest、调度异常、操作数据和固定字节编码 |
+| forest-package | 宿主侧 TOML 读写、Forest 文本引用解析及包文件 SHA-256 校验 |
 | forest-sdk | 类型化处理器、来宾 Future、固定导出和唤醒 |
 | forest-runtime | 唯一装载目录、请求接纳、实例执行权、生命周期、鉴权和资源 |
 | forest-cli | 启动参数、网关连接和 v11 API 回执关联 |
@@ -18,7 +19,7 @@ rustup target add wasm32-unknown-unknown
 cargo run -p forest-test --bin package --locked
 ```
 
-打包程序编译 `plugins/forest-test`，生成 `packages/forest-test/module.wasm` 和外部 `manifest.json`。接口声明从同一份类型化处理器注册表产生，仍可在不执行 Wasm 的情况下读取。二进制构建产物不进入 Git。
+打包程序编译 `plugins/forest-test`，通过 `forest-package` 生成 `packages/forest-test/module.wasm`、外部 `manifest.toml` 和 `generated/` 下的 Schema/Value 文本。接口声明从同一份类型化处理器注册表产生，可在不执行 Wasm 的情况下读取。CLI、包目录和运行时共用包读取器；实际装载前校验全部索引文件，编译使用已校验的同一份 Wasm 字节。格式与可选作者、仓库、许可证等元信息见[模块 Manifest](07-module-manifest.md)。二进制构建产物不进入 Git。
 
 正向 WebSocket 可同时收事件与调用 API：
 
@@ -58,6 +59,7 @@ Rust SDK 是可选的语言绑定。模块不链接调度器，也不链接被�
 实际 Rust 示例见 [forest-test](../plugins/forest-test/src/lib.rs)。实现 `forest_sdk::Module`：
 
 - `create(CreateContext)` 返回模块对象，可以恢复配置表中的状态。
+- `type LifecycleError: AsSchema + AsValue` 声明 create/destroy 的模块错误类型，其 Schema 写入 Manifest 的 `lifecycle_error`。无失败路径可用 `Infallible`。
 - `handlers()` 用 `Handlers::with` 注册路径、重入属性、访问规则和具体 Rust 异步函数；输入和完整 `Result<T, E>` 的 Schema 从函数类型生成。
 - `destroy(Rc<Self>)` 可选，默认无操作。
 - `export_module!` 生成固定 ABI 导出。
@@ -119,7 +121,11 @@ trap 后保留 Failed 槽位，回收实例，不自动重启；外部可 load �
 
 buffer 低 32 位为指针，高 32 位为长度。输入由宿主经 guest alloc 分配、复制、传入入口、guest free 归还；输出由 SDK 分配，宿主复制解码后 guest free。Force/trap 后不得再执行 free 等任何来宾辅助函数。
 
-create 输入为 CreateContext，invoke 为 Invocation，两者只建立任务。poll 推进 Future，返回 `Pending`、`Output(Value)`、`Lifecycle(Result<(), String>)` 或 `FrameTooLarge`。最后一种表示结果无法用 wasm32 帧长度表达，调度器仅以 `DispatchError::FrameTooLarge` 结束该调用，不把它视为模块 trap。参数和结果收尾均属于同一次独占推进。
+create 输入为 CreateContext，invoke 为 Invocation，两者只建立任务。poll 推进 Future，返回 `Pending`、`Output(Value)`、`Lifecycle(Result<(), Value>)` 或 `FrameTooLarge`。生命周期错误值必须符合当前实例 Manifest 的 `lifecycle_error`；不匹配返回 `OutputContract`。`FrameTooLarge` 表示结果无法用 wasm32 帧长度表达，调度器只结束该调用，不把它视为模块 trap。参数和结果收尾均属于同一次独占推进。
+
+模块主动返回的生命周期错误由 `InstanceFailure::Lifecycle` 保留发生阶段、Schema 与原始 Value；运行时异常由 `InstanceFailure::Dispatch` 保留 DispatchError。`Scheduler::failure`、管理操作及 Inspector 均保留这一结构，日志和页面中的文字只是显示投影。初始化失败时，等待新实例的普通调用得到 `Unavailable`，不会把生命周期错误冒充为接口返回的 E。正常卸载完成资源释放后，仍会向管理调用者报告 destroy 的主动失败。热重载可采用不同的生命周期错误 Schema，错误始终携带所属实例的契约，不按模块名称重新解释。
+
+SDK 的 `HostError` 分别保存 `DispatchError` 与 `ServiceError`，模块可以直接将它作为生命周期错误，或嵌入自己的错误枚举。配置和数据库错误不需要在 create/destroy 中转换为字符串。
 
 ABI 结构与操作结构采用 `forest_protocol::abi` 固定小端、定长整数 bincode 编码；接口值和配置值仍是 Forest Schema/Value。帧长度按 wasm32 的 `u32` 表达，不另设 16 MiB 的固定传输上限。解码受实际输入字节长度约束并拒绝尾随字节，指针与长度必须对应实例线性内存中的有效范围；实例内存与待处理请求仍分别受运行时内存配额、队列字节配额约束。编码长度无法表达时返回调度错误，不能由 SDK `expect` 引发模块 panic。此边界没有版本协商。
 

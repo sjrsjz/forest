@@ -41,11 +41,7 @@ async fn group_command_uses_real_wasm_native_acl_http_and_persistent_configurati
     let package = temp.path().join("package");
     std::fs::create_dir(&package).unwrap();
     std::fs::copy(artifact(), package.join("module.wasm")).unwrap();
-    std::fs::write(
-        package.join("manifest.json"),
-        serde_json::to_vec(&forest_test::manifest()).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&package, &forest_test::manifest()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap())
         .parse()

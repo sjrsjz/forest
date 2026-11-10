@@ -6,7 +6,7 @@ publish.workspace = true
 
 [dependencies]
 forest-serde = { path = "../forest-serde" }
-forest-util = { path = "../forest-util", features = ["serde"] }
+forest-util = { path = "../forest-util", features = ["serde", "forest"] }
 serde.workspace = true
 serde_json.workspace = true
 bincode.workspace = true

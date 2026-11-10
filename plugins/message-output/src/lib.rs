@@ -61,7 +61,9 @@ pub struct Output {
     object: Token,
 }
 impl Module for Output {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = std::convert::Infallible;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         Ok(Self {
             object: context.object,
         })
@@ -248,8 +250,10 @@ pub fn manifest() -> Manifest {
             description: Some(
                 "Native and Markdown output with per-group long-message forwarding".into(),
             ),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Output as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: "/settings".parse().unwrap(),
             schema: Settings::as_schema(),

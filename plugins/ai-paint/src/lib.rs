@@ -64,15 +64,26 @@ pub struct Painter {
     client: api::Client,
 }
 
-async fn setting<T: AsValue>(object: &Token, key: &str) -> Result<T, String> {
-    host::config_get(object.clone(), key.parse().unwrap())
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+async fn setting<T: AsValue>(object: &Token, key: &str) -> Result<T, forest_sdk::HostError> {
+    Ok(host::config_get(object.clone(), key.parse().unwrap()).await??)
+}
+
+pub use api::ConfigurationError;
+#[derive(Clone, Debug, forest_serde::DeriveSchema, forest_serde::DeriveValue)]
+pub enum LifecycleError {
+    Host(forest_sdk::HostError),
+    Configuration(ConfigurationError),
+}
+impl From<forest_sdk::HostError> for LifecycleError {
+    fn from(error: forest_sdk::HostError) -> Self {
+        Self::Host(error)
+    }
 }
 
 impl Module for Painter {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = LifecycleError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         let backend: config::Backend = setting(&context.object, config::BACKEND).await?;
         let client = match backend {
             config::Backend::OpenAiImages => {
@@ -85,7 +96,7 @@ impl Module for Painter {
                 api::Client::SwarmUi(setting(&context.object, config::SWARM_UI).await?)
             }
         };
-        client.validate()?;
+        client.validate().map_err(LifecycleError::Configuration)?;
         Ok(Self { client })
     }
     fn handlers() -> Handlers<Self> {
@@ -148,8 +159,10 @@ pub fn manifest() -> Manifest {
                 "SwarmUI, Nano-Banana-compatible and SiliconFlow image generation into managed media"
                     .into(),
             ),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Painter as Module>::LifecycleError::as_schema(),
         configs: vec![
             declaration(config::BACKEND, config::Backend::SiliconFlow),
             declaration(config::OPENAI_IMAGES, config::OpenAiImages::default()),

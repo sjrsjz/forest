@@ -93,11 +93,7 @@ async fn markdown_wasm_renders_real_math_tables_code_and_styling() {
         dir.join("module.wasm"),
     )
     .unwrap();
-    std::fs::write(
-        dir.join("manifest.json"),
-        serde_json::to_vec(&forest_markdown::manifest()).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&dir, &forest_markdown::manifest()).unwrap();
     scheduler
         .load(scheduler.package(&dir).await.unwrap())
         .await

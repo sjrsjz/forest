@@ -143,11 +143,7 @@ async fn wasm_markdown_output_preserves_nodes_and_partial_delivery() {
             dir.join("module.wasm"),
         )
         .unwrap();
-        std::fs::write(
-            dir.join("manifest.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
+        forest_package::write(&dir, &manifest).unwrap();
         s.load(s.package(&dir).await.unwrap()).await.unwrap();
     }
     let source = "[reply](forest:reply/70/-9)[alice](forest:at/7)[smile](forest:face/14)\n\n$$\\frac{a}{b}$$\n\n|a|b|\n|-|-|\n|1|2|\n\n```rust\nlet x = 1;\n```\n\n---\n\n```text\nfail-render\n```\n";

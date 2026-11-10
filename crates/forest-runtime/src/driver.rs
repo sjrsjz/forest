@@ -1,10 +1,10 @@
+use crate::{InstanceFailure, LifecyclePhase};
 use crate::{
     core::{Core, Instance, Started, StopMode},
     ready::TaskSignal,
     services::Resources,
     wasm::{Begin, Frame, Wasm},
 };
-use anyhow::{Result, bail, ensure};
 use forest_protocol::{
     abi::{self, Step},
     *,
@@ -25,8 +25,16 @@ struct GuestTask {
     started: Started,
 }
 struct Fault {
-    error: DispatchError,
+    error: InstanceFailure,
     tasks: Vec<GuestTask>,
+}
+impl From<InstanceFailure> for Fault {
+    fn from(error: InstanceFailure) -> Self {
+        Self {
+            error,
+            tasks: vec![],
+        }
+    }
 }
 
 pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
@@ -35,7 +43,7 @@ pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
         let result = match &resources {
             Ok(resources) => run_guest(&core, &instance, resources.clone()).await,
             Err(error) => Err(Fault {
-                error: DispatchError::ExecutionFailed(error.to_string()),
+                error: DispatchError::ExecutionFailed(error.to_string()).into(),
                 tasks: vec![],
             }),
         };
@@ -43,7 +51,7 @@ pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
             Ok(()) => (None, vec![]),
             Err(Fault { error, tasks }) => (
                 Some(if instance.force.load(Ordering::Acquire) {
-                    DispatchError::Interrupted
+                    DispatchError::Interrupted.into()
                 } else {
                     error
                 }),
@@ -51,7 +59,12 @@ pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
             ),
         };
         if let Some(error) = &error {
-            let level = if matches!(error, DispatchError::Interrupted) {
+            let level = if matches!(
+                error,
+                InstanceFailure::Dispatch {
+                    error: DispatchError::Interrupted
+                }
+            ) {
                 service::LogLevel::Info
             } else {
                 service::LogLevel::Error
@@ -63,7 +76,9 @@ pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
             );
         }
         core.begin_releasing(&instance, error.clone());
-        let error = error.unwrap_or(DispatchError::Interrupted);
+        let error = error
+            .unwrap_or_else(|| DispatchError::Interrupted.into())
+            .dispatch_error(&instance.object);
         let mut held = Vec::new();
         for task in retired {
             instance.mailbox.retire(task.signal.id);
@@ -106,7 +121,7 @@ async fn run_guest(
     .map_err(fault)?;
     lifecycle(&mut wasm, instance, initial.clone(), Begin::Create(&input))
         .await
-        .map_err(fault)?;
+        .map_err(Fault::from)?;
     instance.operations.finish_task(initial.id).await;
     instance.mailbox.retire(initial.id);
     core.activate(instance).map_err(fault)?;
@@ -177,7 +192,7 @@ async fn run_guest(
                 };
                 tasks.insert(task.signal.id, task);
                 return Err(Fault {
-                    error,
+                    error: error.into(),
                     tasks: tasks.into_values().collect(),
                 });
             }
@@ -187,7 +202,7 @@ async fn run_guest(
 
     if stop == StopMode::Force || instance.force.load(Ordering::Acquire) {
         return Err(Fault {
-            error: DispatchError::Interrupted,
+            error: DispatchError::Interrupted.into(),
             tasks: tasks.into_values().collect(),
         });
     }
@@ -212,7 +227,7 @@ async fn run_guest(
     let cleanup = instance.mailbox.register(next);
     let result = lifecycle(&mut wasm, instance, cleanup.clone(), Begin::Destroy).await;
     instance.mailbox.retire(cleanup.id);
-    result.map_err(fault)
+    result.map_err(Fault::from)
 }
 
 enum TaskEntry {
@@ -235,24 +250,40 @@ async fn lifecycle(
     instance: &Instance,
     signal: Arc<TaskSignal>,
     begin: Begin<'_>,
-) -> Result<()> {
+) -> std::result::Result<(), InstanceFailure> {
+    let phase = match &begin {
+        Begin::Create(_) => LifecyclePhase::Create,
+        Begin::Destroy => LifecyclePhase::Destroy,
+        _ => unreachable!("lifecycle begins with create or destroy"),
+    };
     instance.mailbox.consume_wake(signal.id);
     let mut step = wasm
         .advance(own_frame(instance, signal.clone()), begin)
-        .await?;
+        .await
+        .map_err(|error| fault(error).error)?;
     loop {
         match step {
-            Step::Lifecycle(result) => return result.map_err(anyhow::Error::msg),
-            Step::Output(_) => bail!("lifecycle returned ordinary interface output"),
+            Step::Lifecycle(Ok(())) => return Ok(()),
+            Step::Lifecycle(Err(error)) => {
+                let schema = &instance.package.manifest.lifecycle_error;
+                if !error.check(schema, false) {
+                    return Err(DispatchError::OutputContract.into());
+                }
+                return Err(InstanceFailure::Lifecycle {
+                    phase,
+                    schema: schema.clone(),
+                    error,
+                });
+            }
+            Step::Output(_) => return Err(DispatchError::OutputContract.into()),
             Step::FrameTooLarge => return Err(DispatchError::FrameTooLarge.into()),
             Step::Pending => {}
         }
         loop {
             let notified = instance.mailbox.changed.notified();
-            ensure!(
-                !instance.force.load(Ordering::Acquire),
-                "externally interrupted"
-            );
+            if instance.force.load(Ordering::Acquire) {
+                return Err(DispatchError::Interrupted.into());
+            }
             if instance.mailbox.contains_wake(signal.id) {
                 break;
             }
@@ -261,12 +292,13 @@ async fn lifecycle(
         instance.mailbox.consume_wake(signal.id);
         step = wasm
             .advance(own_frame(instance, signal.clone()), Begin::Resume)
-            .await?;
+            .await
+            .map_err(|error| fault(error).error)?;
     }
 }
 fn fault(error: impl std::fmt::Display) -> Fault {
     Fault {
-        error: DispatchError::ExecutionFailed(error.to_string()),
+        error: DispatchError::ExecutionFailed(error.to_string()).into(),
         tasks: vec![],
     }
 }

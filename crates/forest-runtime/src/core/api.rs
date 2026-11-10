@@ -85,7 +85,7 @@ impl Scheduler {
             .get(object)
             .map(|s| s.state.phase())
     }
-    pub fn failure(&self, object: &Token) -> Option<String> {
+    pub fn failure(&self, object: &Token) -> Option<crate::InstanceFailure> {
         self.core
             .directory
             .lock()
@@ -198,14 +198,14 @@ impl Scheduler {
         receive
             .await
             .context("module driver stopped during initialization")?
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::new)
     }
     pub async fn unload(&self, object: &Token, mode: StopMode) -> Result<()> {
         let receive = self.core.stop(object, mode, None)?;
         receive
             .await
             .context("module driver stopped during unload")?
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::new)
     }
     pub async fn reload(&self, package: Package, mode: StopMode) -> Result<()> {
         let object = package.manifest.package.id.clone();
@@ -213,7 +213,7 @@ impl Scheduler {
         receive
             .await
             .context("module driver stopped during reload")?
-            .map_err(anyhow::Error::msg)
+            .map_err(anyhow::Error::new)
     }
     pub fn force(&self, object: &Token) -> Result<()> {
         let mut directory = self.core.directory.lock().unwrap();

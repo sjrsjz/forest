@@ -1,0 +1,38 @@
+[package]
+id = "/module/qwen-vl-embedding"
+version = "0.1.0"
+name = "Qwen VL Embedding"
+description = "Qwen3-VL-Embedding-8B, 2048 dimensions, L2 normalized"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[configs]]
+key = "/connection"
+schema = "generated/configs/0.schema"
+default = "generated/configs/0.value"
+
+[configs.access]
+readers = ["self"]
+writers = ["/user/admin"]
+
+[[provides]]
+path = "/embed"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/**",
+    "/user/admin",
+]
+
+[sha256]
+"generated/configs/0.schema" = "e09ef218369ed83bbb44403c7a43cfa1a80e0fe7562d214d51fbb0f5783dc723"
+"generated/configs/0.value" = "78c59171afb2a428659751adc1c0b2d1057de3fd5213740d645c363f19f75869"
+"generated/lifecycle-error.schema" = "096a225fb87b29283f239e73446179199723e3808cfb9b9b4efdc2b7925ae7db"
+"generated/provides/0.input.schema" = "9937d432940a63c7b7fb0c9fe3cd8737d5f24b692bed46e976816b76f4e5eb2e"
+"generated/provides/0.output.schema" = "5e660b70c3f379ccbe7413453d019ed6f00c2a2ab5b48e0cfe0f7c6bf42f7378"
+"module.wasm" = "1047f318a6dbcc7dca82b7fabb1c319c7b968a6f6378441d2cba198b023839d2"

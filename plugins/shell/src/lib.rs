@@ -22,7 +22,9 @@ pub struct Shell {
     object: Token,
 }
 impl Module for Shell {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = std::convert::Infallible;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         Ok(Self {
             object: context.object,
         })
@@ -256,8 +258,10 @@ pub fn manifest() -> Manifest {
             version: "0.1.0".into(),
             name: Some("Group shell".into()),
             description: Some("Authorized Forest administration over group messages".into()),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Shell as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: "/settings".parse().unwrap(),
             schema: Settings::as_schema(),

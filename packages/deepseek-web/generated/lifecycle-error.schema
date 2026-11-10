@@ -1,0 +1,2 @@
+schema T0 = variant {Host(variant {Dispatch(variant {Denied, ExecutionFailed(string), FrameTooLarge, HostStopped, InputContract, InterfaceNotFound(string), Interrupted, LifecycleRestricted, ObjectNotFound(string), OutputContract, QueueFull, Unavailable(string)}), Service(variant {InUse, InvalidInput(string), NotFound, Storage(string), Transport(string)})}), InvalidEndpoint};
+export T0;

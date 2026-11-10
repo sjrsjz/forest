@@ -1,0 +1,75 @@
+[package]
+id = "/module/media"
+version = "0.1.0"
+name = "Managed media"
+description = "Persistent image bytes and stable source references"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[provides]]
+path = "/acquire"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = false
+
+[provides.access]
+callers = ["self"]
+
+[[provides]]
+path = "/get"
+input = "generated/provides/1.input.schema"
+output = "generated/provides/1.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/**",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/put"
+input = "generated/provides/2.input.schema"
+output = "generated/provides/2.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/typst",
+    "/module/ai-paint",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/register"
+input = "generated/provides/3.input.schema"
+output = "generated/provides/3.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/memory",
+    "/user/admin",
+]
+
+[[uses]]
+object = "/module/media"
+interface = "/acquire"
+input = "generated/uses/0.input.schema"
+output = "generated/uses/0.output.schema"
+
+[sha256]
+"generated/lifecycle-error.schema" = "096a225fb87b29283f239e73446179199723e3808cfb9b9b4efdc2b7925ae7db"
+"generated/provides/0.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/provides/0.output.schema" = "2198e5eac0a7a566d3dea4911e4de7e7b3a17ce27e156ffe4f59aa6594497b1b"
+"generated/provides/1.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/provides/1.output.schema" = "4d980205471782dbd4195c353ecf862074599807c7b4f6cfd2fa94ac98f54e20"
+"generated/provides/2.input.schema" = "cff0a1a18caf701633563cd5622d4a49e1e3eb4fc33326c1c3b37257e2b4ed22"
+"generated/provides/2.output.schema" = "3800a6ddd2264b2d2570bd230d9bf00de97e3bcc731fb45fe48feb5a30a53c9f"
+"generated/provides/3.input.schema" = "d7833d639fb5420f14f6750e7b7c9b3e739059df2151094b3c2307fdd4d41ab4"
+"generated/provides/3.output.schema" = "2198e5eac0a7a566d3dea4911e4de7e7b3a17ce27e156ffe4f59aa6594497b1b"
+"generated/uses/0.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/uses/0.output.schema" = "2198e5eac0a7a566d3dea4911e4de7e7b3a17ce27e156ffe4f59aa6594497b1b"
+"module.wasm" = "c4c2f7d8a6ee4af7369cc035e00672a5010b6d324e78a577d23f45ca6b28b30c"

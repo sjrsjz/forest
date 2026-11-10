@@ -7,6 +7,8 @@ publish.workspace = true
 [features]
 default = []
 serde = ["dep:serde"]
+forest = ["dep:forest-serde"]
 
 [dependencies]
 serde = { workspace = true, optional = true }
+forest-serde = { path = "../forest-serde", optional = true }

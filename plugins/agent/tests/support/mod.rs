@@ -414,11 +414,6 @@ impl Harness {
                 .unwrap();
             let dir = root.path().join(artifact);
             std::fs::create_dir(&dir).unwrap();
-            std::fs::write(
-                dir.join("manifest.json"),
-                serde_json::to_vec(&manifest).unwrap(),
-            )
-            .unwrap();
             std::fs::copy(
                 workspace.join(format!(
                     "target/wasm32-unknown-unknown/{}/{artifact}.wasm",
@@ -431,6 +426,7 @@ impl Harness {
                 dir.join("module.wasm"),
             )
             .unwrap();
+            forest_package::write(&dir, &manifest).unwrap();
             eprintln!("Loading test package {id}");
             packages.insert(id.to_string(), scheduler.package(dir).await.unwrap());
         }

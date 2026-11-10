@@ -39,11 +39,12 @@ Wasm 实例有线性内存等运行状态，但它们不会自动跨实例销毁
 
 ```text
 plugin/
-├── manifest.json    # 包身份、工件位置、配置与 ACL、接口契约、宿主事件接收声明
-└── module.wasm      # 实际包内位置由 Manifest 指定
+├── manifest.toml    # 包身份、元信息、文件引用、ACL、事件订阅和 SHA-256
+├── module.wasm      # 实际包内位置由 Manifest 指定
+└── generated/       # Rust 打包器生成的 Schema 与默认 Value 文本
 ```
 
-Manifest 顶层为 `package`、`module`、`configs`、`provides`、`uses`、`subscriptions`。接口契约、宿主事件接收声明、配置 Schema、默认值和 ACL 对宿主外部可见，不依赖执行描述导出函数才能取得。生命周期入口和逻辑方法到 Wasm 入口的映射由统一 ABI 规定，Manifest 不逐包配置这些名字。当前不引入 ABI 版本字段，也不包含 UI 配置。
+磁盘 Manifest 顶层为 `package`、`module`、`configs`、`provides`、`uses`、`subscriptions`、`sha256`，其中空声明列表可以省略。`module.lifecycle-error`、接口契约、配置 Schema 和默认值均为 Forest 文本文件引用。宿主侧 `forest-package` 负责读取、摘要校验和解析，向内核提供含完整 Schema/Value 的 Manifest。生命周期入口和逻辑方法到 Wasm 入口的映射由统一 ABI 规定，Manifest 不逐包配置这些名字，不包含 ABI 版本或 UI 配置。
 
 配置声明还包含各项允许读取、写入的主体规则。插件声明谁可以访问自己的配置，宿主装载并执行，不以插件申请自身配置访问权替代资源声明。规则属于插件元数据，普通配置写入不能改变，详见[配置访问声明](06-config-access.md)。
 

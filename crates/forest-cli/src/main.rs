@@ -200,12 +200,12 @@ async fn main() -> Result<()> {
     if let Some(mut directories) = directories {
         while let Some(entry) = directories.next_entry().await? {
             if entry.file_type().await?.is_dir()
-                && entry.path().join("manifest.json").is_file()
-                && entry.path().join("module.wasm").is_file()
+                && entry.path().join(forest_package::MANIFEST_FILE).is_file()
             {
-                let candidate: forest_protocol::Manifest = serde_json::from_slice(
-                    &tokio::fs::read(entry.path().join("manifest.json")).await?,
-                )?;
+                let path = entry.path();
+                let candidate =
+                    tokio::task::spawn_blocking(move || forest_package::read_manifest(path))
+                        .await??;
                 if !roots.contains(&candidate.package.id) {
                     declarations.push((entry.path(), candidate));
                 }

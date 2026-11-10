@@ -1,6 +1,6 @@
 # Forest 文档
 
-本目录说明 Forest 的使用方式、模块契约和架构。构建入口见[项目 README](../README.md)；模块接口的机器可读契约位于各包的 `manifest.json` 与 `*.schema` 文件中。
+本目录说明 Forest 的使用方式、模块契约和架构。构建入口见[项目 README](../README.md)；模块的机器可读契约位于各包的 `manifest.toml` 及其引用的 Forest `*.schema`、`*.value` 文本中。
 
 ## 使用与部署
 
@@ -23,7 +23,7 @@
 | [OneBot v11](04-onebot-v11.md) | API 库、宿主接入和消息契约 |
 | [配置表](05-config-table.md) | 默认值、原子操作、SQLite 存储与导入导出 |
 | [访问声明](06-config-access.md) | 配置读写、接口调用和静态 ACL |
-| [模块 Manifest](07-module-manifest.md) | 身份、接口、依赖、配置和事件订阅声明 |
+| [模块 Manifest](07-module-manifest.md) | TOML 包格式、元信息、Forest 文件引用、SHA-256 及契约声明 |
 | [宿主接口](08-host-interfaces.md) | 通信、配置、网络、文件、SQLite、日志和时间 |
 | [模块调度](09-scheduling.md) | 执行权、时间片、异步等待、重入与队列 |
 | [模块生命周期](10-module-lifecycle.md) | create/destroy、三种停止方式和故障结算 |

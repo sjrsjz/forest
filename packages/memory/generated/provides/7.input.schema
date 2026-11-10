@@ -1,0 +1,2 @@
+schema T0 = [{group: i64, sequence: i64}];
+export T0;

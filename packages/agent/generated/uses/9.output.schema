@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {Arguments(string), Execution(string), UnknownTool(string)}), Ok([{description: optional string, name: string, parameters_json: string, strict: optional bool}])};
+export T0;

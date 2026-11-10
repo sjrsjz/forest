@@ -49,7 +49,7 @@ cargo run --offline --locked -p forest-qwen-vl-embedding --bin package-qwen-vl-e
 cargo test --offline --locked -p forest-qwen-vl-embedding --test wasm
 ```
 
-打包生成 `packages/qwen-vl-embedding/manifest.json`、`module.wasm` 及 `embed.input.schema`、`embed.output.schema`。Schema 文件是接口契约的 Forest Schema 语言表示，不依赖 Rust。默认值中无真实凭据；Wasm 构建产物忽略提交。宿主调试台可以发现本地包。
+打包生成 `packages/qwen-vl-embedding/manifest.toml`、`module.wasm` 及 `generated/` 下的 Schema/Value 文本；接口输入和输出的具体文件由 Manifest 引用。文件采用 Forest Schema/Value 语言表示，不依赖 Rust，并纳入包的 SHA-256 索引。默认值中无真实凭据；Wasm 构建产物忽略提交。宿主调试台可以发现本地包。
 
 在线验证程序读取本地 Connection JSON，为隔离调度器建立临时配置库并加载实际包，发出一批请求后卸载，不连接 OneBot：
 

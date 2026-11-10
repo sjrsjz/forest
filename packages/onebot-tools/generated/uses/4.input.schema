@@ -1,0 +1,2 @@
+schema T0 = {group_id: optional i64, source: string};
+export T0;

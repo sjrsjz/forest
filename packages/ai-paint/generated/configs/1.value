@@ -1,0 +1,1 @@
+{"api_key": "", "endpoint": "https://api.openai-hk.com/v1/images/generations", "model": "nano-banana-2", "quality": "high", "sizes": {"landscape": "16x9", "portrait": "9x16", "square": "1x1"}}

@@ -27,16 +27,34 @@ pub struct Projector {
     settings: Settings,
 }
 
+#[derive(Clone, Debug, forest_serde::DeriveSchema, forest_serde::DeriveValue)]
+pub enum LifecycleError {
+    Host(forest_sdk::HostError),
+    InvalidLimits {
+        max_side: i32,
+        decode_memory_mib: i32,
+    },
+}
+impl From<forest_sdk::HostError> for LifecycleError {
+    fn from(error: forest_sdk::HostError) -> Self {
+        Self::Host(error)
+    }
+}
 impl Module for Projector {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = LifecycleError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         let settings: Settings = host::config_get(context.object, "/settings".parse().unwrap())
             .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+            .map_err(forest_sdk::HostError::Dispatch)?
+            .map_err(forest_sdk::HostError::Service)?;
         if settings.max_side <= 0 || settings.decode_memory_mib <= 0 {
-            return Err("image dimensions and decode memory must be positive".into());
+            return Err(LifecycleError::InvalidLimits {
+                max_side: settings.max_side,
+                decode_memory_mib: settings.decode_memory_mib,
+            });
         }
-        cache::initialize().await.map_err(|e| format!("{e:?}"))?;
+        cache::initialize().await?;
         Ok(Self { settings })
     }
     fn handlers() -> Handlers<Self> {
@@ -134,8 +152,10 @@ pub fn manifest() -> Manifest {
             description: Some(
                 "Configurable model-input image dimensions; persistent derived images".into(),
             ),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Projector as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: "/settings".parse().unwrap(),
             schema: Settings::as_schema(),

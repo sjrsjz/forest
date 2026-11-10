@@ -24,3 +24,6 @@ serde_json.workspace = true
 forest-runtime = { path = "../../crates/forest-runtime" }
 tokio.workspace = true
 tempfile = "3.23.0"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+forest-package = { path = "../../crates/forest-package" }

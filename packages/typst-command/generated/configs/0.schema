@@ -1,0 +1,2 @@
+schema T0 = {allowed_groups: [i64]};
+export T0;

@@ -3,6 +3,7 @@ mod configuration;
 mod core;
 mod dependencies;
 mod driver;
+mod failure;
 mod fair;
 mod io_settings;
 mod logs;
@@ -25,6 +26,7 @@ pub use core::inspection::{
 pub use core::{
     EventDefinition, ModulePhase, NativeInterface, RuntimeOptions, Scheduler, StopMode,
 };
+pub use failure::{InstanceFailure, LifecyclePhase};
 pub use forest_protocol as protocol;
 pub use io_settings::{IoLimits, IoSettings};
 pub use logs::{LogBatch, LogEntry, LogReader, LogWriter};

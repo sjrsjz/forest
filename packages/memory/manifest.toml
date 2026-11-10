@@ -1,0 +1,223 @@
+[package]
+id = "/module/memory"
+version = "0.1.0"
+name = "Memory"
+description = "Raw multi-trunk memory, multimodal indexing and bounded associative recall"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+
+[[configs]]
+key = "/settings"
+schema = "generated/configs/0.schema"
+default = "generated/configs/0.value"
+
+[configs.access]
+readers = ["self"]
+writers = ["/user/admin"]
+
+[[provides]]
+path = "/accept"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+reentrant = false
+
+[provides.access]
+callers = [
+    "/module/agent",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/archive"
+input = "generated/provides/1.input.schema"
+output = "generated/provides/1.output.schema"
+reentrant = false
+
+[provides.access]
+callers = [
+    "/module/agent",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/delivery"
+input = "generated/provides/2.input.schema"
+output = "generated/provides/2.output.schema"
+reentrant = false
+
+[provides.access]
+callers = [
+    "/module/agent",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/index/advance"
+input = "generated/provides/3.input.schema"
+output = "generated/provides/3.output.schema"
+reentrant = false
+
+[provides.access]
+callers = [
+    "self",
+    "/module/agent",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/index/rebuild"
+input = "generated/provides/4.input.schema"
+output = "generated/provides/4.output.schema"
+reentrant = false
+
+[provides.access]
+callers = ["/user/admin"]
+
+[[provides]]
+path = "/link"
+input = "generated/provides/5.input.schema"
+output = "generated/provides/5.output.schema"
+reentrant = false
+
+[provides.access]
+callers = [
+    "/module/agent",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/project"
+input = "generated/provides/6.input.schema"
+output = "generated/provides/6.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/**",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/read"
+input = "generated/provides/7.input.schema"
+output = "generated/provides/7.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/**",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/recall"
+input = "generated/provides/8.input.schema"
+output = "generated/provides/8.output.schema"
+reentrant = true
+
+[provides.access]
+callers = [
+    "/module/**",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/status"
+input = "generated/provides/9.input.schema"
+output = "generated/provides/9.output.schema"
+reentrant = true
+
+[provides.access]
+callers = ["/user/admin"]
+
+[[uses]]
+object = "/module/markdown"
+interface = "/encode"
+input = "generated/uses/0.input.schema"
+output = "generated/uses/0.output.schema"
+
+[[uses]]
+object = "/module/qwen-vl-reranker"
+interface = "/rank"
+input = "generated/uses/1.input.schema"
+output = "generated/uses/1.output.schema"
+
+[[uses]]
+object = "/module/image-projection"
+interface = "/thumbnail"
+input = "generated/uses/2.input.schema"
+output = "generated/uses/2.output.schema"
+
+[[uses]]
+object = "/module/image-projection"
+interface = "/prepare"
+input = "generated/uses/3.input.schema"
+output = "generated/uses/3.output.schema"
+
+[[uses]]
+object = "/module/media"
+interface = "/register"
+input = "generated/uses/4.input.schema"
+output = "generated/uses/4.output.schema"
+
+[[uses]]
+object = "/module/media"
+interface = "/get"
+input = "generated/uses/5.input.schema"
+output = "generated/uses/5.output.schema"
+
+[[uses]]
+object = "/module/qwen-vl-embedding"
+interface = "/embed"
+input = "generated/uses/6.input.schema"
+output = "generated/uses/6.output.schema"
+
+[[uses]]
+object = "/module/memory"
+interface = "/index/advance"
+input = "generated/uses/7.input.schema"
+output = "generated/uses/7.output.schema"
+
+[sha256]
+"generated/configs/0.schema" = "b663e77b424e17b28f58541f23088da236e5a077500365f69f596b749a681d0f"
+"generated/configs/0.value" = "82474a2bd61587f1dd5d654f233c9cb4b3eed99e439cfa5ab331cd20764416d3"
+"generated/lifecycle-error.schema" = "bf5958e438409ec980e0849ad6254e68fe1758da937b965bf24dd3eb0a8e1ee5"
+"generated/provides/0.input.schema" = "5e8587b63b0ff0ce75621b867b3b044078f798afc98438968d160fde16b21d90"
+"generated/provides/0.output.schema" = "cb6159ae95ccff9f9d9687ac853b321e3957036f21742d79a13bc1165b14d4d8"
+"generated/provides/1.input.schema" = "f245aa9be1cc9dd79b1ce84359bf43a3650c9b2f072ff9334e52bf526beda971"
+"generated/provides/1.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
+"generated/provides/2.input.schema" = "4732bf399813b8b94e2c14a5911253185f6d2c5c45eaa50ea435e4e2998d6b39"
+"generated/provides/2.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
+"generated/provides/3.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/provides/3.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
+"generated/provides/4.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/provides/4.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
+"generated/provides/5.input.schema" = "9e679638649f9e5d97a08ae998e04a7df43b7b51b1f79d73be69207ff5b8183e"
+"generated/provides/5.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
+"generated/provides/6.input.schema" = "b580dfed16a613170eb4f89da6ca8644f9625074f49f08237fcbae0ddd11dfce"
+"generated/provides/6.output.schema" = "7c6f528adda1fb7477f37e833cae673e93233d922427a61b04aa8a3bdf347377"
+"generated/provides/7.input.schema" = "f245aa9be1cc9dd79b1ce84359bf43a3650c9b2f072ff9334e52bf526beda971"
+"generated/provides/7.output.schema" = "83958dcbc0a5a4e790dee2dc7898892b3a9175a642e56dcd5c1f60e5f6acdac6"
+"generated/provides/8.input.schema" = "b5c5c734fa8fdb8778ac40f843d87a26b112ae5300ec797690681d1d872ab231"
+"generated/provides/8.output.schema" = "0191ea943f25a403d9cff17d5e1d25785ee36e2a326c8067d681ed316037c55f"
+"generated/provides/9.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/provides/9.output.schema" = "29267592858c7612b83a99d60483a554a5741fb8a3aa15b15588843cf2959caa"
+"generated/uses/0.input.schema" = "b6447a969c9e2d506bbf781066f5f9c392dfbf3b2567615dc4b872e437e16e63"
+"generated/uses/0.output.schema" = "d7373a37160e4a4a298e138576811952a0b3fa362fbf8f4b7681f2a06268665c"
+"generated/uses/1.input.schema" = "00867696c7382d09307585072378a11fc1feca4bb544aa7a18456daa00e5f5b5"
+"generated/uses/1.output.schema" = "7e278eb305706e79a28102eebf4c3e4a12966c183cd6d818d33f2cbcf9e4f5c2"
+"generated/uses/2.input.schema" = "b202f100da9a4222e7b3023d6d5460a1358441e08242821077d7753118ee148c"
+"generated/uses/2.output.schema" = "18b198487fa29abc5f9f605923f5dbca632747fb28bc12d11bb4a71bb09d949f"
+"generated/uses/3.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/uses/3.output.schema" = "18b198487fa29abc5f9f605923f5dbca632747fb28bc12d11bb4a71bb09d949f"
+"generated/uses/4.input.schema" = "d7833d639fb5420f14f6750e7b7c9b3e739059df2151094b3c2307fdd4d41ab4"
+"generated/uses/4.output.schema" = "2198e5eac0a7a566d3dea4911e4de7e7b3a17ce27e156ffe4f59aa6594497b1b"
+"generated/uses/5.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
+"generated/uses/5.output.schema" = "4d980205471782dbd4195c353ecf862074599807c7b4f6cfd2fa94ac98f54e20"
+"generated/uses/6.input.schema" = "9937d432940a63c7b7fb0c9fe3cd8737d5f24b692bed46e976816b76f4e5eb2e"
+"generated/uses/6.output.schema" = "5e660b70c3f379ccbe7413453d019ed6f00c2a2ab5b48e0cfe0f7c6bf42f7378"
+"generated/uses/7.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/uses/7.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
+"module.wasm" = "5a606662515718ffaac2c4eebf73c0d5da1c83c5f581f40bfbe23a149656d923"

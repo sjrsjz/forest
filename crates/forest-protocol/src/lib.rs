@@ -10,9 +10,12 @@ pub use forest_util::{
 };
 pub use manifest::*;
 
+use forest_serde::{DeriveSchema, DeriveValue};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, DeriveSchema, DeriveValue,
+)]
 pub enum DispatchError {
     #[error("object not found: {0}")]
     ObjectNotFound(Token),

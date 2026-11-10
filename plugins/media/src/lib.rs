@@ -18,8 +18,10 @@ pub struct Media {
 }
 
 impl Module for Media {
-    async fn create(_: CreateContext) -> Result<Self, String> {
-        store::initialize().await.map_err(|e| format!("{e:?}"))?;
+    type LifecycleError = forest_sdk::HostError;
+
+    async fn create(_: CreateContext) -> Result<Self, Self::LifecycleError> {
+        store::initialize().await?;
         Ok(Self {
             locks: RefCell::new(BTreeMap::new()),
             wake_pending: Cell::new(false),
@@ -166,8 +168,10 @@ pub fn manifest() -> Manifest {
             version: "0.1.0".into(),
             name: Some("Managed media".into()),
             description: Some("Persistent image bytes and stable source references".into()),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Media as Module>::LifecycleError::as_schema(),
         configs: vec![],
         provides: Media::handlers().declarations(),
         uses: vec![InterfaceUse {

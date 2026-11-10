@@ -1,0 +1,2 @@
+schema T0 = string;
+export T0;

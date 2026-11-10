@@ -85,7 +85,7 @@ Shell 自身的重载、卸载和强制中断通过 WebUI 执行。同步群命�
 | `/config/get` | 对象路径、键路径 | Schema、默认值、当前值的 Forest 文本 |
 | `/config/set` | 对象路径、键路径、Forest 值文本 | `()` |
 
-地址在线上 Schema 中为字符串，在宿主边界解析为 Token。所有接口返回 `Result<T, Error>`，调度失败仍走外层 DispatchResult，不使用动态字典反射或字符串操作码分派。Shell 只持有这些 Schema 的本地映射，不链接宿主管理 crate；完整使用声明在 Shell Manifest 的 uses 中，等价的 Schema 语言文件输出到 `packages/shell/control/`，其他语言无需链接 Rust 类型即可使用。
+地址在线上 Schema 中为字符串，在宿主边界解析为 Token。所有接口返回 `Result<T, Error>`，调度失败仍走外层 DispatchResult，不使用动态字典反射或字符串操作码分派。Shell 只持有这些 Schema 的本地映射，不链接宿主管理 crate；完整使用声明在 Shell Manifest 的 uses 中，等价的 Schema 语言文件输出到 `packages/shell/generated/uses/`，具体文件由 `manifest.toml` 引用。其他语言无需链接 Rust 类型即可使用。
 
 配置读取使用受信管理员调试台的显式 Inspector 权限；配置写入与 WebUI 共用绑定 `/user/admin` 的 set 路径，检查目标静态 ACL 和 Schema。没有跳过检查直接写库，模块仅授权 SelfModule 的内部状态仍不能由管理员 set。
 

@@ -1,0 +1,2 @@
+schema T0 = variant {DuplicateTool {tool: string}, Host(variant {Dispatch(variant {Denied, ExecutionFailed(string), FrameTooLarge, HostStopped, InputContract, InterfaceNotFound(string), Interrupted, LifecycleRestricted, ObjectNotFound(string), OutputContract, QueueFull, Unavailable(string)}), Service(variant {InUse, InvalidInput(string), NotFound, Storage(string), Transport(string)})}), InvalidInterface {interface: string, tool: string}, InvalidObject {object: string, tool: string}, InvalidParameters {column: i64, line: i64, message: string, tool: string}};
+export T0;

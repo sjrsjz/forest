@@ -83,11 +83,7 @@ async fn actual_wasm_scales_long_images_preserves_originals_and_reuses_persisten
         dir.join("module.wasm"),
     )
     .unwrap();
-    std::fs::write(
-        dir.join("manifest.json"),
-        serde_json::to_vec(&forest_image_projection::manifest()).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&dir, &forest_image_projection::manifest()).unwrap();
     let large = Arc::new(encoded(
         DynamicImage::ImageRgb8(RgbImage::new(1320, 10281)),
         ImageFormat::Jpeg,

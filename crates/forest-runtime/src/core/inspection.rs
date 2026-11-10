@@ -44,6 +44,14 @@ pub struct ReleaseView {
     pub version: String,
     pub name: Option<String>,
     pub description: Option<String>,
+    pub authors: Vec<String>,
+    pub repository: Option<String>,
+    pub license: Option<String>,
+    pub license_file: Option<String>,
+    pub readme: Option<String>,
+    pub homepage: Option<String>,
+    pub documentation: Option<String>,
+    pub keywords: Vec<String>,
 }
 impl From<&PackageInfo> for ReleaseView {
     fn from(info: &PackageInfo) -> Self {
@@ -51,6 +59,14 @@ impl From<&PackageInfo> for ReleaseView {
             version: info.version.clone(),
             name: info.name.clone(),
             description: info.description.clone(),
+            authors: info.authors.clone(),
+            repository: info.repository.clone(),
+            license: info.license.clone(),
+            license_file: info.license_file.clone(),
+            readme: info.readme.clone(),
+            homepage: info.homepage.clone(),
+            documentation: info.documentation.clone(),
+            keywords: info.keywords.clone(),
         }
     }
 }
@@ -58,12 +74,14 @@ impl From<&PackageInfo> for ReleaseView {
 pub struct InstanceView {
     pub id: String,
     pub release: ReleaseView,
+    pub sha256: String,
 }
 impl From<&Instance> for InstanceView {
     fn from(instance: &Instance) -> Self {
         Self {
             id: instance.id.to_string(),
             release: (&instance.package.manifest.package).into(),
+            sha256: instance.package.sha256.clone(),
         }
     }
 }
@@ -91,6 +109,7 @@ pub enum LifecycleSnapshot {
     },
     Failed {
         reason: String,
+        failure: crate::InstanceFailure,
     },
 }
 #[derive(Clone, Debug, Serialize)]
@@ -191,7 +210,8 @@ fn capture(slot: &Slot, options: &RuntimeOptions) -> CapturedModule {
         ),
         State::Failed(reason) => (
             LifecycleSnapshot::Failed {
-                reason: reason.clone(),
+                reason: reason.to_string(),
+                failure: reason.clone(),
             },
             None,
             0,

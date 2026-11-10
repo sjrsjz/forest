@@ -10,8 +10,20 @@ pub enum Client {
     SwarmUi(config::SwarmUi),
 }
 
-fn endpoint(value: &str) -> Result<url::Url, String> {
-    let url = url::Url::parse(value).map_err(|e| e.to_string())?;
+#[derive(Clone, Debug, forest_serde::DeriveSchema, forest_serde::DeriveValue)]
+pub enum ConfigurationError {
+    InvalidEndpoint,
+    InvalidSteps {
+        backend: config::Backend,
+        steps: i64,
+    },
+    InvalidDimensions {
+        size: String,
+    },
+}
+
+fn endpoint(value: &str) -> Result<url::Url, ConfigurationError> {
+    let url = url::Url::parse(value).map_err(|_| ConfigurationError::InvalidEndpoint)?;
     if !matches!(url.scheme(), "http" | "https")
         || !url.has_host()
         || !url.username().is_empty()
@@ -19,15 +31,13 @@ fn endpoint(value: &str) -> Result<url::Url, String> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err(
-            "endpoint must be an HTTP(S) URL without credentials, query or fragment".into(),
-        );
+        return Err(ConfigurationError::InvalidEndpoint);
     }
     Ok(url)
 }
 
 impl Client {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), ConfigurationError> {
         let address = match self {
             Self::OpenAiImages(c) => &c.endpoint,
             Self::SiliconFlow(c) => &c.endpoint,
@@ -36,11 +46,17 @@ impl Client {
         endpoint(address)?;
         match self {
             Self::SiliconFlow(c) if !(1..=100).contains(&c.steps) => {
-                return Err("SiliconFlow steps must be 1–100".into());
+                return Err(ConfigurationError::InvalidSteps {
+                    backend: config::Backend::SiliconFlow,
+                    steps: c.steps.into(),
+                });
             }
             Self::SwarmUi(c) => {
                 if !(1..=100).contains(&c.steps) {
-                    return Err("SwarmUI steps must be 1–100".into());
+                    return Err(ConfigurationError::InvalidSteps {
+                        backend: config::Backend::SwarmUi,
+                        steps: c.steps.into(),
+                    });
                 }
                 for size in [&c.sizes.portrait, &c.sizes.landscape, &c.sizes.square] {
                     dimensions(size)?;
@@ -126,8 +142,8 @@ impl Client {
                     Style::Photo => (&c.photo_model, c.photo_negative_prompt.as_str()),
                     Style::None => (&c.default_model, ""),
                 };
-                let (width, height) =
-                    dimensions(args.size.value(&c.sizes)).map_err(Error::Execution)?;
+                let (width, height) = dimensions(args.size.value(&c.sizes))
+                    .map_err(|error| Error::Execution(format!("{error:?}")))?;
                 #[derive(Deserialize)]
                 struct Response {
                     images: Vec<String>,
@@ -147,7 +163,7 @@ impl Client {
                     result::data_uri(&image)
                 } else {
                     let base = endpoint(&format!("{}/", c.endpoint.trim_end_matches('/')))
-                        .map_err(Error::Execution)?;
+                        .map_err(|error| Error::Execution(format!("{error:?}")))?;
                     let url = base
                         .join(&image)
                         .map_err(|e| Error::Execution(e.to_string()))?;
@@ -158,14 +174,13 @@ impl Client {
     }
 }
 
-fn dimensions(size: &str) -> Result<(u32, u32), String> {
-    let (width, height) = size
-        .split_once('x')
-        .ok_or("image size must be WIDTHxHEIGHT")?;
-    let width = width.parse().map_err(|_| "invalid image width")?;
-    let height = height.parse().map_err(|_| "invalid image height")?;
+fn dimensions(size: &str) -> Result<(u32, u32), ConfigurationError> {
+    let invalid = || ConfigurationError::InvalidDimensions { size: size.into() };
+    let (width, height) = size.split_once('x').ok_or_else(invalid)?;
+    let width = width.parse().map_err(|_| invalid())?;
+    let height = height.parse().map_err(|_| invalid())?;
     if width == 0 || height == 0 {
-        return Err("image dimensions must be positive".into());
+        return Err(invalid());
     }
     Ok((width, height))
 }

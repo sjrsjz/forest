@@ -115,11 +115,7 @@ async fn scenario() {
         directory.join("module.wasm"),
     )
     .unwrap();
-    std::fs::write(
-        directory.join("manifest.json"),
-        serde_json::to_vec(&manifest()).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&directory, &manifest()).unwrap();
 
     let (started, received) = oneshot::channel();
     let (release, released) = oneshot::channel();

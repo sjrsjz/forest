@@ -42,11 +42,7 @@ async fn malformed_generated_cq_can_be_archived_read_and_projected_by_real_wasm(
         package.join("module.wasm"),
     )
     .unwrap();
-    std::fs::write(
-        package.join("manifest.json"),
-        serde_json::to_vec(&crate::manifest()).unwrap(),
-    )
-    .unwrap();
+    forest_package::write(&package, &crate::manifest()).unwrap();
     let scheduler = Scheduler::new(
         temp.path().join("config.sqlite3"),
         RuntimeOptions {

@@ -13,6 +13,7 @@ name = "forest"
 path = "src/main.rs"
 
 [dependencies]
+forest-package = { path = "../forest-package" }
 forest-control = { path = "../forest-control" }
 forest-runtime = { path = "../forest-runtime" }
 forest-webui = { path = "../forest-webui", optional = true }

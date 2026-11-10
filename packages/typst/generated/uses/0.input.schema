@@ -1,0 +1,2 @@
+schema T0 = {"bytes": bytes, mime: string};
+export T0;

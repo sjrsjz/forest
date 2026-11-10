@@ -1,7 +1,7 @@
 use crate::{Handlers, Module};
 #[cfg(target_arch = "wasm32")]
 use forest_protocol::abi;
-use forest_protocol::{CreateContext, Invocation, Value, abi::Step};
+use forest_protocol::{AsValue, CreateContext, Invocation, Value, abi::Step};
 #[cfg(target_arch = "wasm32")]
 use serde::de::DeserializeOwned;
 use std::{
@@ -14,13 +14,13 @@ use std::{
 };
 
 pub type Task<M> = Pin<Box<dyn Future<Output = Completion<M>>>>;
-pub enum Completion<M> {
-    Created(Result<M, String>),
+pub enum Completion<M: Module> {
+    Created(Result<M, M::LifecycleError>),
     Output(Value),
-    Destroyed(Result<(), String>),
+    Destroyed(Result<(), M::LifecycleError>),
 }
 
-pub struct Runtime<M> {
+pub struct Runtime<M: Module> {
     module: Option<Rc<M>>,
     handlers: Handlers<M>,
     tasks: BTreeMap<u64, Task<M>>,
@@ -82,9 +82,11 @@ impl<M: Module> Runtime<M> {
                 self.module = Some(Rc::new(module));
                 Step::Lifecycle(Ok(()))
             }
-            Completion::Created(Err(error)) => Step::Lifecycle(Err(error)),
+            Completion::Created(Err(error)) => Step::Lifecycle(Err(error.as_value())),
             Completion::Output(value) => Step::Output(value),
-            Completion::Destroyed(result) => Step::Lifecycle(result),
+            Completion::Destroyed(result) => {
+                Step::Lifecycle(result.map_err(|error| error.as_value()))
+            }
         }
     }
 }

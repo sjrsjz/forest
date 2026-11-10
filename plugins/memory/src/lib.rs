@@ -22,6 +22,23 @@ use std::{cell::Cell, collections::BTreeMap, rc::Rc};
 use store::*;
 use types::*;
 
+#[derive(Clone, Debug, forest_serde::DeriveSchema, forest_serde::DeriveValue)]
+pub enum LifecycleError {
+    Host(forest_sdk::HostError),
+    InvalidCollectionName,
+    RetrievalJson {
+        line: i64,
+        column: i64,
+        message: String,
+    },
+    InvalidRetrievalBounds,
+}
+impl From<forest_sdk::HostError> for LifecycleError {
+    fn from(error: forest_sdk::HostError) -> Self {
+        Self::Host(error)
+    }
+}
+
 pub struct Memory {
     object: Token,
     settings: Settings,
@@ -30,22 +47,24 @@ pub struct Memory {
     index_ready: futures::lock::Mutex<bool>,
 }
 impl Module for Memory {
-    async fn create(context: CreateContext) -> Result<Self, String> {
+    type LifecycleError = LifecycleError;
+
+    async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
         let settings: Settings =
             host::config_get(context.object.clone(), "/settings".parse().unwrap())
                 .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+                .map_err(forest_sdk::HostError::Dispatch)?
+                .map_err(forest_sdk::HostError::Service)?;
         if settings.collection.is_empty()
             || !settings
                 .collection
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
         {
-            return Err("invalid collection name".into());
+            return Err(LifecycleError::InvalidCollectionName);
         }
         let retrieval = graph::Retrieval::parse(&settings.retrieval_json)?;
-        store::initialize().await.map_err(|e| format!("{e:?}"))?;
+        store::initialize().await?;
         Ok(Self {
             object: context.object,
             settings,
@@ -215,8 +234,10 @@ pub fn manifest() -> Manifest {
             description: Some(
                 "Raw multi-trunk memory, multimodal indexing and bounded associative recall".into(),
             ),
+            ..Default::default()
         },
         module: "module.wasm".into(),
+        lifecycle_error: <Memory as Module>::LifecycleError::as_schema(),
         configs: vec![ConfigDeclaration {
             key: "/settings".parse().unwrap(),
             schema: Settings::as_schema(),

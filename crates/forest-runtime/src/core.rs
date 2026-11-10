@@ -185,7 +185,7 @@ pub(crate) enum State {
         instance: Arc<Instance>,
         after: After,
     },
-    Failed(String),
+    Failed(crate::InstanceFailure),
 }
 pub(crate) struct Live {
     pub instance: Arc<Instance>,
@@ -208,15 +208,18 @@ pub(crate) enum InterfacePermit {
     Serial(SerialPermit),
 }
 pub(crate) enum After {
-    Unload(ManagementReply),
+    Unload {
+        completion: ManagementReply,
+        failure: Option<crate::InstanceFailure>,
+    },
     Reload {
         package: Package,
         inbox: VecDeque<Request>,
         completion: ManagementReply,
     },
-    Fail(String),
+    Fail(crate::InstanceFailure),
 }
-type ManagementReply = oneshot::Sender<std::result::Result<(), String>>;
+type ManagementReply = oneshot::Sender<std::result::Result<(), crate::InstanceFailure>>;
 pub(crate) enum CreatingInbox {
     Closed,
     Deferred(VecDeque<Request>),

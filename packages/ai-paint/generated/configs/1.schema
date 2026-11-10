@@ -1,0 +1,2 @@
+schema T0 = {api_key: string, endpoint: string, model: string, quality: string, sizes: {landscape: string, portrait: string, square: string}};
+export T0;
