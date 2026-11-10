@@ -130,14 +130,15 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
         assert_eq!(requests.len(), 2);
         let before = requests[0]["messages"].as_array().unwrap();
         let after = requests[1]["messages"].as_array().unwrap();
-        assert_eq!(before[1]["role"], "assistant");
+        assert_eq!(before[0]["role"], "system");
+        assert_eq!(before[1]["role"], "user");
         assert!(
-            before[1]["content"]
+            before[0]["content"]
                 .as_str()
                 .unwrap()
-                .starts_with("<think>\n")
+                .contains("\n\n---\n\n# Persona\n")
         );
-        assert!(before[1].get("reasoning_content").is_none());
+        assert!(before[0].get("reasoning_content").is_none());
         assert_eq!(&after[..before.len()], before.as_slice());
         assert_eq!(after[before.len()]["role"], "assistant");
         assert_eq!(after[before.len()]["reasoning_content"], "PRIVATE_THOUGHT");

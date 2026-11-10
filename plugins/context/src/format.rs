@@ -1,7 +1,7 @@
 use crate::markdown::Fragment;
 use crate::{
     memory::{MemoryContent, MemoryId, MemoryUnit},
-    openai::{Assistant, Content, ContentPart, ImageUrl, Message},
+    openai::{Content, ContentPart, ImageUrl, Message},
     types::{ContextItem, FormatInput, ImageInput, PromptIdentity, RecallBatch},
 };
 use forest_onebot::forest::GroupMessage;
@@ -23,15 +23,9 @@ pub(super) fn format(
         multimodal: input.multimodal,
         encoded,
     };
-    let mut result = vec![
-        Message::System {
-            content: system(&input.identity),
-        },
-        Message::Assistant(Assistant {
-            content: Some(format!(include_str!("persona.md"), persona = prompt)),
-            ..Assistant::default()
-        }),
-    ];
+    let mut result = vec![Message::System {
+        content: system(&input.identity, prompt),
+    }];
     for item in input.items {
         result.push(match item {
             ContextItem::ModelTurn(turn) => Message::Assistant(turn.assistant),
@@ -70,9 +64,9 @@ fn attr(out: &mut String, name: &str, value: impl Display) {
     out.push_str(&format!(" {name}=\"{}\"", xml(&value.to_string())));
 }
 
-fn system(identity: &PromptIdentity) -> String {
+fn system(identity: &PromptIdentity, persona: &str) -> String {
     let mut text =
-        format!("{PROTOCOL}\n\n## Runtime identity values\n\n```xml\n<runtime_identity>\n<bot");
+        format!("{PROTOCOL}\n\n## Runtime metadata values\n\n```xml\n<runtime_identity>\n<bot");
     attr(&mut text, "id", identity.bot_id);
     if let Some(name) = &identity.bot_name {
         attr(&mut text, "name", name);
@@ -82,13 +76,8 @@ fn system(identity: &PromptIdentity) -> String {
     if let Some(name) = &identity.group_name {
         attr(&mut text, "name", name);
     }
-    text.push_str(concat!(
-        "/>\n</runtime_identity>\n```\n\n## Persona initialization\n\n",
-        "Establish your character through an opening assistant self-description before ",
-        "addressing the conversation. That completed self-description is already supplied ",
-        "as the first assistant message. Carry its identity and voice into the conversation ",
-        "that follows; continue directly without repeating the initialization."
-    ));
+    text.push_str("/>\n</runtime_identity>\n```\n\n---\n\n");
+    text.push_str(&format!(include_str!("persona.md"), persona = persona));
     text
 }
 

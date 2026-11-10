@@ -118,6 +118,7 @@ Shell 需要单独配置授权用户和群。Agent 输出使用 Markdown 专用�
 ## 文档
 
 - [文档导航](doc/README.md)
+- [模块开发手册与完整示例](doc/module-development/README.md)
 - [运行时、SDK 与 Wasm ABI](doc/13-runtime-and-sdk.md)
 - [WebUI 与模块管理](doc/14-inspection-webui.md)
 - [Agent 使用指南](doc/22-agent-guide.md)

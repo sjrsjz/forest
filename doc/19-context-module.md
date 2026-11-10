@@ -73,15 +73,16 @@ let request = Request {
 
 > Be helpful, natural, and attentive to the participants in the conversation. Clearly distinguish established information, historical evidence, and uncertainty.
 
-每次格式化先生成固定的两条消息，再按原顺序追加调用方提供的完整上下文：
+每次格式化先生成一条 System，再按原顺序追加调用方提供的完整上下文：
 
-1. **System**：包内英文 Markdown 系统提示词 [system.md](../plugins/context/src/system.md) 定义请求顺序、群消息、触发点、召回批次、来源与图关系、原生工具序列、Forest Markdown 和多模态内容；随后通过 `## Runtime identity values` 注入 Bot 账号和当前群；最后的 `## Persona initialization` 说明开头的自我描述已经完成，应按该身份继续对话。System 不拼入人格配置本身。
-2. **Assistant**：使用包内英文模板 [persona.md](../plugins/context/src/persona.md)，将 `/prompt/agent` 原样放入普通 `content` 的字面 `<think>...</think>` 块。模板以第一人称确认描述属于自己，并明确原始设定中的第二人称指自己；不翻译或改写用户配置。
-3. **实际上下文**：逐条转换调用方提供的群消息、召回、模型回合和工具结果，保持传入次序。
+1. **框架契约**：包内英文 Markdown [system.md](../plugins/context/src/system.md) 以中性描述定义请求顺序、群消息、触发点、召回批次、来源与图关系、原生工具序列、Forest Markdown 和多模态内容，不使用第二人称指代。
+2. **运行时元数据**：`## Runtime metadata values` 提供 Bot 账号和当前群，作为平台寻址信息。
+3. **人格**：以单独一行 `---` 分隔框架与人格，随后使用英文模板 [persona.md](../plugins/context/src/persona.md) 生成 `# Persona`。模板以无第二人称的强制陈述句规定人格对思考、行动和表达的约束；用户的 `/prompt/agent` 原文完整放入四反引号 Markdown 代码块，不翻译或改写。原文中的三反引号代码块仍按原样保留。
+4. **实际上下文**：逐条转换调用方提供的群消息、召回、模型回合和工具结果，保持传入次序。
 
 每次模型调用前，Agent 传入当前选好的完整窗口，直接使用 Context 返回的完整 messages。Context 不接收增量标记，不持有上一次格式化结果；Agent 不拼接旧 messages，也不按条数或角色剥离提示词。
 
-这条开头的 Assistant 是 Context 在本地预置的完整消息，不额外调用模型生成自述，不使用 `prefix` 或人为填写 `reasoning_content`。`<think>` 在此只是普通正文标签，不依赖供应商的思考字段或特殊 token 语义；是否改善人格一致性需通过实际对话观察。它不写入 Agent 消息队列、记忆数据库或向量索引，每段请求历史恰好生成一次。相同配置与身份产生稳定前缀。
+框架契约、运行时元数据和人格共同组成同一条 System；Context 不生成预置 Assistant、自述初始化或字面 `<think>` 包装，不额外调用模型。相同配置与运行时元数据产生稳定的 System 前缀。该前缀不写入 Agent 消息队列、记忆数据库或向量索引。
 
 人格负责角色和语气，输入契约负责来源解释。提示词明确说明召回只为对应触发点提供候选证据、跨群来源不能改写为本群发言、关联边不等于事实或同一话题、检索排列不一定是时间顺序。当前会话与实际问题决定回答目标。输入标签不约束模型的输出；实际模型响应、tool_calls 和供应商返回的 reasoning_content 均沿用原生协议，不转写为字面 `<think>`。
 

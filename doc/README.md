@@ -16,6 +16,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [模块开发手册](module-development/README.md) | 完整示例、类型化接口、生命周期、并发、存储、宿主 API、打包与热重载 |
 | [序列化](serialization.md) | Schema、Value、结构子类型、转换和编码 |
 | [模块运行时架构](01-module-runtime.md) | 单例模块、消息通信、隔离及职责 |
 | [状态、访问与重载](02-state-access-and-reload.md) | 托管状态、配置、ACL 与实例交接 |
