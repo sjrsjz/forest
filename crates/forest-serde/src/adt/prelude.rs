@@ -14,6 +14,7 @@ use crate::adt::{
     AsSchema, AsValue, DecodeError, GlobalSchemaEnum, PayloadKind, Value, ValueKind,
     VariantPayloadGlobal, VariantPayloadValue,
 };
+use crate::symbol::{NONE_TAG, SOME_TAG, Symbol};
 
 // ==== Default implementations for primitive types and collection wrappers ====
 
@@ -35,7 +36,7 @@ impl AsValue for std::convert::Infallible {
 
     fn from_value(value: Value) -> Result<Self, DecodeError> {
         match value {
-            Value::Variant(tag, _) => Err(DecodeError::UnknownVariant { tag }),
+            Value::Variant(tag, _) => Err(DecodeError::UnknownVariant { tag: tag.into() }),
             other => Err(DecodeError::expected(ValueKind::Variant, &other)),
         }
     }
@@ -71,7 +72,16 @@ impl<T: AsSchema + 'static> AsSchema for Option<T> {
         rec_detector.push(TypeId::of::<Self>());
         let inner = T::register_dependencies_and_self(cache, rec_detector);
         rec_detector.pop();
-        let schema = GlobalSchemaEnum::Option(Box::new(inner));
+        let schema = GlobalSchemaEnum::Variant(BTreeMap::from([
+            (
+                Symbol::from_static(NONE_TAG),
+                VariantPayloadGlobal::Unnamed(vec![]),
+            ),
+            (
+                Symbol::from_static(SOME_TAG),
+                VariantPayloadGlobal::Unnamed(vec![inner]),
+            ),
+        ]));
         GlobalSchemaEnum::alloc::<Self>(schema.clone(), cache);
         schema
     }
@@ -180,15 +190,33 @@ impl AsValue for i64 {
 impl<T: AsValue + 'static> AsValue for Option<T> {
     fn as_value(&self) -> Value {
         match self {
-            Some(inner) => Value::Some(Box::new(inner.as_value())),
-            None => Value::None,
+            Some(inner) => Value::some(inner.as_value()),
+            None => Value::none(),
         }
     }
     fn from_value(value: Value) -> Result<Self, DecodeError> {
         match value {
-            Value::Some(inner) => Ok(Some(T::from_value(*inner)?)),
-            Value::None => Ok(None),
-            _ => Err(DecodeError::expected(ValueKind::Some, &value)),
+            Value::Variant(tag, payload) => match tag.as_str() {
+                NONE_TAG => Ok(None),
+                SOME_TAG => match payload {
+                    VariantPayloadValue::Unnamed(fields) => {
+                        let actual = fields.len();
+                        let first = fields
+                            .into_iter()
+                            .next()
+                            .ok_or(DecodeError::TooFewElements { minimum: 1, actual })?;
+                        T::from_value(first)
+                            .map(Some)
+                            .map_err(|error| error.at_index(0))
+                    }
+                    _ => Err(DecodeError::PayloadMismatch {
+                        expected: PayloadKind::Unnamed,
+                        actual: payload.kind(),
+                    }),
+                },
+                _ => Err(DecodeError::UnknownVariant { tag: tag.into() }),
+            },
+            _ => Err(DecodeError::expected(ValueKind::Variant, &value)),
         }
     }
 }
@@ -325,11 +353,11 @@ impl<T: AsSchema + 'static, E: AsSchema + 'static> AsSchema for Result<T, E> {
         rec_detector.pop();
         let mut variants = BTreeMap::new();
         variants.insert(
-            "Ok".to_string(),
+            Symbol::from_static("Ok"),
             VariantPayloadGlobal::Unnamed(vec![ok_schema]),
         );
         variants.insert(
-            "Err".to_string(),
+            Symbol::from_static("Err"),
             VariantPayloadGlobal::Unnamed(vec![err_schema]),
         );
         let schema = GlobalSchemaEnum::Variant(variants);
@@ -342,11 +370,11 @@ impl<T: AsValue + 'static, E: AsValue + 'static> AsValue for Result<T, E> {
     fn as_value(&self) -> Value {
         match self {
             Ok(val) => Value::Variant(
-                "Ok".to_string(),
+                Symbol::from_static("Ok"),
                 VariantPayloadValue::Unnamed(vec![val.as_value()]),
             ),
             Err(err) => Value::Variant(
-                "Err".to_string(),
+                Symbol::from_static("Err"),
                 VariantPayloadValue::Unnamed(vec![err.as_value()]),
             ),
         }
@@ -382,7 +410,7 @@ impl<T: AsValue + 'static, E: AsValue + 'static> AsValue for Result<T, E> {
                         actual: payload.kind(),
                     }),
                 },
-                _ => Err(DecodeError::UnknownVariant { tag }),
+                _ => Err(DecodeError::UnknownVariant { tag: tag.into() }),
             },
             _ => Err(DecodeError::expected(ValueKind::Variant, &value)),
         }

@@ -92,4 +92,4 @@ readers = ["/module/**"]
 "generated/provides/3.output.schema" = "59e76604394469d9decf3e622fdd49651e31bc0efd912e9e19c34b96d31cb207"
 "generated/provides/4.input.schema" = "f94ee35a2946aeb9220703bbfa27bd1c55a0ca320594d38d2d022f4f3bb64201"
 "generated/provides/4.output.schema" = "59e76604394469d9decf3e622fdd49651e31bc0efd912e9e19c34b96d31cb207"
-"module.wasm" = "6ea98b536df4ed5d0ba839d60f909115c676f316b251af2887f57128e1c76aca"
+"module.wasm" = "b86cebf2329ad459db1b33cbd9143bec5c37a3fb11139a5334172adb3c9e9e4b"

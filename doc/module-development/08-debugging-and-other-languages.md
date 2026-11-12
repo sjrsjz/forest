@@ -96,6 +96,8 @@ poll 的 Step 为以下分支之一：
 
 控制结构、请求结构、Step 和 Value 均按 [abi.rs](../../crates/forest-protocol/src/abi.rs) 的固定 bincode 规则编码：小端、定长整数，拒绝尾随字节。字段顺序、enum 分支顺序和容器编码必须与当前协议一致；TOML 或 JSON 不能直接替代这层 ABI。
 
+Value 和 Schema 的二进制表示均以动态名称表开头，结构中的标签及字段名写作 `u32` 符号索引，`None`、`Some` 采用固定保留索引。Optional 按普通枚举处理，不能另编码一套 Rust Option。实现时按[符号表二进制编码](../37-binary-symbols.md)中的节点表和示例核对，而非直接套用 Rust enum 的内存布局。
+
 Schema 的公开文本可用于生成语言本地 DTO，参数与返回值仍编码为 Forest Value。原生 f64 只出现在 SQL 等明确的宿主 I/O 结构中；它不是一般 Forest Value 分支。
 
 ABI 没有版本协商。语言绑定应对齐当前协议定义和运行时，实现完整的帧、唤醒及内存规则。帧可表示的最大长度为 u32 上限，实际还受内存和队列额度约束。

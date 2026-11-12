@@ -1,6 +1,6 @@
 //! Bounded display projection. The actual stored Value is never modified.
 use forest_protocol::Value;
-use forest_serde::adt::VariantPayloadValue;
+use forest_serde::adt::{Symbol, VariantPayloadValue};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -53,7 +53,7 @@ fn scalar(type_name: &'static str, text: String) -> ValueTree {
     ValueTree::Scalar { type_name, text }
 }
 fn fields<'a>(
-    items: impl Iterator<Item = (&'a String, &'a Value)>,
+    items: impl Iterator<Item = (&'a Symbol, &'a Value)>,
     length: usize,
     depth: usize,
     budget: &mut usize,
@@ -64,7 +64,7 @@ fn fields<'a>(
             break;
         }
         fields.push(Field {
-            name: name.clone(),
+            name: name.to_string(),
             value: project(value, depth + 1, budget),
         });
     }
@@ -110,11 +110,6 @@ fn project(value: &Value, depth: usize, budget: &mut usize) -> ValueTree {
             length: v.len(),
             preview_hex: v.iter().take(32).map(|v| format!("{v:02x}")).collect(),
         },
-        Value::None => scalar("option", "None".into()),
-        Value::Some(v) => ValueTree::Variant {
-            tag: "Some".into(),
-            body: Box::new(project(v, depth + 1, budget)),
-        },
         Value::Tuple(v) => sequence(v, "tuple", depth, budget),
         Value::Array(v) => sequence(v, "array", depth, budget),
         Value::Record(v) => fields(v.iter(), v.len(), depth, budget),
@@ -137,7 +132,7 @@ fn project(value: &Value, depth: usize, budget: &mut usize) -> ValueTree {
             }
         }
         Value::Variant(tag, payload) => ValueTree::Variant {
-            tag: tag.clone(),
+            tag: tag.to_string(),
             body: Box::new(match payload {
                 VariantPayloadValue::Unnamed(v) => sequence(v, "tuple", depth + 1, budget),
                 VariantPayloadValue::Named(v) => fields(v.iter(), v.len(), depth + 1, budget),

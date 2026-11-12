@@ -60,7 +60,7 @@ fn generate_struct_serialize_body(fields: &Fields) -> TokenStream2 {
                 let field_ident = f.ident.as_ref().unwrap();
                 let field_ty = &f.ty;
                 quote! {
-                    map.insert(#field_name.to_string(), <#field_ty as ::forest_serde::adt::AsValue>::as_value(&self.#field_ident));
+                    map.insert(::forest_serde::symbol::Symbol::from_static(#field_name), <#field_ty as ::forest_serde::adt::AsValue>::as_value(&self.#field_ident));
                 }
             });
             quote! {
@@ -101,7 +101,7 @@ fn generate_enum_serialize_body(e: &syn::DataEnum) -> TokenStream2 {
                     let ident_str = ident.to_string();
                     let field_ty = &f.ty;
                     quote! {
-                        map.insert(#ident_str.to_string(), <#field_ty as ::forest_serde::adt::AsValue>::as_value(#ident));
+                        map.insert(::forest_serde::symbol::Symbol::from_static(#ident_str), <#field_ty as ::forest_serde::adt::AsValue>::as_value(#ident));
                     }
                 });
                 quote! {
@@ -109,7 +109,7 @@ fn generate_enum_serialize_body(e: &syn::DataEnum) -> TokenStream2 {
                         let mut map = ::std::collections::BTreeMap::new();
                         #(#field_inserters)*
                         ::forest_serde::adt::Value::Variant(
-                            #variant_name_str.to_string(),
+                            ::forest_serde::symbol::Symbol::from_static(#variant_name_str),
                             ::forest_serde::adt::VariantPayloadValue::Named(map)
                         )
                     }
@@ -124,7 +124,7 @@ fn generate_enum_serialize_body(e: &syn::DataEnum) -> TokenStream2 {
                 quote! {
                     Self::#variant_ident(#(#field_bindings),*) => {
                         ::forest_serde::adt::Value::Variant(
-                            #variant_name_str.to_string(),
+                            ::forest_serde::symbol::Symbol::from_static(#variant_name_str),
                             ::forest_serde::adt::VariantPayloadValue::Unnamed(vec![#(#field_serializers),*])
                         )
                     }
@@ -134,7 +134,7 @@ fn generate_enum_serialize_body(e: &syn::DataEnum) -> TokenStream2 {
                 quote! {
                     Self::#variant_ident => {
                         ::forest_serde::adt::Value::Variant(
-                            #variant_name_str.to_string(),
+                            ::forest_serde::symbol::Symbol::from_static(#variant_name_str),
                             ::forest_serde::adt::VariantPayloadValue::Unnamed(vec![])
                         )
                     }
@@ -293,7 +293,7 @@ fn generate_enum_deserialize_body(e: &syn::DataEnum) -> TokenStream2 {
             ::forest_serde::adt::Value::Variant(tag, payload) => {
                 match tag.as_str() {
                     #(#tag_match_arms),*
-                    _ => Err(::forest_serde::adt::DecodeError::UnknownVariant { tag }),
+                    _ => Err(::forest_serde::adt::DecodeError::UnknownVariant { tag: tag.into() }),
                 }
             }
             _ => Err(::forest_serde::adt::DecodeError::expected(::forest_serde::adt::ValueKind::Variant, &value)),

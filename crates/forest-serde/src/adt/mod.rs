@@ -1,7 +1,7 @@
 //! Forest Schema & Value Core Library
 //!
 //! This library provides a lightweight yet powerful runtime type system in Rust, supporting:
-//! - **Algebraic Data Types (ADTs)**: Includes primitives, `Option`, `Tuple`, `Array`, `Variant` (enums), and `Record` (structs).
+//! - **Algebraic Data Types (ADTs)**: Includes primitives, `Tuple`, `Array`, `Variant` (enums), and `Record` (structs). Optional is enum syntax sugar.
 //! - **Structural Subtyping**: Supports record width subtyping and tuple prefix projection.
 //! - **Recursive Types**: Handled via `Ref` indices for cycles and self-referencing types.
 //! - **Value Validation & Loose Matching**: Capability to check if a `Value` conforms to a `Schema`, with support for interoperability (e.g., matching a serialized `Array` against a `Tuple` schema).
@@ -43,10 +43,13 @@ use std::{
     hash::Hash,
 };
 
+mod binary;
 mod error;
+mod human;
 mod map_serde;
 pub mod prelude;
 
+pub use crate::symbol::Symbol;
 pub use error::{DecodeError, PayloadKind, ValueKind};
 
 // ============================================================================
@@ -66,12 +69,11 @@ pub enum GlobalSchemaEnum {
     Bool,
     String,
     Bytes(usize), // Fixed-size byte array (length in bytes)
-    Option(Box<GlobalSchemaEnum>),
     Tuple(Vec<GlobalSchemaEnum>),
     Array(Box<GlobalSchemaEnum>),
     Map(Box<GlobalSchemaEnum>, Box<GlobalSchemaEnum>),
-    Variant(BTreeMap<String, VariantPayloadGlobal>),
-    Record(BTreeMap<String, GlobalSchemaEnum>),
+    Variant(BTreeMap<Symbol, VariantPayloadGlobal>),
+    Record(BTreeMap<Symbol, GlobalSchemaEnum>),
     Ref(TypeId),
     ByteBuffer,
 }
@@ -81,7 +83,7 @@ pub enum GlobalSchemaEnum {
 #[derive(Debug, Clone)]
 pub enum VariantPayloadGlobal {
     Unnamed(Vec<GlobalSchemaEnum>),
-    Named(BTreeMap<String, GlobalSchemaEnum>),
+    Named(BTreeMap<Symbol, GlobalSchemaEnum>),
 }
 
 impl GlobalSchemaEnum {
@@ -114,9 +116,6 @@ impl GlobalSchemaEnum {
                     GlobalSchemaEnum::String => SchemaEnum::String,
                     GlobalSchemaEnum::Bytes(len) => SchemaEnum::Bytes(*len),
                     GlobalSchemaEnum::ByteBuffer => SchemaEnum::ByteBuffer,
-                    GlobalSchemaEnum::Option(inner) => {
-                        SchemaEnum::Option(Box::new(convert(inner, schemas, id2idx, cache)))
-                    }
                     GlobalSchemaEnum::Tuple(elems) => SchemaEnum::Tuple(
                         elems
                             .iter()
@@ -214,12 +213,11 @@ pub enum SchemaEnum {
     Bool,
     String,
     Bytes(usize), // Fixed-size byte array (length in bytes)
-    Option(Box<SchemaEnum>),
     Tuple(Vec<SchemaEnum>),
     Array(Box<SchemaEnum>),
     Map(Box<SchemaEnum>, Box<SchemaEnum>),
-    Variant(BTreeMap<String, VariantPayloadSchema>),
-    Record(BTreeMap<String, SchemaEnum>),
+    Variant(BTreeMap<Symbol, VariantPayloadSchema>),
+    Record(BTreeMap<Symbol, SchemaEnum>),
     Ref(usize),
     ByteBuffer,
 }
@@ -228,10 +226,41 @@ pub enum SchemaEnum {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VariantPayloadSchema {
     Unnamed(Vec<SchemaEnum>),
-    Named(BTreeMap<String, SchemaEnum>),
+    Named(BTreeMap<Symbol, SchemaEnum>),
 }
 
 impl SchemaEnum {
+    /// Optional is exactly the ordinary enum `variant { None, Some(T) }`.
+    pub fn optional(inner: Self) -> Self {
+        use crate::symbol::{NONE_TAG, SOME_TAG};
+        Self::Variant(BTreeMap::from([
+            (
+                Symbol::from_static(NONE_TAG),
+                VariantPayloadSchema::Unnamed(vec![]),
+            ),
+            (
+                Symbol::from_static(SOME_TAG),
+                VariantPayloadSchema::Unnamed(vec![inner]),
+            ),
+        ]))
+    }
+
+    /// Recognizes the optional shape without introducing a separate type kind.
+    pub fn optional_inner(&self) -> Option<&Self> {
+        use crate::symbol::{NONE_TAG, SOME_TAG};
+        let Self::Variant(arms) = self else {
+            return None;
+        };
+        match (arms.len(), arms.get(NONE_TAG)?, arms.get(SOME_TAG)?) {
+            (2, VariantPayloadSchema::Unnamed(none), VariantPayloadSchema::Unnamed(some))
+                if none.is_empty() && some.len() == 1 =>
+            {
+                Some(&some[0])
+            }
+            _ => None,
+        }
+    }
+
     /// Validates the schema's integrity, ensuring all `Ref` indices are within the valid range
     /// of the parent `Schema` container.
     #[cfg_attr(not(target_family = "wasm"), stacksafe::stacksafe)]
@@ -240,7 +269,6 @@ impl SchemaEnum {
             SchemaEnum::Array(inner) => inner.is_well_defined(schema),
             SchemaEnum::Record(fields) => fields.values().all(|f| f.is_well_defined(schema)),
             SchemaEnum::Variant(variants) => variants.values().all(|p| p.is_well_defined(schema)),
-            SchemaEnum::Option(inner) => inner.is_well_defined(schema),
             SchemaEnum::Tuple(elems) => elems.iter().all(|e| e.is_well_defined(schema)),
             SchemaEnum::Map(key, value) => {
                 key.is_well_defined(schema) && value.is_well_defined(schema)
@@ -329,10 +357,6 @@ impl SchemaEnum {
                     (SchemaEnum::Bytes(_) | SchemaEnum::ByteBuffer, SchemaEnum::ByteBuffer) => true,
 
                     (SchemaEnum::I32, SchemaEnum::I64) => true,
-
-                    (SchemaEnum::Option(inner_a), SchemaEnum::Option(inner_b)) => {
-                        inner_a.subof(inner_b, context, assumptions, next_depth)
-                    }
 
                     (SchemaEnum::Tuple(ta), SchemaEnum::Tuple(tb)) => {
                         ta.len() >= tb.len()
@@ -425,10 +449,19 @@ impl VariantPayloadSchema {
 ///
 /// It encapsulates a list of [`SchemaEnum`] definitions. The first element (index 0)
 /// is traditionally the "root" type of the schema.
-#[derive(Debug, Clone, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone)]
 pub struct Schema {
     schemas: Vec<SchemaEnum>,
+}
+
+impl Serialize for Schema {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            self.schemas.serialize(serializer)
+        } else {
+            binary::serialize_schema(&self.schemas, serializer)
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for Schema {
@@ -436,7 +469,11 @@ impl<'de> Deserialize<'de> for Schema {
     where
         D: serde::Deserializer<'de>,
     {
-        let schemas = Vec::<SchemaEnum>::deserialize(deserializer)?;
+        let schemas = if deserializer.is_human_readable() {
+            Vec::<SchemaEnum>::deserialize(deserializer)?
+        } else {
+            binary::deserialize_schema(deserializer)?
+        };
         let schema = Schema { schemas };
         if !schema.is_well_defined() {
             return Err(serde::de::Error::custom(
@@ -482,6 +519,9 @@ fn quote_string(s: &str) -> String {
 
 impl fmt::Display for SchemaEnum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(inner) = self.optional_inner() {
+            return write!(f, "optional {}", inner);
+        }
         match self {
             SchemaEnum::I32 => write!(f, "i32"),
             SchemaEnum::I64 => write!(f, "i64"),
@@ -489,7 +529,6 @@ impl fmt::Display for SchemaEnum {
             SchemaEnum::String => write!(f, "string"),
             SchemaEnum::Bytes(size) => write!(f, "bytes {}", size),
             SchemaEnum::ByteBuffer => write!(f, "bytes"),
-            SchemaEnum::Option(inner) => write!(f, "optional {}", inner),
             SchemaEnum::Array(inner) => write!(f, "[{}]", inner),
             SchemaEnum::Map(k, v) => write!(f, "map {} => {}", k, v),
 
@@ -642,7 +681,7 @@ impl PartialOrd for Schema {
 ///
 /// Unlike schemas, the value tree is self-contained and does not use internal indices
 /// for its structure, making it easy to traverse and manipulate.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Value {
     /// Represents a 32-bit signed integer value.
     I32(i32),
@@ -654,20 +693,16 @@ pub enum Value {
     String(String),
     /// Represents a byte array of a certain size.
     Bytes(Vec<u8>),
-    /// Represents a Option::Some variant, containing a boxed inner value.
-    Some(Box<Value>),
-    /// Represents a Option::None variant.
-    None,
     /// Represents a tuple value, containing an ordered list of inner values.
     Tuple(Vec<Value>),
     /// Represents an array value, containing a list of inner values (homogeneous).
     Array(Vec<Value>),
     /// Represents a map value, containing a mapping of keys to values.
-    Map(#[serde(with = "map_serde")] BTreeMap<Value, Value>),
+    Map(BTreeMap<Value, Value>),
     /// Represents a variant (enum) value, containing a tag and an associated payload.
-    Variant(String, VariantPayloadValue),
+    Variant(Symbol, VariantPayloadValue),
     /// Represents a record (struct) value, containing a mapping of field names to values.
-    Record(BTreeMap<String, Value>),
+    Record(BTreeMap<Symbol, Value>),
 }
 
 /// Represents the data payload associated with a specific variant in an enum.
@@ -676,13 +711,12 @@ pub enum VariantPayloadValue {
     /// Represents an unnamed (tuple-like) variant payload, containing an ordered list of values.
     Unnamed(Vec<Value>),
     /// Represents a named (struct-like) variant payload, containing a mapping of field names to values.
-    Named(BTreeMap<String, Value>),
+    Named(BTreeMap<Symbol, Value>),
 }
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::None => write!(f, "null"),
             Value::Bool(b) => write!(f, "{}", if *b { "true" } else { "false" }),
             Value::I32(num) => write!(f, "{}", num),
             Value::I64(num) => write!(f, "{}i64", num),
@@ -691,7 +725,6 @@ impl fmt::Display for Value {
                 use base64::{Engine as _, engine::general_purpose::STANDARD};
                 write!(f, "b\"{}\"", STANDARD.encode(bytes))
             }
-            Value::Some(val) => write!(f, "some {}", val),
 
             Value::Array(items) => {
                 write!(f, "[")?;
@@ -738,6 +771,14 @@ impl fmt::Display for Value {
             }
 
             Value::Variant(tag, payload) => {
+                use crate::symbol::{NONE_TAG, SOME_TAG};
+                if let VariantPayloadValue::Unnamed(items) = payload {
+                    match (tag.as_str(), items.as_slice()) {
+                        (NONE_TAG, []) => return f.write_str("null"),
+                        (SOME_TAG, [inner]) => return write!(f, "some {}", inner),
+                        _ => {}
+                    }
+                }
                 let safe_tag = format_ident(tag);
 
                 match payload {
@@ -770,6 +811,20 @@ impl fmt::Display for Value {
 }
 
 impl Value {
+    pub fn none() -> Self {
+        Self::Variant(
+            Symbol::from_static(crate::symbol::NONE_TAG),
+            VariantPayloadValue::Unnamed(vec![]),
+        )
+    }
+
+    pub fn some(inner: Self) -> Self {
+        Self::Variant(
+            Symbol::from_static(crate::symbol::SOME_TAG),
+            VariantPayloadValue::Unnamed(vec![inner]),
+        )
+    }
+
     /// Verifies if the current value conforms to the provided schema.
     ///
     /// This check supports structural subtyping rules (e.g., width subtyping for records/tuples)
@@ -803,11 +858,6 @@ impl Value {
             (Value::String(_), SchemaEnum::String) => true,
             (Value::Bytes(a), SchemaEnum::Bytes(b)) => a.len() == *b,
             (Value::Bytes(_), SchemaEnum::ByteBuffer) => true,
-
-            (Value::Some(inner), SchemaEnum::Option(sch)) => {
-                inner._check(sch, schema_ctx, assumptions, loose_match)
-            }
-            (Value::None, SchemaEnum::Option(_)) => true,
 
             // Tuple Validation: Supports width subtyping (extra trailing elements are ignored).
             (Value::Tuple(vals), SchemaEnum::Tuple(schs)) => {

@@ -17,7 +17,8 @@ fn variable_bytes_keep_compact_binary_and_structural_contracts() {
         let value = bytes.as_value();
         assert!(value.check(&schema, false));
         assert_eq!(Vec::<u8>::from_value(value.clone()).unwrap(), bytes);
-        assert!(bincode::serialize(&value).unwrap().len() <= bytes.len() + 16);
+        // Empty symbol table (8), node tag (4), byte count (8), then raw bytes.
+        assert_eq!(bincode::serialize(&value).unwrap().len(), bytes.len() + 20);
     }
     let fixed: Schema = parse_schema("schema T = bytes 32; export T;").unwrap();
     assert!(fixed.subof(&schema));
@@ -220,7 +221,7 @@ fn enum_and_result_payload_projections_agree_with_validation() {
         "Named".into(),
         VariantPayloadValue::Named(BTreeMap::from([
             ("value".into(), Value::I32(6)),
-            ("extra".into(), Value::None),
+            ("extra".into(), Value::none()),
         ])),
     );
     assert!(named.check(&Reply::<i64>::as_schema(), false));

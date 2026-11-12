@@ -34,4 +34,4 @@ callers = [
 "generated/lifecycle-error.schema" = "2d181b39d5a04d736416f904b15041f0ee0e7d4847979e1d7d3886ae7625379b"
 "generated/provides/0.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
 "generated/provides/0.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
-"module.wasm" = "1ab085daf3b2fabe3e2dfb2f0b648905106de3bd52dfa5404f14224e6b185c8f"
+"module.wasm" = "9b13330e621c578bc737c249aa341851e80390b6aeb4782dd1f86f5cd7f0d8e7"

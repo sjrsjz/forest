@@ -16,7 +16,7 @@ fn long_multiline_configuration_string() {
 
 #[test]
 fn test_primitives() {
-    assert_eq!(parse_value("null").unwrap(), Value::None);
+    assert_eq!(parse_value("null").unwrap(), Value::none());
     assert_eq!(parse_value("true").unwrap(), Value::Bool(true));
     assert_eq!(parse_value("false").unwrap(), Value::Bool(false));
     assert_eq!(parse_value("42").unwrap(), Value::I32(42));
@@ -32,17 +32,11 @@ fn test_primitives() {
 fn test_standalone_ident() {
     assert_eq!(
         parse_value("Disconnected").unwrap(),
-        Value::Variant(
-            "Disconnected".to_string(),
-            VariantPayloadValue::Unnamed(vec![])
-        )
+        Value::Variant("Disconnected".into(), VariantPayloadValue::Unnamed(vec![]))
     );
     assert_eq!(
         parse_value("UserLoggedOut").unwrap(),
-        Value::Variant(
-            "UserLoggedOut".to_string(),
-            VariantPayloadValue::Unnamed(vec![])
-        )
+        Value::Variant("UserLoggedOut".into(), VariantPayloadValue::Unnamed(vec![]))
     );
 }
 
@@ -56,17 +50,14 @@ fn test_collections() {
         parse_value("(\"a\", false)").unwrap(),
         Value::Tuple(vec![Value::String("a".to_string()), Value::Bool(false)])
     );
-    assert_eq!(
-        parse_value("some 42").unwrap(),
-        Value::Some(Box::new(Value::I32(42)))
-    );
+    assert_eq!(parse_value("some 42").unwrap(), Value::some(Value::I32(42)));
 }
 
 #[test]
 fn test_record() {
     let mut expected_map = BTreeMap::new();
-    expected_map.insert("id".to_string(), Value::I32(100));
-    expected_map.insert("name".to_string(), Value::String("forest".to_string()));
+    expected_map.insert("id".into(), Value::I32(100));
+    expected_map.insert("name".into(), Value::String("forest".to_string()));
     assert_eq!(
         parse_value(r#"{ id: 100, "name": "forest", }"#).unwrap(),
         Value::Record(expected_map)
@@ -78,22 +69,22 @@ fn test_variants_with_payload() {
     assert_eq!(
         parse_value("Ok::200").unwrap(),
         Value::Variant(
-            "Ok".to_string(),
+            "Ok".into(),
             VariantPayloadValue::Unnamed(vec![Value::I32(200)])
         )
     );
     assert_eq!(
         parse_value("Point::(10, 20)").unwrap(),
         Value::Variant(
-            "Point".to_string(),
+            "Point".into(),
             VariantPayloadValue::Unnamed(vec![Value::I32(10), Value::I32(20)])
         )
     );
     let mut map = BTreeMap::new();
-    map.insert("err_code".to_string(), Value::I32(404));
+    map.insert("err_code".into(), Value::I32(404));
     assert_eq!(
         parse_value("Error::{ err_code: 404 }").unwrap(),
-        Value::Variant("Error".to_string(), VariantPayloadValue::Named(map))
+        Value::Variant("Error".into(), VariantPayloadValue::Named(map))
     );
 }
 
@@ -127,21 +118,11 @@ fn s(schemas: Vec<SchemaEnum>) -> Schema {
 }
 
 fn record(fields: Vec<(&str, SchemaEnum)>) -> SchemaEnum {
-    SchemaEnum::Record(
-        fields
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
-    )
+    SchemaEnum::Record(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }
 
 fn variant(variants: Vec<(&str, VariantPayloadSchema)>) -> SchemaEnum {
-    SchemaEnum::Variant(
-        variants
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
-    )
+    SchemaEnum::Variant(variants.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }
 
 fn vunit() -> VariantPayloadSchema {
@@ -153,16 +134,11 @@ fn vunnamed(types: Vec<SchemaEnum>) -> VariantPayloadSchema {
 }
 
 fn vnamed(fields: Vec<(&str, SchemaEnum)>) -> VariantPayloadSchema {
-    VariantPayloadSchema::Named(
-        fields
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
-    )
+    VariantPayloadSchema::Named(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }
 
 fn option(inner: SchemaEnum) -> SchemaEnum {
-    SchemaEnum::Option(Box::new(inner))
+    SchemaEnum::optional(inner)
 }
 
 fn array(inner: SchemaEnum) -> SchemaEnum {

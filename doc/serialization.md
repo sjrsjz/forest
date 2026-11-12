@@ -8,6 +8,8 @@
 
 `Schema` 表达结构类型；`Value` 表达独立值树。Rust `TypeId` 只参与本地类型图构造，导出的 Schema 使用索引引用。Record、Variant 和命名载荷使用有序映射，使同一 Rust 类型重复生成的 Schema 具有稳定的字段遍历和引用编号。不同但结构等价的类型图不承诺编码字节相同。
 
+结构名称使用不可变的 `Symbol`，其身份由字符串内容决定。Derive 宏通过 `Symbol::from_static` 借用静态字段名和标签，不为每次出现分配字符串；二进制解码让同一文档内的重复名称共享 `Arc<str>`。名称没有全局驻留池，离开文档后由持有它的值自行维持生命周期。`SymbolId` 是另一种类型，只表示文档内的传输编号，不作为逻辑名称。手写 Value 的字段名、标签可用 `.into()` 构造 Symbol，普通正文仍用 `Value::String(String)`。
+
 Schema 语言独立于 Rust。例如：
 
 ```text
@@ -21,6 +23,8 @@ export Request;
 `DeriveSchema` 和 `DeriveValue` 是 Rust 的可选映射工具，从本地类型生成对应 Schema 与 Value 转换，包括泛型和递归类型；它们不是跨模块类型身份，也不要求调用双方依赖同一个 crate。
 
 `bytes` 表示变长不透明字节，对应 `Value::Bytes` 和 Rust `Vec<u8>`，二进制编码不会为每个字节建立一个 Value 节点。`bytes N` 仍表示长度固定为 N 的字节数组，且是 `bytes` 的子类型。媒体字节等载荷通过这一公开 Schema 传递，无需转为 base64 字符串。
+
+`optional T` 是 `variant { None, Some(T) }` 的语法糖，Schema 和 Value 不含独立的 Optional 分支。Rust `Option<T>` 与同形普通枚举使用相同的类型检查、子类型和转换规则；`null`、`some value` 分别构造空载荷 `None` 与单元素载荷 `Some`。嵌套 Optional 保留每层枚举，不折叠 `Some(None)`。
 
 ```rust
 use forest_serde::{DeriveSchema, DeriveValue};
@@ -60,6 +64,8 @@ let restored = State::<String>::from_value(value)?;
 
 - Schema 的 Serde 编码统一为根类型在索引 0 的类型表，序列化与反序列化对称。拒绝空类型表和越界引用。
 - Value 与 Schema 都支持 Serde。Map 编码为有序键值对序列，支持 JSON 中的任意结构键并拒绝重复编码键。文本 DSL 的字符串遵循 JSON 转义，格式化保留 Variant 的外层载荷结构，避免单个 Tuple/Record 字段被展开。
+- 二进制 Value 与 Schema 各自包含一张文档级符号表，枚举标签、Record 字段名和命名载荷字段名以 `SymbolId(u32)` 引用。同一名称在整棵结构中只传一次；普通字符串及 bytes 不参与符号化。`None`、`Some` 使用全局常量声明的保留符号，不占文档表项。完整布局见[符号表二进制编码](37-binary-symbols.md)。
+- 符号索引只参与传输，不参与逻辑值的相等、哈希或排序。不同文档可给同名符号分配不同索引，解码后仍可作为相同的 Map 键；符号表不跨调用共享，不绑定模块实例。
 - Schema 以引用表示递归结构，结构兼容性由类型图判定。
 - 原生目标保留 `stacksafe` 调用栈增长；Wasm 目标不依赖原生栈切换，递归受其执行栈限制。当前不承诺任意深度的输入可成功处理。
 - 尚未扩展浮点数和无符号整数。

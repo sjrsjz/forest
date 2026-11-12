@@ -126,6 +126,10 @@ SDK 的 `HostError` 分别保存 `DispatchError` 与 `ServiceError`，模块可�
 
 ABI 结构与操作结构采用 `forest_protocol::abi` 固定小端、定长整数 bincode 编码；接口值和配置值仍是 Forest Schema/Value。帧长度按 wasm32 的 `u32` 表达，不另设 16 MiB 的固定传输上限。解码受实际输入字节长度约束并拒绝尾随字节，指针与长度必须对应实例线性内存中的有效范围；实例内存与待处理请求仍分别受运行时内存配额、队列字节配额约束。编码长度无法表达时返回调度错误，不能由 SDK `expect` 引发模块 panic。此边界没有版本协商。
 
+每个二进制 Value 和完整 Schema 都是自包含的符号文档：先传动态名称表，再传引用该表的结构正文。`NONE_SYMBOL = 0`、`SOME_SYMBOL = 1` 为保留名字，动态符号从 `FIRST_DYNAMIC_SYMBOL` 开始；这些声明集中于 `forest_serde::symbol`，编码和解码不在分支内硬编码保留编号。Optional 与普通枚举共用类型语义及 Variant 编码，保留名字不改变载荷规则。名称表、节点编号、字段顺序及独立编码例子见[符号表二进制编码](37-binary-symbols.md)，非 Rust 绑定必须实现同一布局。
+
+编码器以受限 Writer 检查实际写入字节数，不先运行一次序列化估算长度；符号表只构建一次，正文借用现有值树并直接写入输出缓冲。解码器在恢复逻辑值时解析符号索引，拒绝表中重复名称、重复声明保留名称、越界索引及重复键。没有跨帧字典协商，也没有旧字节布局自动识别；宿主、SDK 与 Wasm 工件须配套构建。
+
 宿主 I/O 上限保存在配置对象 `/core/runtime` 的 `/io` 中，HTTP 响应、WebSocket 单条消息与帧、受管文件读取分别使用 `http_response_mib`、`websocket_message_mib`、`file_read_mib`，默认各 64 MiB。每项以 MiB 为单位，允许 1 至 4095；最大值来自 wasm32 帧长度表示能力。新 HTTP 请求和文件读取在操作开始时读取设置，已有操作保留开始时的上限；WebSocket 在建连时固定消息与帧上限，现有连接不被设置写入打断。配置持久化，管理端写入沿用配置 set 和 `/user/admin` ACL；Wasm 模块不能修改宿主上限。管理端配置写请求本身保持独立的 16 MiB 请求体限制。I/O 设置不用于判断模型上下文预算。
 
 这里描述的是字节协议，不是 Rust 对象内存布局。非 Rust 模块无须导入 Rust trait、crate 或 TypeId；需要实现相同的字节编码、任务推进和资源所有权约定。模块间调用按对象与接口地址派发，双方分别以自己的类型表示相同 Schema，在线性内存之间传递编码后的 Value。Manifest 的类型图和打包附带的 `.schema` 文本均可在不执行 Wasm、不读取 Rust 源码的情况下取得。

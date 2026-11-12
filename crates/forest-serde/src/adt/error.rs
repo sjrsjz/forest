@@ -11,8 +11,6 @@ pub enum ValueKind {
     Bool,
     String,
     Bytes,
-    Some,
-    None,
     Tuple,
     Array,
     Map,
@@ -118,6 +116,7 @@ impl std::error::Error for DecodeError {
 }
 
 impl Value {
+    #[inline]
     pub fn kind(&self) -> ValueKind {
         match self {
             Self::I32(_) => ValueKind::I32,
@@ -125,8 +124,6 @@ impl Value {
             Self::Bool(_) => ValueKind::Bool,
             Self::String(_) => ValueKind::String,
             Self::Bytes(_) => ValueKind::Bytes,
-            Self::Some(_) => ValueKind::Some,
-            Self::None => ValueKind::None,
             Self::Tuple(_) => ValueKind::Tuple,
             Self::Array(_) => ValueKind::Array,
             Self::Map(_) => ValueKind::Map,

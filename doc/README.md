@@ -18,6 +18,7 @@
 | --- | --- |
 | [模块开发手册](module-development/README.md) | 完整示例、类型化接口、生命周期、并发、存储、宿主 API、打包与热重载 |
 | [序列化](serialization.md) | Schema、Value、结构子类型、转换和编码 |
+| [符号表二进制编码](37-binary-symbols.md) | 文档级名称表、保留符号、节点布局和独立语言绑定 |
 | [模块运行时架构](01-module-runtime.md) | 单例模块、消息通信、隔离及职责 |
 | [状态、访问与重载](02-state-access-and-reload.md) | 托管状态、配置、ACL 与实例交接 |
 | [来源令牌与路径匹配](03-token.md) | 身份路径、可信来源和通配符 |

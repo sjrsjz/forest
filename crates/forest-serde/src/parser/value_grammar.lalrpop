@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use crate::adt::{Value, VariantPayloadValue};
+use crate::adt::{Value, VariantPayloadValue, Symbol};
 use crate::parser::build_payload;
 
 grammar;
@@ -48,7 +48,7 @@ pub Expr: Value = {
 };
 
 Value: Value = {
-    "null"  => Value::None,  // 映射为 None
+    "null"  => Value::none(),
     "true"  => Value::Bool(true),
     "false" => Value::Bool(false),
 
@@ -57,20 +57,20 @@ Value: Value = {
     "str"   => Value::String(<>),
     "bytes" => Value::Bytes(<>),
 
-    <tag:"ident"> => Value::Variant(tag, VariantPayloadValue::Unnamed(vec![])),
+    <tag:"ident"> => Value::Variant(tag.into(), VariantPayloadValue::Unnamed(vec![])),
 
     "[" <items:Comma<Value>> "]" => Value::Array(items),
     "(" <items:Comma<Value>> ")" => Value::Tuple(items),
 
-    "some" <v:Value> => Value::Some(Box::new(v)),
+    "some" <v:Value> => Value::some(v),
 
-    <tag:IdentOrStr> "::" <v:Value> => Value::Variant(tag, build_payload(v)),
+    <tag:IdentOrStr> "::" <v:Value> => Value::Variant(tag.into(), build_payload(v)),
 
     "map" "{" <fields:Comma<MapField>> "}" => {
         Value::Map(fields.into_iter().collect::<BTreeMap<Value, Value>>())
     },
     "{" <fields:Comma<RecordField>> "}" => {
-        Value::Record(fields.into_iter().collect::<BTreeMap<String, Value>>())
+        Value::Record(fields.into_iter().collect::<BTreeMap<Symbol, Value>>())
     },
 };
 
@@ -79,8 +79,8 @@ IdentOrStr: String = {
     "str"   => <>,
 };
 
-RecordField: (String, Value) = {
-    <k:IdentOrStr> ":" <v:Value> => (k, v),
+RecordField: (Symbol, Value) = {
+    <k:IdentOrStr> ":" <v:Value> => (k.into(), v),
 };
 
 MapField: (Value, Value) = {

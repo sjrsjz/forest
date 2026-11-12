@@ -55,6 +55,10 @@ Forest Value 当前没有原生浮点数或一般的无符号整数映射。`Vec
 
 Serde 的外部 JSON 字段命名不自动改变 Forest Record/Variant 契约。公共类型发生变化时，以生成的 `.schema` 为准。
 
+`Option<T>` 是普通 `variant { None, Some(T) }`，不存在单独的 Optional 类型。Forest 文本的 `optional T`、`null` 和 `some value` 仅提供简写；同形的自定义 enum 与其互通。二进制结构名称由每个文档自己的符号表引用，不作为跨模块类型身份，详细布局见[符号编码](../37-binary-symbols.md)。
+
+手写 Rust Value 时，Record 字段名和 Variant 标签的类型是 `Symbol`，支持从字符串 `.into()`，静态声明可用 `Symbol::from_static("name")`。Derive 已自动采用静态名字。Symbol 是按文本比较的共享名称，不是二进制 `SymbolId`；普通消息文本仍为 `String`。
+
 ## 3. 完整 Result 与两层错误
 
 所有 provides 的输出必须是 `Result<T, E>`。以下调用：

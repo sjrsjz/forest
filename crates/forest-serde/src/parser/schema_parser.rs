@@ -109,10 +109,7 @@ fn resolve_type(
         AstSchema::String => Ok(SchemaEnum::String),
         AstSchema::Bytes(n) => Ok(SchemaEnum::Bytes(*n)),
         AstSchema::ByteBuffer => Ok(SchemaEnum::ByteBuffer),
-        AstSchema::Option(inner) => Ok(SchemaEnum::Option(Box::new(resolve_type(
-            inner,
-            name_to_index,
-        )?))),
+        AstSchema::Option(inner) => Ok(SchemaEnum::optional(resolve_type(inner, name_to_index)?)),
         AstSchema::Array(inner) => Ok(SchemaEnum::Array(Box::new(resolve_type(
             inner,
             name_to_index,
@@ -135,7 +132,7 @@ fn resolve_type(
         AstSchema::Record(fields) => {
             let mut map = BTreeMap::new();
             for (k, v) in fields {
-                map.insert(k.clone(), resolve_type(v, name_to_index)?);
+                map.insert(k.clone().into(), resolve_type(v, name_to_index)?);
             }
             Ok(SchemaEnum::Record(map))
         }
@@ -143,7 +140,7 @@ fn resolve_type(
             let mut map = BTreeMap::new();
             for (tag, payload) in variants {
                 let resolved = resolve_payload(payload, name_to_index)?;
-                map.insert(tag.clone(), resolved);
+                map.insert(tag.clone().into(), resolved);
             }
             Ok(SchemaEnum::Variant(map))
         }
@@ -165,7 +162,7 @@ fn resolve_payload(
         AstVariantPayload::Named(fields) => {
             let mut map = BTreeMap::new();
             for (k, v) in fields {
-                map.insert(k.clone(), resolve_type(v, name_to_index)?);
+                map.insert(k.clone().into(), resolve_type(v, name_to_index)?);
             }
             Ok(VariantPayloadSchema::Named(map))
         }

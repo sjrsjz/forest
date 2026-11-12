@@ -56,7 +56,7 @@ fn generate_struct_body_schema(fields: &Fields) -> TokenStream2 {
                 let field_ty = &f.ty;
                 quote! {
                     (
-                        #field_name.to_string(),
+                        ::forest_serde::symbol::Symbol::from_static(#field_name),
                         <#field_ty as ::forest_serde::adt::AsSchema>::register_dependencies_and_self(cache, rec_detector)
                     )
                 }
@@ -108,7 +108,7 @@ fn generate_enum_body_schema(e: &syn::DataEnum) -> TokenStream2 {
                     let field_ty = &f.ty;
                     quote! {
                         (
-                            #field_name.to_string(),
+                            ::forest_serde::symbol::Symbol::from_static(#field_name),
                             <#field_ty as ::forest_serde::adt::AsSchema>::register_dependencies_and_self(cache, rec_detector)
                         )
                     }
@@ -120,7 +120,7 @@ fn generate_enum_body_schema(e: &syn::DataEnum) -> TokenStream2 {
                 }
             }
         };
-        quote! { (#variant_name.to_string(), #payload_schema) }
+        quote! { (::forest_serde::symbol::Symbol::from_static(#variant_name), #payload_schema) }
     });
 
     quote! {

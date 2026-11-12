@@ -8,6 +8,8 @@ pub mod adt;
 
 pub mod parser;
 
+pub mod symbol;
+
 /// Derive macros for automatically generating `AsSchema` and `AsValue` implementations for structs and enums.
 pub use forest_serde_macros::Schema as DeriveSchema;
 pub use forest_serde_macros::Value as DeriveValue;

@@ -47,4 +47,4 @@ callers = [
 "generated/provides/0.output.schema" = "373308d2b9992b852772f26b7ae184963d27974fa7087662af858b5a82f06499"
 "generated/provides/1.input.schema" = "54289721ec74eb1068076c943729f11b43c7475444695e4b750c2ee286c74009"
 "generated/provides/1.output.schema" = "1929375b15a2d02e3f233e3bdb571da0be4d2594c0e663d799eca3f4f7b67c11"
-"module.wasm" = "00eb462f1c49d7d3b72c5b2c45f783813a903896e731acbe47519aee8012482f"
+"module.wasm" = "cba1e19c219e8cd215c99cd8e2c45f0cf05323a365a9689cd4acb6995824af96"

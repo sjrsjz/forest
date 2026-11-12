@@ -1,6 +1,7 @@
 //! Configuration widgets derived from declared types, independent of any plugin.
 use forest_protocol::{Schema, Value};
 use forest_serde::adt::{SchemaEnum, VariantPayloadSchema, VariantPayloadValue};
+use forest_serde::symbol::{NONE_TAG, SOME_TAG};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -132,7 +133,28 @@ fn enum_case(
 }
 
 fn control(schema: &Schema, node: &SchemaEnum, value: &Value) -> Form {
-    match (resolve(schema, node), value) {
+    let node = resolve(schema, node);
+    if let Some(inner) = node.and_then(SchemaEnum::optional_inner) {
+        return match value {
+            Value::Variant(tag, VariantPayloadValue::Unnamed(items))
+                if tag.as_str() == SOME_TAG && items.len() == 1 =>
+            {
+                Form::Optional {
+                    enabled: true,
+                    inner: Box::new(control(schema, inner, &items[0])),
+                }
+            }
+            Value::Variant(tag, _) if tag.as_str() == NONE_TAG => match initial(schema, inner) {
+                Some(value) => Form::Optional {
+                    enabled: false,
+                    inner: Box::new(control(schema, inner, &value)),
+                },
+                None => text(value),
+            },
+            _ => text(value),
+        };
+    }
+    match (node, value) {
         (Some(SchemaEnum::String), Value::String(value)) => Form::String {
             value: value.clone(),
         },
@@ -153,7 +175,7 @@ fn control(schema: &Schema, node: &SchemaEnum, value: &Value) -> Form {
             fields: values
                 .iter()
                 .map(|(name, value)| Field {
-                    name: name.clone(),
+                    name: name.to_string(),
                     control: nodes
                         .get(name)
                         .map(|n| control(schema, n, value))
@@ -183,30 +205,19 @@ fn control(schema: &Schema, node: &SchemaEnum, value: &Value) -> Form {
             },
             None => text(value),
         },
-        (Some(SchemaEnum::Option(inner)), Value::Some(value)) => Form::Optional {
-            enabled: true,
-            inner: Box::new(control(schema, inner, value)),
-        },
-        (Some(SchemaEnum::Option(inner)), Value::None) => match initial(schema, inner) {
-            Some(value) => Form::Optional {
-                enabled: false,
-                inner: Box::new(control(schema, inner, &value)),
-            },
-            None => text(value),
-        },
         (Some(SchemaEnum::Variant(nodes)), Value::Variant(selected, payload)) => {
             let cases = nodes
                 .iter()
                 .map(|(name, node)| {
                     Some(Case {
-                        name: name.clone(),
+                        name: name.to_string(),
                         payload: enum_case(schema, node, (name == selected).then_some(payload))?,
                     })
                 })
                 .collect::<Option<Vec<_>>>();
             match cases {
                 Some(cases) => Form::Variant {
-                    selected: selected.clone(),
+                    selected: selected.to_string(),
                     cases,
                 },
                 None => text(value),
@@ -301,8 +312,7 @@ mod tests {
 
     #[test]
     fn recursive_optional_keeps_its_original_text() {
-        let schema =
-            Schema::from_schemas(vec![SchemaEnum::Option(Box::new(SchemaEnum::Ref(0)))]).unwrap();
-        assert!(matches!(project(&schema,&Value::None),Form::Text { value } if value == "null"));
+        let schema = Schema::from_schemas(vec![SchemaEnum::optional(SchemaEnum::Ref(0))]).unwrap();
+        assert!(matches!(project(&schema,&Value::none()),Form::Text { value } if value == "null"));
     }
 }
