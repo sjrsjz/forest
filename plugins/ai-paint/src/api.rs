@@ -198,6 +198,7 @@ async fn post<T: DeserializeOwned>(
 ) -> Result<T, Error> {
     headers.push(("Content-Type".into(), "application/json".into()));
     let response = host::http_request(HttpRequest {
+        timeout_ms: None,
         method: "POST".into(),
         url: url.into(),
         headers,

@@ -10,7 +10,7 @@
 | `missing ABI function` | 编译目标、export_module、导出名称与签名 |
 | 无法完成依赖规划 | uses 的对象/接口、完整 Result 类型、可用声明闭包 |
 | create 失败 | LifecycleError 的阶段、Schema 和 Value，配置及本地数据 |
-| 收不到群事件 | 包是否 Serving、subscriptions、输入契约、事件源 callers、宿主测试群限制 |
+| 收不到群事件 | 包是否 Serving、subscriptions、输入契约、事件源 callers、接入包测试群限制 |
 | `Denied` | 调用方 uses、目标 callers、配置 readers/writers，以及实际 caller |
 | `LifecycleRestricted` | create/destroy 中执行了禁止的操作 |
 | `QueueFull` | 模块请求/输入额度、持锁与等待关系、未完成任务数量 |

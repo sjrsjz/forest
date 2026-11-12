@@ -102,9 +102,23 @@ const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', fo
               {{ bytes(module.budget.input_bytes_max) }}
             </dd>
           </div>
+          <div v-if="module.activated">
+            <dt>发布后激活</dt>
+            <dd>
+              <code>{{ module.activated }}</code>
+              <span v-if="module.budget.control_tasks_used">· 执行中</span>
+            </dd>
+          </div>
           <div>
             <dt>Wasm 内存上限</dt>
             <dd>{{ bytes(snapshot.memory_limit_bytes) }}</dd>
+          </div>
+          <div>
+            <dt>I/O 通知</dt>
+            <dd>
+              {{ module.budget.notifications_used }} / {{ module.budget.requests_max }} ·
+              {{ bytes(module.budget.notification_bytes_used) }}
+            </dd>
           </div>
         </dl>
         <p v-if="module.published.description" class="muted">{{ module.published.description }}</p>
@@ -163,7 +177,7 @@ const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', fo
       </section>
       <section class="detail-section">
         <div class="section-title">
-          <h3>宿主事件接收</h3>
+          <h3>事件接收</h3>
           <span class="count">{{ module.subscriptions.length }}</span>
         </div>
         <table>
@@ -184,10 +198,18 @@ const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', fo
               </td>
             </tr>
             <tr v-if="!module.subscriptions.length">
-              <td colspan="2" class="muted">未订阅宿主事件</td>
+              <td colspan="2" class="muted">未订阅事件</td>
             </tr>
           </tbody>
         </table>
+      </section>
+      <section v-if="module.events.length" class="detail-section">
+        <h3>发布事件</h3>
+        <ul class="plain-list">
+          <li v-for="event in module.events" :key="event">
+            <code>{{ event }}</code>
+          </li>
+        </ul>
       </section>
     </template>
     <template v-else-if="host">

@@ -124,6 +124,19 @@ impl Package {
     }
 
     pub(crate) fn check_replacement(&self, current: &Manifest) -> Result<()> {
+        for old in &current.events {
+            let new = self
+                .manifest
+                .events
+                .iter()
+                .find(|event| event.path == old.path)
+                .with_context(|| format!("replacement removes event {}", old.path))?;
+            ensure!(
+                new.input.subof(&old.input),
+                "replacement widens emitted event {}",
+                old.path
+            );
+        }
         ensure!(
             self.manifest.package.id == current.package.id,
             "replacement changes module identity"

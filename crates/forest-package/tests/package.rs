@@ -8,6 +8,8 @@ use std::path::Path;
 
 fn manifest() -> Manifest {
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: "/module/example".parse().unwrap(),
             version: "dev-test".into(),

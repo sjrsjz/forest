@@ -34,6 +34,7 @@ impl Memory {
             headers.push(("api-key".into(), self.settings.api_key.clone()));
         }
         let response = host::http_request(HttpRequest {
+            timeout_ms: None,
             method: method.into(),
             url: format!(
                 "{}/collections/{}{}",

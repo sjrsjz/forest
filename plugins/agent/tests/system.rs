@@ -69,7 +69,7 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
     let run = tokio::spawn(async move {
         scheduler
             .call::<_, Result<(), forest_agent_module::types::Error>>(
-                "/core/onebot".parse().unwrap(),
+                "/module/onebot".parse().unwrap(),
                 "/module/agent".parse().unwrap(),
                 "/group_message".parse().unwrap(),
                 &first,
@@ -245,7 +245,7 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
     let run = tokio::spawn(async move {
         scheduler
             .call::<_, Result<(), forest_agent_module::types::Error>>(
-                "/core/onebot".parse().unwrap(),
+                "/module/onebot".parse().unwrap(),
                 "/module/agent".parse().unwrap(),
                 "/group_message".parse().unwrap(),
                 &input,
@@ -290,7 +290,7 @@ async fn actual_wasm_agent_memory_context_provider_and_tools() {
     let run = tokio::spawn(async move {
         scheduler
             .call::<_, Result<(), forest_agent_module::types::Error>>(
-                "/core/onebot".parse().unwrap(),
+                "/module/onebot".parse().unwrap(),
                 "/module/agent".parse().unwrap(),
                 "/group_message".parse().unwrap(),
                 &input,

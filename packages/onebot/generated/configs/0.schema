@@ -1,0 +1,2 @@
+schema T0 = {action_timeout_ms: i64, allowed_groups: [i64], connect_timeout_ms: i64, reconnect_max_ms: i64, reconnect_min_ms: i64, token: string, websocket: string};
+export T0;

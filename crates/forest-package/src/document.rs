@@ -17,6 +17,8 @@ pub(crate) struct Document {
     pub uses: Vec<Uses>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subscriptions: Vec<EventSubscription>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<Event>,
     pub sha256: BTreeMap<String, String>,
 }
 
@@ -25,6 +27,16 @@ pub(crate) struct Document {
 pub(crate) struct Module {
     pub file: String,
     pub lifecycle_error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated: Option<Token>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Event {
+    pub path: Token,
+    pub input: String,
+    pub access: Policy,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -120,6 +132,17 @@ impl Document {
             files.read(path)?;
         }
         let lifecycle_error = files.schema(&self.module.lifecycle_error)?;
+        let events = self
+            .events
+            .into_iter()
+            .map(|event| {
+                Ok(EventDeclaration {
+                    path: event.path,
+                    input: files.schema(&event.input)?,
+                    access: event.access.resolve()?,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         let configs = self
             .configs
             .into_iter()
@@ -157,6 +180,8 @@ impl Document {
             })
             .collect::<Result<_, Error>>()?;
         let manifest = Manifest {
+            events,
+            activated: self.module.activated,
             package: self.package,
             module: self.module.file,
             lifecycle_error,

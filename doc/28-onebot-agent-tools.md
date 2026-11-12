@@ -20,9 +20,9 @@
 
 普通 assistant 正文仍自动发送到当前群。工具用于显式的独立发送，成功后不应再在 assistant 正文重复同一条消息。工具调用及结果沿用现有 Agent 归档流程，不伪造模型回合，也不向另一群的 Agent 队列注入用户输入。
 
-宿主 `/core/onebot` 的 `/query` 接收固定的只读 `Query` 枚举并返回对应 v11 数据的 JSON；`/send_private_message` 与 `/send_group_message` 接收类型化发送请求。它们共用 HTTP/WebSocket 连接与错误处理，不接受任意 action 字符串。工具包仅允许 `/module/agent-tools` 与受信 `/user/admin` 调用，跨模块调用仍检查 Manifest uses 与目标 ACL。
+Wasm 包 `/module/onebot` 的 `/query` 接收固定的只读 `Query` 枚举并返回对应 v11 数据的 JSON；`/send_private_message` 与 `/send_group_message` 接收类型化发送请求。它们共用 HTTP/WebSocket 连接与错误处理，不接受任意 action 字符串。工具包仅允许 `/module/agent-tools` 与受信 `/user/admin` 调用，跨模块调用仍检查 Manifest uses 与目标 ACL。
 
-正常运行由 Agent 配置决定哪些群能触发工作。显式 `--allow-group` 测试限制还会过滤群查询目标及群列表，拒绝范围外群发送和全部私聊发送。
+正常运行由 Agent 配置决定哪些群能触发工作。OneBot /settings 中的显式 allowed_groups 测试限制还会过滤群查询目标及群列表，拒绝范围外群发送和全部私聊发送。
 
 构建：
 

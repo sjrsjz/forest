@@ -111,6 +111,7 @@ pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) -> PreparedDriver 
         }
         instance.operations.finish().await;
         if let Ok(resources) = resources {
+            resources.stop_notifications().await;
             resources.close();
         }
         drop(held);
@@ -136,7 +137,7 @@ async fn run_guest(
 ) -> std::result::Result<(), Fault> {
     let initial = instance.mailbox.register(0);
     let frame = own_frame(instance, initial.clone());
-    let mut wasm = Wasm::instantiate(core, instance.clone(), resources, frame)
+    let mut wasm = Wasm::instantiate(core, instance.clone(), resources.clone(), frame)
         .await
         .map_err(fault)?;
     let input = abi::encode(&CreateContext {
@@ -264,6 +265,7 @@ async fn run_guest(
     }
     core.reject_old_queue(instance, &DispatchError::Interrupted);
     instance.operations.quiesce().await;
+    resources.stop_notifications().await;
     drop(held);
     if stop == StopMode::Force || !core.enter_destroying(instance) {
         return Ok(());
@@ -283,7 +285,7 @@ fn own_frame(instance: &Instance, signal: Arc<TaskSignal>) -> Frame {
     Frame {
         signal,
         context: CallContext {
-            origin: instance.object.clone(),
+            origin: instance.object.clone().into(),
             caller: instance.object.clone(),
         },
     }

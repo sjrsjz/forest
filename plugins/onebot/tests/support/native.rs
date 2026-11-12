@@ -1,5 +1,5 @@
-//! OneBot ingress and native actions. Agent tools remain independent Wasm modules.
-use crate::{EventDefinition, NativeInterface, Scheduler};
+//! Native protocol mock for isolated plugin tests; never linked into the host.
+#![allow(dead_code)]
 use anyhow::Result;
 use forest_onebot::{
     CallError, Client, Outcome, Transport,
@@ -10,6 +10,7 @@ use forest_onebot::{
     },
 };
 use forest_protocol::{manifest::callers, *};
+use forest_runtime::{EventDefinition, NativeInterface, Scheduler};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, sync::Arc};
 
@@ -241,7 +242,10 @@ impl OneBotIngress {
             });
         }
         let event: GroupMessage = serde_json::from_slice(bytes)?;
-        let origin: Token = format!("/user/onebot/{}", event.user_id).parse()?;
+        let origin = Origin::External {
+            issuer: contract::OBJECT.parse()?,
+            subject: format!("/user/{}", event.user_id).parse()?,
+        };
         let results = self.scheduler.notify(
             &contract::OBJECT.parse()?,
             &contract::GROUP_MESSAGE.parse()?,

@@ -7,7 +7,7 @@ test('logs filter locally, follow the tail, and remain inside the desktop viewpo
     sequence: i + 1,
     timestamp_ms: 1700000000000 + i,
     level: i % 5 === 4 ? 'Warn' : 'Info',
-    source: i % 2 === 0 ? '/module/agent' : '/core/onebot',
+    source: i % 2 === 0 ? '/module/agent' : '/module/onebot',
     message: `console row ${i}`,
   }))
   await page.route('**/api/inspect/logs', (route) =>

@@ -26,6 +26,7 @@ pub struct HttpRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    pub timeout_ms: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HttpResponse {
@@ -37,6 +38,7 @@ pub struct HttpResponse {
 pub struct WebSocketRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
+    pub timeout_ms: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WebSocketMessage {
@@ -52,6 +54,39 @@ pub enum WebSocketEvent {
 pub struct WebSocketSend {
     pub handle: u64,
     pub message: WebSocketMessage,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, DeriveSchema, DeriveValue)]
+pub enum IoEvent {
+    WebSocketReady(i64),
+    Timer(i64),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebSocketWatch {
+    pub handle: u64,
+    pub interface: Token,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TimerRequest {
+    pub delay_ms: u64,
+    pub interface: Token,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmitRequest {
+    pub event: Token,
+    pub input: Value,
+    pub subject: Option<Token>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EventDelivery {
+    pub object: Token,
+    pub interface: Token,
+    pub result: crate::DispatchResult<()>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileWrite {
@@ -97,6 +132,10 @@ pub struct LogRecord {
     Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, DeriveSchema, DeriveValue,
 )]
 pub enum ServiceError {
+    #[error("operation timed out")]
+    Timeout,
+    #[error("operating system randomness unavailable")]
+    RandomUnavailable,
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("resource not found")]

@@ -44,6 +44,16 @@ pub fn write(root: impl AsRef<Path>, manifest: &Manifest) -> Result<(), Error> {
             access: c.access.clone().into(),
         })
         .collect::<Vec<_>>();
+    let events = manifest
+        .events
+        .iter()
+        .enumerate()
+        .map(|(i, event)| Event {
+            path: event.path.clone(),
+            input: schema(format!("generated/events/{i}.schema"), &event.input),
+            access: event.access.clone().into(),
+        })
+        .collect();
     let provides = manifest
         .provides
         .iter()
@@ -78,8 +88,10 @@ pub fn write(root: impl AsRef<Path>, manifest: &Manifest) -> Result<(), Error> {
         module: Module {
             file: manifest.module.clone(),
             lifecycle_error,
+            activated: manifest.activated.clone(),
         },
         configs,
+        events,
         provides,
         uses,
         subscriptions: manifest.subscriptions.clone(),

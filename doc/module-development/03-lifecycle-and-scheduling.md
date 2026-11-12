@@ -28,7 +28,7 @@ pub trait Module: Sized + 'static {
 
 create 适合读取配置、初始化私有数据库、恢复持久状态和建立实例内的数据结构。配置项必须事先在 Manifest 中声明，不能在 create 中临时注册一个未声明的配置键。
 
-create 禁止 `host::send`、`host::call`、`host::lock` 和 `host::unlock`，包括调用自身和宿主原生对象；权限允许也不能绕过这条限制。当前实现允许直接配置操作、文件、私有 SQLite、HTTP/WebSocket、日志、时间及等待。需要调用其他模块的工作，应通过 Serving 后的普通接口触发。
+create 禁止 `host::send`、`host::call`、`host::lock` 和 `host::unlock`，包括调用自身和宿主原生对象；权限允许也不能绕过这条限制。当前实现允许直接配置操作、文件、私有 SQLite、HTTP/WebSocket、日志、时间及等待。需要调用其他模块的工作可声明 module.activated，指向 Unit 输入、允许 /system/lifecycle 的普通接口。整组发布后宿主投递一次，不增加 Module trait 钩子；激活等待时其他接口可运行。
 
 候选代码的解析、ABI 和兼容性检查先于旧实例停止；create 本身则发生在旧实例资源结束之后。create 中已经提交的数据库写入或外部请求不具有通用回滚语义。返回错误不是恢复所有外部状态的事务回滚。
 
@@ -40,7 +40,8 @@ destroy 用于保存短期状态和完成本地收尾。当前能力边界为：
 
 | 操作 | create | 普通处理器 | destroy |
 | --- | --- | --- | --- |
-| send/call | 禁止 | 按依赖和 ACL | 禁止 |
+| send/call/emit | 禁止 | 按依赖和 ACL | 禁止 |
+| ws_watch/timer_after | 禁止 | 当前实例资源通知 | 禁止 |
 | lock/unlock | 禁止 | 当前实例与任务持有 | 禁止 |
 | 配置 get/set/reset | 按 ACL | 按 ACL | 按 ACL |
 | 受管文件、私有 SQLite | 允许 | 允许 | 允许 |
@@ -121,3 +122,7 @@ self.counter.set(old + 1);
 `RefCell` 的借用应在 await 前结束。挂起期间其他处理器再次借用同一 RefCell，可能造成运行时借用冲突。同步阻塞锁等待也可能阻止本实例推进解锁任务；需要跨挂起协调时，应使用 host::lock 等可挂起的协调方式。锁名不赋予配置访问权限，也不会自动约束不获取它的其他写入者。
 
 详细调度不变量见[调度设计](../09-scheduling.md)与[状态机](../12-scheduler-state-machine.md)。
+
+## 8. 绑定实例的回调
+
+I/O 接口输入 IoEvent、callers 允许 /system/io；ws_watch 每连接最多缓存一条原始结果，处理器用 ws_receive 取走。空闲监听和计时器不占来宾任务，已接受通知和激活不能迁移到新实例，Drain 等它们完成。AtYield/Force 可中断；旧原生监听取消并 join 后才创建新实例。

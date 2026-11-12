@@ -2,7 +2,9 @@
 
 ## 职责与边界
 
-`forest-onebot` 提供 OneBot v11 的类型化请求、响应、消息段与异步客户端。协议层依赖 Serde，原生 HTTP 传输通过可选 feature 引入 Reqwest；模块调度、鉴权和网关连接管理由宿主负责。
+源码位于 `plugins/onebot/protocol`，属于接入插件的协议库。调度器、SDK 与 CLI 均不依赖该库；OneBot 与宿主的端到端验证也放在接入插件的测试目录。
+
+`forest-onebot` 提供 OneBot v11 的类型化请求、响应、消息段与异步客户端。协议层依赖 Serde，原生 HTTP 传输通过可选 feature 引入 Reqwest；模块调度与来源鉴权由宿主负责，网关连接管理由 OneBot Wasm 包负责。
 
 ## 协议与执行分离
 
@@ -10,7 +12,7 @@
 - `Client<T>` 负责一次请求的编码、异步提交及结果解码。`Transport` 只负责向指定 action 传递参数 JSON 字节并取得响应 JSON 字节。
 - 默认不启用网络依赖，协议和泛型客户端可以编译为 Wasm。`http` feature 提供原生 HTTP(S) 传输，使用 Tokio 运行时，但库不创建运行时或隐式后台任务。
 - 覆盖 v11 的全部 38 个公开 API，包含消息、群管理、请求处理、查询、凭证、媒体和实现管理。不把 NapCat 等实现的扩展混成标准。
-- 本库提供 v11 数据类型和异步 API 客户端；WebSocket 连接、echo 分派与事件监听由宿主适配器负责，见[运行说明](13-runtime-and-sdk.md)。模块生命周期由调度器管理。
+- 本库提供 v11 数据类型和异步 API 客户端；WebSocket 连接、echo 分派与事件监听由普通 Wasm 接入包负责，见[运行说明](13-runtime-and-sdk.md)。模块生命周期由调度器管理。
 - 请求结构与消息段是数据，构造和序列化不发送请求。只有显式调用异步方法才产生 I/O。
 
 ## 结果语义
@@ -37,7 +39,7 @@ HTTP 请求使用 JSON Content-Type 和可选 Bearer 认证；目标可带路径
 
 ## 与 Forest 接入
 
-该 crate 不持有 Forest 管理员身份，不决定哪个用户可以禁言或读取凭证。Forest 暴露的 OneBot 原生接口在静态声明上挂 AccessPolicy，通过 callers 检查可信调用主体；具体群目标等约束由接口处理。群消息等宿主事件由接入层解析后交给调度器 notifier，再按 Manifest 接收声明投递到处理模块，不要求插件产生事件。该协议库本身不创建 notifier 或定义事件监听入口。
+该协议 crate 不持有 Forest 管理员身份。普通 Wasm 包 /module/onebot 通过通用宿主 WS、计时和随机接口维护连接、回执与重连。群消息由其声明的事件发布，接收包通过 subscriptions 订阅；callers 和事件 readers 分别检查。平台群角色不会自动授予框架权限。
 
 当前接入只考虑一个 Bot 账号，仍支持该账号参与的多个群聊。不加入账号池、Bot 实体目录、跨账号选择参数或每 Bot 配置挂载；事件里的 self_id 保留为平台账号信息。
 
@@ -49,8 +51,8 @@ HTTP 请求使用 JSON Content-Type 和可选 Bearer 认证；目标可带路径
 
 共享事件类型省略 font 等与接入无关的字段，保留消息来源、发送者、回复关系及媒体引用。省略由接入协议的类型定义确定，调度器不任意裁剪字段。
 
-WebSocket 连接与事件监听由宿主接入层负责，不把连接转交给接收插件。事件源身份由宿主绑定；平台用户信息和群角色属于事件上下文，不自动授予框架管理权限。
+WebSocket 连接与事件监听由 OneBot Wasm 包负责，不把连接转交给接收插件。事件源身份由宿主绑定；平台用户信息和群角色属于事件上下文，不自动授予框架管理权限。
 
-模块主动取得的网络句柄按其执行实例生命周期管理，不迁移 Rust Future 或连接对象；宿主事件接入自身的资源归该宿主能力，不归某个消息接收插件所有。具体通知契约见[notifier 设计](11-notifier-and-dependencies.md)。
+模块主动取得的网络句柄按其执行实例生命周期管理，不迁移 Rust Future 或连接对象；接入包自身的资源归其具体 Wasm 实例，不归某个消息接收插件所有。具体通知契约见[notifier 设计](11-notifier-and-dependencies.md)。
 
 标准依据：[公开 API](https://github.com/botuniverse/onebot-11/blob/master/api/public.md)、[HTTP](https://github.com/botuniverse/onebot-11/blob/master/communication/http.md)、[鉴权](https://github.com/botuniverse/onebot-11/blob/master/communication/authorization.md)。

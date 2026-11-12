@@ -1162,6 +1162,7 @@ dependencies = [
 name = "forest-agent-module"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "base64 0.22.1",
  "forest-agent-tools",
@@ -1236,22 +1237,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "forest-config",
  "forest-control",
- "forest-onebot",
  "forest-package",
  "forest-protocol",
  "forest-runtime",
- "forest-test",
  "forest-webui",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
  "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]
@@ -1388,6 +1379,7 @@ dependencies = [
 name = "forest-message-output"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "forest-markdown",
  "forest-onebot",
@@ -1396,6 +1388,7 @@ dependencies = [
  "forest-runtime",
  "forest-sdk",
  "forest-serde",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1426,9 +1419,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "forest-onebot-module"
+version = "0.1.0"
+dependencies = [
+ "forest-config",
+ "forest-onebot",
+ "forest-package",
+ "forest-protocol",
+ "forest-runtime",
+ "forest-sdk",
+ "forest-serde",
+ "forest-test",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "forest-onebot-tools"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "forest-markdown",
  "forest-media",
@@ -1532,14 +1546,13 @@ dependencies = [
  "anyhow",
  "cap-std",
  "forest-config",
- "forest-onebot",
  "forest-package",
  "forest-protocol",
  "forest-scheduler-probe",
  "forest-serde",
- "forest-test",
  "forest-util",
  "futures",
+ "getrandom 0.3.4",
  "indexmap",
  "reqwest",
  "rusqlite",
@@ -1601,6 +1614,7 @@ dependencies = [
 name = "forest-shell"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "forest-config",
  "forest-control",
  "forest-npucraft",
@@ -1611,6 +1625,7 @@ dependencies = [
  "forest-sdk",
  "forest-serde",
  "forest-test",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1654,6 +1669,7 @@ dependencies = [
 name = "forest-typst-command"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "forest-markdown",
  "forest-media",

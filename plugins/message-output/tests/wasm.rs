@@ -1,3 +1,5 @@
+#[path = "../../onebot/tests/support/native.rs"]
+mod onebot_mock;
 use forest_message_output::{GroupRule, Settings, contract::*, managed};
 use forest_onebot::{
     Client, Transport, cq,
@@ -143,10 +145,10 @@ async fn actual_wasm_output_folds_by_group_preserves_cq_and_never_falls_back_to_
     .await
     .unwrap();
     let gateway = Gateway::default();
-    forest_runtime::onebot::install(
+    onebot_mock::install(
         &s,
         Client::new(gateway.clone()),
-        forest_runtime::onebot::GroupScope::All,
+        onebot_mock::GroupScope::All,
         vec![SubjectPattern::Path("/module/**".parse().unwrap())],
     )
     .unwrap();

@@ -51,7 +51,12 @@ export interface Module {
   interfaces: Interface[]
   uses: { object: string; interface: string }[]
   subscriptions: { source: string; event: string; interface: string }[]
+  events: string[]
+  activated: string | null
   budget: {
+    control_tasks_used: number
+    notifications_used: number
+    notification_bytes_used: number
     requests_used: number
     requests_max: number
     input_bytes_used: number
@@ -89,6 +94,8 @@ export interface Manifest {
   }
   module: string
   lifecycle_error: unknown
+  activated: string | null
+  events: { path: string; input: unknown; access: unknown }[]
   configs: { key: string; schema: unknown; default: unknown; access: unknown }[]
   provides: { path: string; input: unknown; output: unknown; access: unknown }[]
   uses: { object: string; interface: string; input: unknown; output: unknown }[]

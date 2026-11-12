@@ -1,4 +1,4 @@
-use crate::{AccessPolicy, Schema, Token, Value};
+use crate::{AccessPolicy, AsValue, Schema, Token, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -12,6 +12,8 @@ pub struct Manifest {
     pub provides: Vec<InterfaceDeclaration>,
     pub uses: Vec<InterfaceUse>,
     pub subscriptions: Vec<EventSubscription>,
+    pub events: Vec<EventDeclaration>,
+    pub activated: Option<Token>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -76,6 +78,14 @@ pub struct EventSubscription {
     pub interface: Token,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventDeclaration {
+    pub path: Token,
+    pub input: Schema,
+    pub access: AccessPolicy,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("invalid manifest: {0}")]
 pub struct ManifestError(pub String);
@@ -122,6 +132,25 @@ impl Manifest {
             }
         }
         let mut subscriptions = HashSet::new();
+        if let Some(path) = &self.activated {
+            let handler = self
+                .provides
+                .iter()
+                .find(|p| &p.path == path)
+                .ok_or_else(|| fail("activation handler missing"))?;
+            if !().as_value().check(&handler.input, false) {
+                return Err(fail("activation handler must accept Unit"));
+            }
+        }
+        let mut events = HashSet::new();
+        for event in &self.events {
+            if !events.insert(&event.path) {
+                return Err(fail("duplicate event path"));
+            }
+            if !event.access.writers.is_empty() || !event.access.callers.is_empty() {
+                return Err(fail("event subscription grants must use readers"));
+            }
+        }
         for subscription in &self.subscriptions {
             if !paths.contains(&subscription.interface) {
                 return Err(fail("subscription handler missing"));

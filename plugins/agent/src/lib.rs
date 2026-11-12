@@ -188,6 +188,8 @@ pub fn manifest() -> Manifest {
         callers: vec![],
     };
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),

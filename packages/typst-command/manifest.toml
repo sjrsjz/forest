@@ -23,7 +23,7 @@ input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
 
 [provides.access]
-callers = ["/core/onebot"]
+callers = ["/module/onebot"]
 
 [[uses]]
 object = "/module/typst"
@@ -38,18 +38,18 @@ input = "generated/uses/1.input.schema"
 output = "generated/uses/1.output.schema"
 
 [[subscriptions]]
-source = "/core/onebot"
+source = "/module/onebot"
 event = "/group_message"
 interface = "/group_message"
 
 [sha256]
 "generated/configs/0.schema" = "115a5a870f5c13093e323b19b17ae69cc0ffe771c518419445fa13befb14b981"
 "generated/configs/0.value" = "cade1e5d0fc41f7dc5c0c6221634361cb001a39c17d39c199ea5089c3df1310e"
-"generated/lifecycle-error.schema" = "096a225fb87b29283f239e73446179199723e3808cfb9b9b4efdc2b7925ae7db"
+"generated/lifecycle-error.schema" = "3954e76bc231a3753b7761fc5be4d774c4d978bfbbff10b0fb965618406d7c1c"
 "generated/provides/0.input.schema" = "0fb47ece9fe29014ae572e9bd5f5aaee5248e81d68c6385f5e416581422048fe"
 "generated/provides/0.output.schema" = "42c17661422958d2eadc811723a8fb07f7875d89f52469b77bfdf5ebeee60261"
 "generated/uses/0.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
 "generated/uses/0.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
 "generated/uses/1.input.schema" = "5cafdedb374c5999aae12caa4c9d14a7a4b8d51625e9a2423566175e0256523d"
-"generated/uses/1.output.schema" = "faccf627556765863ac86619e88778a123fbc4f3884ae665fb7a412ff7499d01"
-"module.wasm" = "232d388600a93f39ef89b18915828beb1c38b660bc882d1df1b26517137155b9"
+"generated/uses/1.output.schema" = "26939cb09423bc4c715ba710ad4b1f6aa186a28a3fdcaf0a2740f43ff4cd29ac"
+"module.wasm" = "215e14eee10bb7b352415323f1912f972af1bd77036160737a7c24ff7a7624e0"

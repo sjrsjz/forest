@@ -149,6 +149,8 @@ forest_sdk::export_module!(super::Projector);
 
 pub fn manifest() -> Manifest {
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),

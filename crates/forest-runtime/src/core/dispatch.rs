@@ -9,7 +9,7 @@ impl Core {
         let directory = self.directory.lock().unwrap();
         Self::permission_in(&directory, instance, &access)
     }
-    fn permission_in(
+    pub(super) fn permission_in(
         directory: &Directory,
         instance: &Instance,
         access: &HostAccess<'_>,
@@ -135,6 +135,7 @@ impl Core {
         };
         let bytes = abi::encode(&invocation).map_err(|_| DispatchError::FrameTooLarge)?;
         let accepted = Request {
+            binding: Binding::Object,
             admission: slot.budget.reserve(bytes.len())?,
             invocation,
             bytes,

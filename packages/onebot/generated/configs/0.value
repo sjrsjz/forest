@@ -1,0 +1,1 @@
+{"action_timeout_ms": 30000i64, "allowed_groups": [], "connect_timeout_ms": 10000i64, "reconnect_max_ms": 30000i64, "reconnect_min_ms": 1000i64, "token": "", "websocket": "ws://127.0.0.1:8080"}

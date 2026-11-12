@@ -1,0 +1,32 @@
+[package]
+name = "forest-onebot-module"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "package-onebot"
+path = "src/bin/package.rs"
+
+[dependencies]
+forest-sdk = { path = "../../crates/forest-sdk" }
+forest-protocol = { path = "../../crates/forest-protocol" }
+forest-serde = { path = "../../crates/forest-serde" }
+forest-onebot = { path = "protocol", features = ["forest"] }
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+forest-package = { path = "../../crates/forest-package" }
+
+[dev-dependencies]
+forest-test = { path = "../forest-test" }
+forest-config = { path = "../../crates/forest-config" }
+forest-runtime = { path = "../../crates/forest-runtime" }
+tempfile = "3.23.0"
+tokio.workspace = true
+tokio-tungstenite = "0.27.0"

@@ -45,9 +45,30 @@ pub enum DispatchError {
 
 pub type DispatchResult<T> = Result<T, DispatchError>;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DeriveSchema, DeriveValue)]
+pub enum Origin {
+    Principal(Token),
+    External { issuer: Token, subject: Token },
+}
+
+impl From<Token> for Origin {
+    fn from(value: Token) -> Self {
+        Self::Principal(value)
+    }
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Principal(principal) => write!(f, "{principal}"),
+            Self::External { issuer, subject } => write!(f, "{issuer}: {subject}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CallContext {
-    pub origin: Token,
+    pub origin: Origin,
     pub caller: Token,
 }
 

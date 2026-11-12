@@ -71,7 +71,7 @@ input = "generated/uses/0.input.schema"
 output = "generated/uses/0.output.schema"
 
 [[subscriptions]]
-source = "/core/onebot"
+source = "/module/onebot"
 event = "/group_message"
 interface = "/render"
 
@@ -79,7 +79,7 @@ interface = "/render"
 # 每个有效负载文件对应一个实际的 64 位十六进制 SHA-256。
 ```
 
-`package`、`module` 和 `sha256` 必须存在；空的 configs、provides、uses、subscriptions 可以省略。未知字段和重复 TOML 键会被拒绝。订阅的输入类型必须与对应宿主事件兼容，示例中的接口和事件需要按实际用途选择。
+`package`、`module` 和 `sha256` 必须存在；空的 configs、provides、uses、subscriptions、events 可以省略。未知字段和重复 TOML 键会被拒绝。订阅的输入类型必须与对应宿主事件兼容，示例中的接口和事件需要按实际用途选择。
 
 ## 3. 身份与元信息
 
@@ -154,3 +154,9 @@ Rust 打包器从类型化 Manifest 生成声明文件，计算摘要，最后�
 配置键集合及 Schema 保持等价，默认值可以更新并保留全部当前值。生命周期错误 Schema 属于具体执行实例，允许随候选改变；错误始终携带所属实例的契约。元信息和文件摘要不替代这些兼容检查。
 
 普通加载求静态依赖闭包，允许依赖环；宿主在联合候选目录中检查接口，再初始化并统一发布整组成员。生命周期、执行交接、ACL 发布及请求队列仍按[模块生命周期](10-module-lifecycle.md)和[调度器状态机](12-scheduler-state-machine.md)执行。
+
+## 8. 事件与发布后激活
+
+[module] 可声明 activated = "/activated"，指向本包的 Unit 输入普通接口。其 callers 允许 /system/lifecycle，整组发布后以绑定实例的控制请求运行一次。它不改变固定 Wasm 导出，也不建立额外初始化屏障。
+
+[[events]] 声明 path、input（Schema 文件引用）及 access.readers；不允许 writers/callers。生成器把 Schema 放在 generated/events/，同样纳入 SHA-256 索引。subscriptions 可以指向模块事件，形成静态依赖；源 readers 和目标接口 callers 同时检查，事件输入必须是目标输入子类型。来源包替换时事件输入只能向旧契约的子类型收窄。见[事件设计](11-notifier-and-dependencies.md)。

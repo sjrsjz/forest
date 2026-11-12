@@ -15,11 +15,12 @@ path = "src/bin/package.rs"
 forest-sdk = { path = "../../crates/forest-sdk" }
 forest-protocol = { path = "../../crates/forest-protocol" }
 forest-serde = { path = "../../crates/forest-serde" }
-forest-onebot = { path = "../../crates/forest-onebot", features = ["forest"] }
+forest-onebot = { path = "../onebot/protocol", features = ["forest"] }
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 forest-markdown = { path = "../markdown" }
 forest-runtime = { path = "../../crates/forest-runtime" }
 forest-typst = { path = "../typst" }

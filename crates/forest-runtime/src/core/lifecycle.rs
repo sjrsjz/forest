@@ -42,17 +42,44 @@ impl Core {
             );
         }
         for subscription in &manifest.subscriptions {
-            let event = directory
+            let input = if let Some(event) = directory
                 .events
                 .get(&(subscription.source.clone(), subscription.event.clone()))
-                .context("host event unavailable")?;
+            {
+                &event.input
+            } else {
+                let producer = catalog
+                    .get(&subscription.source)
+                    .context("event producer is not loaded")?;
+                let event = producer
+                    .events
+                    .iter()
+                    .find(|event| event.path == subscription.event)
+                    .context("event is not declared")?;
+                let acl = AclTable::new([AclEntry {
+                    entity: subscription.source.clone(),
+                    key: event.path.clone(),
+                    owner: subscription.source.clone(),
+                    access: event.access.clone(),
+                }])?;
+                ensure!(
+                    acl.check(
+                        &manifest.package.id,
+                        &subscription.source,
+                        &event.path,
+                        Access::Read
+                    ),
+                    "event subscription denied by readers"
+                );
+                &event.input
+            };
             let handler = manifest
                 .provides
                 .iter()
                 .find(|p| p.path == subscription.interface)
                 .unwrap();
             ensure!(
-                event.input.subof(&handler.input),
+                input.subof(&handler.input),
                 "incompatible event {} {} -> {}",
                 subscription.source,
                 subscription.event,
@@ -71,7 +98,25 @@ impl Core {
                     &handler.path,
                     Access::Call
                 ),
-                "host event source denied by handler callers"
+                "event source denied by handler callers"
+            );
+        }
+        if let Some(path) = &manifest.activated {
+            let handler = manifest.provides.iter().find(|p| &p.path == path).unwrap();
+            let acl = AclTable::new([AclEntry {
+                entity: manifest.package.id.clone(),
+                key: path.clone(),
+                owner: manifest.package.id.clone(),
+                access: handler.access.clone(),
+            }])?;
+            ensure!(
+                acl.check(
+                    &"/system/lifecycle".parse()?,
+                    &manifest.package.id,
+                    path,
+                    Access::Call
+                ),
+                "activation handler denies lifecycle source"
             );
         }
         Ok(())

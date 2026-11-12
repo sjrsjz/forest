@@ -64,14 +64,14 @@ uses 表达静态依赖和类型要求，callers 表达接纳权限，二者不�
 
 ```rust
 pub struct CallContext {
-    pub origin: Token,
+    pub origin: Origin,
     pub caller: Token,
 }
 ```
 
 `origin` 记录原始发起者，`caller` 记录本次直接调用主体。链路 `用户 → 模块 A → 模块 B` 中，B 的 origin 保留原始来源，caller 为 A。接口 callers 匹配直接调用主体；常规配置操作则以实际执行模块为主体检查。
 
-OneBot 群消息的 origin 由宿主根据账号生成 `/user/onebot/ACCOUNT`，caller 为 `/core/onebot`。普通群消息正文中的账号、群管理员标记、模型参数都不能替代宿主绑定的来源。群管理员资格也不会自动授予框架管理员权限。
+OneBot 群消息的 origin 由接入包声明用户、宿主绑定发行者生成 `External { issuer: /module/onebot, subject: /user/ACCOUNT }`，caller 为 `/module/onebot`。普通群消息正文中的账号、群管理员标记、模型参数都不能替代宿主绑定的来源。群管理员资格也不会自动授予框架管理员权限。
 
 `CreateContext.object`、操作参数中的目标 Token 和调用上下文是不同用途的数据。知道一个管理员 Token 的文本，不等于获得该身份；宿主 API 不允许模块指定自己的来源。
 
@@ -98,20 +98,22 @@ OneBot 群消息的 origin 由宿主根据账号生成 `/user/onebot/ACCOUNT`，
 
 受信 WebUI 的只读 Inspector 可以查看完整配置；编辑仍走 `/user/admin` 的 config set 和 writers。可见不等于可写，`/user/admin` 也不是模块接口的隐式通行证。
 
-## 6. 宿主事件
+## 6. 模块事件
 
 群事件接收声明为：
 
 ```toml
 [[subscriptions]]
-source = "/core/onebot"
+source = "/module/onebot"
 event = "/group_message"
 interface = "/group_message"
 ```
 
-接收接口必须出现在本模块 provides 中，输入应能接受宿主事件 Schema，callers 必须允许对应事件源。订阅随包加载和重载维护，模块不调用动态 subscribe/unsubscribe。
+接收接口必须出现在本模块 provides 中，输入应能接受源包事件 Schema，callers 必须允许对应事件源。订阅随包加载和重载维护，模块不调用动态 subscribe/unsubscribe。
 
-notifier 是宿主事件的投递机制。模块没有 emit/publish 能力；模块主动通知其他模块使用 send，等待结果使用 call。一次宿主事件可能发给多个接收者，各次接纳独立；其中一个队列满，不撤销其他接收者已经接纳的工作。事件没有自动重放历史的保证。
+模块用 events 声明事件及 readers，emit 发布自身事件并逐目标取得接纳结果。subscriptions 形成静态依赖，允许环；接收接口 callers 同时允许源包。不提供动态订阅、回放或自动重试。需要响应时用 call，单目标通知可用 send。
+
+emit 的 subject 为 None 时继承 origin；指定路径时生成 External { issuer: 当前模块, subject }，不能伪造 Principal。完整规则见[事件与依赖](../11-notifier-and-dependencies.md)。
 
 ## 7. 接纳与背压
 

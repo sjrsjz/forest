@@ -1,3 +1,5 @@
+#[path = "../../onebot/tests/support/native.rs"]
+mod onebot_mock;
 use forest_onebot::{
     Client, Transport,
     forest::{self as onebot, OneBotError, Query, SendPrivateMessage},
@@ -151,10 +153,10 @@ async fn wasm_tools_query_native_onebot_and_send_markdown_with_real_receipts() {
     .await
     .unwrap();
     let gateway = Gateway::default();
-    forest_runtime::onebot::install(
+    onebot_mock::install(
         &scheduler,
         Client::new(gateway.clone()),
-        forest_runtime::onebot::GroupScope::All,
+        onebot_mock::GroupScope::All,
         vec![SubjectPattern::Path("/module/**".parse().unwrap())],
     )
     .unwrap();
@@ -336,10 +338,10 @@ async fn wasm_tools_query_native_onebot_and_send_markdown_with_real_receipts() {
     )
     .await
     .unwrap();
-    forest_runtime::onebot::install(
+    onebot_mock::install(
         &scoped,
         Client::new(gateway.clone()),
-        forest_runtime::onebot::GroupScope::only([42]),
+        onebot_mock::GroupScope::only([42]),
         vec![SubjectPattern::Path("/module/**".parse().unwrap())],
     )
     .unwrap();

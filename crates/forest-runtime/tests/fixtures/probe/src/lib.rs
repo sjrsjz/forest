@@ -3,6 +3,7 @@ use forest_protocol::{manifest::callers, service::*, *};
 use forest_sdk::{AsSchema, AsValue, CallContext, CreateContext, Handlers, Module, Token, host};
 use futures::{StreamExt, stream::FuturesUnordered};
 use std::{cell::Cell, rc::Rc};
+mod generic;
 
 pub struct Probe {
     object: Token,
@@ -131,6 +132,36 @@ impl Module for Probe {
             .with("/file".parse().unwrap(), policy(), Self::file)
             .with("/http".parse().unwrap(), policy(), Self::http)
             .with("/ws".parse().unwrap(), policy(), Self::ws)
+            .with(
+                "/http-deadline".parse().unwrap(),
+                policy(),
+                Self::http_deadline,
+            )
+            .with(
+                "/entropy-clock".parse().unwrap(),
+                policy(),
+                Self::entropy_clock,
+            )
+            .with("/watch".parse().unwrap(), policy(), Self::watch)
+            .with("/timer".parse().unwrap(), policy(), Self::timer)
+            .with("/publish".parse().unwrap(), policy(), Self::publish)
+            .with(
+                "/activated".parse().unwrap(),
+                callers(vec![SubjectPattern::Path(
+                    "/system/lifecycle".parse().unwrap(),
+                )]),
+                Self::activated,
+            )
+            .with(
+                "/io".parse().unwrap(),
+                callers(vec![SubjectPattern::Path("/system/io".parse().unwrap())]),
+                Self::io,
+            )
+            .with(
+                "/on-event".parse().unwrap(),
+                callers(vec![SubjectPattern::Path("/module/**".parse().unwrap())]),
+                Self::on_event,
+            )
             .with("/variance".parse().unwrap(), policy(), Self::variance)
             .with(
                 "/use-variance".parse().unwrap(),
@@ -341,6 +372,7 @@ impl Probe {
     async fn http(self: Rc<Self>, _: CallContext, url: String) -> Result<String, String> {
         let response = flatten(
             host::http_request(HttpRequest {
+                timeout_ms: None,
                 method: "GET".into(),
                 url,
                 headers: vec![],
@@ -357,12 +389,20 @@ impl Probe {
     async fn ws(self: Rc<Self>, _: CallContext, url: String) -> Result<String, String> {
         let socket = flatten(
             host::ws_connect(WebSocketRequest {
+                timeout_ms: None,
                 url,
                 headers: vec![],
             })
             .await,
         )?;
-        flatten(host::ws_send(socket, WebSocketMessage::Text("probe".into())).await)?;
+        flatten(
+            host::ws_send(forest_protocol::service::WebSocketSend {
+                handle: socket,
+                message: WebSocketMessage::Text("probe".into()),
+                timeout_ms: None,
+            })
+            .await,
+        )?;
         let event = flatten(host::ws_receive(socket).await)?;
         flatten(host::ws_close(socket).await)?;
         match event {
@@ -428,7 +468,24 @@ pub fn manifest(object: Token) -> Manifest {
             callers: vec![],
         },
     });
+    configs.push(ConfigDeclaration {
+        key: "/last-event".parse().unwrap(),
+        schema: <(Origin, Token, String)>::as_schema(),
+        default: (
+            Origin::Principal(object.clone()),
+            object.clone(),
+            String::new(),
+        )
+            .as_value(),
+        access: AccessPolicy {
+            readers: vec![SubjectPattern::SelfModule],
+            writers: vec![SubjectPattern::SelfModule],
+            callers: vec![],
+        },
+    });
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: object,
             version: if cfg!(feature = "second") {

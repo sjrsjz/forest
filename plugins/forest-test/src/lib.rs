@@ -88,6 +88,8 @@ fn is_command(event: &GroupMessage) -> bool {
 
 pub fn manifest() -> Manifest {
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: "/module/forest-test".parse().unwrap(),
             version: "0.1.0".into(),

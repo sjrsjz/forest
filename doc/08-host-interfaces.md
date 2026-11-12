@@ -8,19 +8,20 @@
 
 | 分组 | 最小操作 | 宿主负责 |
 |---|---|---|
-| 模块通信 | `send`、`call` | 按对象和接口寻址、来源绑定、派发、结果关联 |
+| 模块通信 | `send`、`call`、`emit` | 按对象和接口寻址、来源绑定、派发、结果关联 |
 | 配置 | `get`、`set`、`reset` | ACL、类型校验、单次原子操作及持久化 |
 | 互斥 | `lock`、`unlock` | 具体 Token 命名、任务持有、FIFO 等待与资源回收 |
 | HTTP | `request` | 异步 HTTP(S) 请求 |
-| WebSocket | `connect`、`send`、`receive`、`close` | WS(S) 连接和协议处理 |
+| WebSocket | `connect`、`send`、`receive`、`close`、`watch` | WS(S) 连接和协议处理 |
 | 受管文件 | `read`、`write`、`remove` | 模块数据目录内的文件访问 |
 | 私有 SQLite | `sqlite` | 执行模块专用数据库内的一次原子事务 |
 | 日志 | `log` | 附加真实模块身份并记录日志 |
-| 时间 | `now`、`sleep` | 读取当前时间、异步等待 |
+| 时间 | `now`、`monotonic_now`、`sleep`、`timer_after` | 日历时间、单调时间、等待和实例通知 |
+| 随机 | `random_bytes` | 操作系统安全随机字节 |
 
 这些是专用、类型明确的宿主函数，不需要先把每项宿主能力包装为一个可安装的模块对象，也不增加一套通用字符串操作码。模块间服务仍然使用 `(对象 Token, 接口路径)` 通信。
 
-Agent、记忆、搜索、消息触发和群聊 shell 等处理由模块实现。宿主不提供 agent.run 或 memory.recall 等处理器。群消息等外部事件由宿主接入能力产生，调度器 notifier 投递到模块声明的接收入口，不经过模块发布接口。平台原生操作可按宿主对象和接口地址提供，与模块调用共享寻址方式；不把 notifier 当成模块可调用的能力。
+Agent、记忆、搜索、消息触发和群聊 shell 等处理由模块实现。宿主不提供 agent.run 或 memory.recall 等处理器。外部协议由接入 Wasm 包解析并通过自身声明的事件发布；宿主只提供通用 I/O。模块事件与原生事件共用静态接收关系。
 
 宿主接口的存在不表示任意生命周期阶段都能执行它。候选实例何时能产生写入或外部 I/O，由生命周期统一决定，不能由每个接口自行创造一套重载规则。
 
@@ -30,7 +31,7 @@ Agent、记忆、搜索、消息触发和群聊 shell 等处理由模块实现�
 
 宿主在派发接口时提供只读调用上下文：当前执行模块、可信发起者以及已有的请求关联。Bot、群和消息等信息属于具体模块的类型化输入，不放进所有模块必需的宿主上下文。
 
-所有宿主操作从当前执行上下文取得来源，不接受模块传入 `source`、管理员标记或其他可覆盖身份的参数。后续 `send/call` 及异步恢复保留来源；资源操作不能把来源变成宿主自身。
+所有宿主操作从当前执行上下文取得可信 caller。origin 是 Principal(Token) 或 External { issuer, subject }；emit 可以声明本地外部 subject，issuer 必须由宿主绑定为实际发布模块，不能生成 Principal 或覆盖可信 caller。后续 `send/call` 及异步恢复保留来源；资源操作不能把来源变成宿主自身。
 
 模块直接访问内部配置时，以实际执行模块为主体检查 ACL。WebUI 等已认证用户直接访问配置时，以该用户为主体。代用户跨模块执行管理操作的入口契约尚需确定，不能通过增加一个由模块任选的身份参数解决，见[配置 ACL](06-config-access.md)。
 
@@ -75,7 +76,7 @@ create/destroy 都禁止 send/call，包括自身、其他模块和宿主原生�
 
 热重载保持对象身份、地址和结果关联，默认 Drain 完成已接受的旧请求，AtYield/Force 可显式中断旧请求；模块不需要重绑定。同一实例的执行权、被动与主动让出、显式宿主锁和队列规则见[调度设计](09-scheduling.md)。嵌套等待的死锁处理不属于当前范围。
 
-宿主事件转发向每个接收入口提交请求时沿用相同的接纳语义。某个接收者 QueueFull 不撤回其他接收者已经接受的请求；逐目标提交结果由宿主事件接入和管理诊断处理，不作为模块发布操作的返回值。
+宿主事件转发向每个接收入口提交请求时沿用相同的接纳语义。某个接收者 QueueFull 不撤回其他接收者已经接受的请求；逐目标接纳结果由 emit 返回；原生接入也能通过宿主 API 取得相同结果。
 
 ### 4.1 宿主锁
 
@@ -90,11 +91,13 @@ unlock(key: Token) -> DispatchResult<()>
 
 create/destroy 的 lock/unlock 返回 LifecycleRestricted。任务结束时先终结已提交且不可中断的原生工作，再释放其已持有锁。trap/Force 停止整个实例，取消等待，不再推进任何来宾任务。详细所有权见[调度规则](09-scheduling.md#5-显式宿主锁)。
 
-### 4.2 宿主事件接收
+### 4.2 事件与资源通知
 
-notifier 是宿主内部机制，不是模块宿主函数。模块在 Manifest 的 subscriptions 中声明接收哪些宿主事件，以及对应的 provides 接口；事件及其 Schema 由宿主定义。接收接口的 access.callers 须允许对应可信宿主事件源。调度器按静态注册表提交普通请求，不直接重入处理器、不等待其完成，也不保存历史待补发，见[notifier 设计](11-notifier-and-dependencies.md)。
+emit(event, input, subject) 发布当前模块 Manifest 中声明的事件，按 subscriptions 转交普通请求并逐目标报告接纳结果。静态检查事件输入、源 readers 和接收接口 callers。不提供动态订阅或历史回放，见[事件与依赖](11-notifier-and-dependencies.md)。
 
-模块没有 notify/emit/publish、register/subscribe/unsubscribe 宿主操作。模块之间的主动通信使用 send/call，不扩展为插件事件生产与订阅机制。
+ws_watch(handle, interface) 监听当前实例的一条 WS 结果；处理器输入 IoEvent::WebSocketReady(handle)，通过 ws_receive 取走原始结果后才继续接收。timer_after(delay_ms, interface) 投递一次 IoEvent::Timer(handle)。回调输入必须兼容 IoEvent，callers 允许 /system/io。watch/timer_after/emit 在 create/destroy 禁止。
+
+普通模块事件面向对象，可交接未启动请求；资源通知及激活绑定实例，不能交接到新实例。空闲监听不占来宾任务；已接纳回调必须参与 Drain 静止检查。取消和 join 原生监听属于实例资源回收。
 
 ## 5. 配置
 
@@ -122,6 +125,7 @@ struct HttpRequest {
     url: String,
     headers: Vec<Header>,
     body: Vec<u8>,
+    timeout_ms: Option<u64>,
 }
 
 struct HttpResponse {
@@ -130,6 +134,8 @@ struct HttpResponse {
     body: Vec<u8>,
 }
 ```
+
+timeout_ms 为从宿主执行至完整响应 body 的相对期限；None 显式不设期限，超时返回 ServiceError::Timeout，不自动重试或撤销远端效果。WS connect/send 同样支持 timeout_ms。
 
 方法、请求和响应是具体类型，HTTP 头用列表保留重复字段。接口提供完整请求和响应，不提供流式 body、客户端池句柄或中间件。HTTPS 连接和证书验证由宿主实现。
 
@@ -150,7 +156,7 @@ close(handle: WebSocketHandle) -> HostResult<(), WebSocketError>
 
 句柄由宿主创建并绑定实际执行实例，不能仅凭句柄数值操作其他实例的连接。模块自行安排连接的收发顺序，不对同一连接并发发起多个 receive。宿主只提供操作，不引入自动重连、订阅恢复或消息重放。
 
-这组接口描述模块主动建立连接。OneBot HTTP 上报或反向 WebSocket 的监听属于宿主 OneBot 接入能力，收到协议事件后交给 notifier；不为此要求模块取得通用监听接口。其他模块的服务器监听需求出现时另行设计。
+这组接口描述模块主动建立连接。HTTP 上报、反向 WS 等服务器功能需要未来的通用监听资源，不在内核保留平台专用接入路径。
 
 ## 8. 受管文件
 
@@ -186,9 +192,9 @@ now 返回 Unix 毫秒，用于时间标记。sleep 接受非负毫秒数，宿�
 
 外部卸载/重载可选择 Drain、AtYield 或 Force，不自动迁移网络等待、Future 或连接。Drain 等待旧请求完成，AtYield 在主动返回边界中断剩余旧请求并运行 destroy，Force 跳过来宾清理。具体顺序及 destroy 白名单见[生命周期设计](10-module-lifecycle.md)。
 
-create 禁止 send/call，允许初始化需要的基础宿主操作；请求不会延后至初始化成功再发送。普通入口只在 create 成功返回后开放，已有配置提交和网络副作用不因初始化失败撤销。
+create 禁止 send/call/emit 与 ws_watch/timer_after，允许初始化需要的基础宿主操作；请求不会延后至初始化成功再发送。普通入口只在 create 成功返回后开放，已有配置提交和网络副作用不因初始化失败撤销。
 
-destroy 阶段宿主允许配置 get/set/reset、受管文件访问、私有 SQLite 原子操作、日志、时钟和释放既有资源；禁止 send/call（包括原生服务对象）、新任务、新网络请求或连接、应用消息收发以及 sleep。限制由宿主执行，配置 ACL 仍有效，不能通过接口包装绕过。
+destroy 阶段宿主允许配置 get/set/reset、受管文件访问、私有 SQLite 原子操作、日志、时钟和释放既有资源；禁止 send/call/emit（包括原生服务对象）、ws_watch/timer_after、新任务、新网络请求或连接、应用消息收发以及 sleep。限制由宿主执行，配置 ACL 仍有效，不能通过接口包装绕过。
 
 基础调度、固定 ABI、静态依赖及宿主事件上下文现已实现。接口授权仍采用静态 access.callers，不增加 ABI 版本、动态授权表或通用监听协议。
 
@@ -209,3 +215,7 @@ struct SqlRows { columns: Vec<String>, rows: Vec<Vec<SqlValue>>, changed: u64 }
 连接惰性建立，在专用阻塞工作任务内执行，通过模块 Pending 与恢复返回结果，不阻塞调度线程。同一实例的数据库操作按连接互斥串行执行；一次 SQL 事务提供原子性，分开的调用不会自动合并。当前连接启用 WAL、外键及同步持久化，不自动重试数据库错误。
 
 create、普通处理器和 destroy 都可使用该资源。已提交的 SQL 属于不可中断本地操作；停止或强制丢弃来宾后，宿主仍等它实际结束，再释放连接并启动新实例。数据库文件跨热重载和卸载保留。
+
+## 12. 随机与单调时间
+
+random_bytes(length: u32) 返回操作系统安全随机字节，长度受实例内存额度约束，随机源失败返回 ServiceError::RandomUnavailable。monotonic_now() 返回当前宿主进程内单调毫秒数；now() 仍返回 Unix 毫秒。单调时间只能用于同一进程内的间隔，不用作持久日历时间。

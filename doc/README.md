@@ -21,14 +21,15 @@
 | [模块运行时架构](01-module-runtime.md) | 单例模块、消息通信、隔离及职责 |
 | [状态、访问与重载](02-state-access-and-reload.md) | 托管状态、配置、ACL 与实例交接 |
 | [来源令牌与路径匹配](03-token.md) | 身份路径、可信来源和通配符 |
-| [OneBot v11](04-onebot-v11.md) | API 库、宿主接入和消息契约 |
+| [OneBot v11](04-onebot-v11.md) | API 库、Wasm 接入包和消息契约 |
 | [配置表](05-config-table.md) | 默认值、原子操作、SQLite 存储与导入导出 |
 | [访问声明](06-config-access.md) | 配置读写、接口调用和静态 ACL |
 | [模块 Manifest](07-module-manifest.md) | TOML 包格式、元信息、Forest 文件引用、SHA-256 及契约声明 |
 | [宿主接口](08-host-interfaces.md) | 通信、配置、网络、文件、SQLite、日志和时间 |
 | [模块调度](09-scheduling.md) | 执行权、时间片、异步等待、实例内宿主锁与队列 |
 | [模块生命周期](10-module-lifecycle.md) | create/destroy、三种停止方式和故障结算 |
-| [宿主事件与依赖](11-notifier-and-dependencies.md) | 事件投递、静态接收声明和依赖规划 |
+| [事件与依赖](11-notifier-and-dependencies.md) | 模块事件、实例 I/O 通知、静态接收声明和依赖规划 |
+| [通用宿主与接入模块](36-generic-host-and-adapters.md) | 平台无关的内核、激活、I/O 期限、资源通知与 OneBot Wasm 包 |
 | [调度器状态机](12-scheduler-state-machine.md) | 状态转换、所有权、不变量和资源交接 |
 | [调度系统形式化模型](34-scheduler-formal-model.md) | 状态转换、调用祖先、可取消重载请求、可观测等待及循环依赖反例 |
 | [调度器 Lean 验证](35-scheduler-lean-verification.md) | Store/ABI 协议的机器证明、反例、源码对应与可信边界 |

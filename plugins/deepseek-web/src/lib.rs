@@ -83,6 +83,7 @@ impl DeepSeekWeb {
             return Err(Error::Execution("DeepSeek Web is not configured".into()));
         }
         let response = host::http_request(HttpRequest {
+            timeout_ms: None,
             method: "POST".into(),
             url: format!(
                 "{}/tools/{method}",
@@ -141,6 +142,8 @@ forest_sdk::export_module!(super::DeepSeekWeb);
 
 pub fn manifest() -> Manifest {
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),

@@ -338,8 +338,14 @@ impl Core {
                     }
                     _ => (0, 0),
                 };
-                s.budget.requests.available_permits() + queued_requests == self.options.max_requests
-                    && s.budget.bytes.available_permits() + queued_bytes
+                s.budget.normal.requests.available_permits() + queued_requests
+                    == self.options.max_requests
+                    && s.budget.control.available_permits() == 1
+                    && s.budget.notifications.requests.available_permits()
+                        == self.options.max_requests
+                    && s.budget.notifications.bytes.available_permits()
+                        == self.options.max_input_bytes
+                    && s.budget.normal.bytes.available_permits() + queued_bytes
                         == self.options.max_input_bytes
             })
         });
@@ -660,6 +666,9 @@ impl Core {
                         unreachable!("initialized group member")
                     };
                     let mut live = Live::new(instance.clone());
+                    if let Some(interface) = &instance.package.manifest.activated {
+                        live.enqueue(self.activation_request(instance, &budget, interface));
+                    }
                     if let Ingress::Deferred(queue) = inbox {
                         for request in queue {
                             live.enqueue(request);

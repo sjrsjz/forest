@@ -233,7 +233,7 @@ impl Scheduler {
             .core
             .call(
                 CallContext {
-                    origin: caller.clone(),
+                    origin: caller.clone().into(),
                     caller,
                 },
                 None,
@@ -255,7 +255,7 @@ impl Scheduler {
     ) -> DispatchResult<()> {
         self.core.send(
             CallContext {
-                origin: caller.clone(),
+                origin: caller.clone().into(),
                 caller,
             },
             None,
@@ -270,7 +270,7 @@ impl Scheduler {
         &self,
         source: &Token,
         event: &Token,
-        origin: Token,
+        origin: Origin,
         input: &I,
     ) -> Vec<(Token, DispatchResult<()>)> {
         let value = input.as_value();

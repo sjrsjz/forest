@@ -1,6 +1,6 @@
 # Forest
 
-Forest 是基于 Rust 与 WebAssembly 的模块化 Bot 框架。微内核负责调度、生命周期、接口契约、访问控制和宿主资源；消息处理、Agent、记忆、模型调用及工具由独立 Wasm 插件实现。
+Forest 是基于 Rust 与 WebAssembly 的通用异步模块调度器。微内核负责调度、生命周期、接口契约、访问控制和宿主资源；协议接入、消息处理、Agent、记忆、模型调用及工具由独立 Wasm 插件实现。仓库同时提供一套可选的 Bot 应用包。
 
 模块通过外部 `manifest.toml` 声明身份、元信息、接口、依赖、配置和事件订阅。Schema 与默认值引用 Forest 文本文件，包内文件使用 SHA-256 校验。调用方只依赖语言无关的接口契约，不链接目标模块的实现。
 
@@ -10,26 +10,30 @@ Forest 是基于 Rust 与 WebAssembly 的模块化 Bot 框架。微内核负责�
 - **异步调度**：区分时间片让出与异步等待，通过显式宿主锁协调跨等待点的共享状态；同一实例只允许一次独占推进，不同实例可以并行。
 - **类型化通信**：`call` 等待执行结果，`send` 返回接纳结果；Schema 同时约束请求和完整的模块返回值。
 - **持久配置与静态 ACL**：SQLite 配置表保存当前值和默认值，宿主绑定真实来源并执行读、写及调用权限检查。
-- **OneBot v11 接入**：支持正向 WebSocket，以及 HTTP API 配合反向 WebSocket；连接恢复与模块生命周期分离。
+- **通用 I/O 与事件**：HTTP/WS 单次期限、实例资源通知、单调时钟和安全随机数；模块事件通过静态 Schema、订阅和 ACL 连接。
+- **可选 OneBot v11 接入**：普通 Wasm 包负责正向 WebSocket、重连、回执关联和群消息事件，可单独装卸与热重载。
 - **管理与扩展**：Vue/TypeScript WebUI 提供运行状态、依赖图、日志、配置编辑和模块装卸；群聊 Shell 提供授权管理命令。
 - **可选 Agent 系统**：每群串行工作、多群异步对话，支持持续点、上下文裁剪、多主干多模态记忆、跨群联想及工具调用。
 
 项目处于开发阶段，宿主、SDK 与插件应从同一份源码及锁文件构建。
 
+工作区默认只构建通用 CLI。OneBot 协议库位于 `plugins/onebot/protocol`，接入实现与相关端到端测试均在插件侧；内核和 CLI 不依赖这些包，包括开发依赖。
+
 ## 架构
 
 ```mermaid
 flowchart TB
-    Gateway[OneBot 网关] --> Host[宿主接入与原生 I/O]
-    Host --> Kernel[调度器 · 生命周期 · 契约 · ACL]
-    Console[WebUI / 群聊 Shell] --> Kernel
+    Host[通用原生 I/O] --> Kernel[调度器 · 生命周期 · 契约 · ACL]
+    Console[WebUI] --> Kernel
     Kernel --> Modules[独立 Wasm 模块]
+    Gateway[外部服务] <--> Adapter[协议接入模块]
+    Modules --> Adapter
     Modules --> Agent[Agent / Context / 工具网关]
     Modules --> Memory[Memory / 嵌入 / 重排]
     Modules --> Output[消息输出 / Markdown / Typst / Media]
 ```
 
-框架面向单个 Bot 账号，可同时处理多个群聊。Agent 与记忆系统均为可选模块，运行普通命令插件不需要模型服务或向量数据库。
+调度器可以不加载任何聊天模块。OneBot 应用包面向一个账号、多个群聊；Agent 和记忆系统也是可选依赖，普通命令插件不需要模型服务或向量数据库。
 
 ## 构建
 
@@ -41,6 +45,7 @@ flowchart TB
 rustup target add wasm32-unknown-unknown
 cargo fetch --locked
 cargo build --locked -j 2 -p forest-cli
+cargo run --locked -j 2 -p forest-onebot-module --bin package-onebot
 cargo run --locked -j 2 -p forest-test --bin package
 ```
 
@@ -63,15 +68,21 @@ pnpm --dir webui build
 
 ## 运行示例插件
 
-准备一个 OneBot v11 网关，并启用正向 WebSocket。根据网关设置，在启动环境中配置 `FOREST_ONEBOT_TOKEN`；启用 WebUI 时还需设置非空的 `FOREST_WEB_PASSWORD`。CLI 不自动读取 `.env` 文件。
+通用宿主可以直接启动管理台，不加载模块。启用 WebUI 前设置非空环境变量 `FOREST_WEB_PASSWORD`；CLI 不自动读取 `.env`。
 
 ```sh
-cargo run --locked -p forest-cli -- --package packages/forest-test --events-ws ws://127.0.0.1:8080 --database data/config.sqlite3 --webui 127.0.0.1:8081
+cargo run --locked -p forest-cli -- --webui 127.0.0.1:8081
+```
+
+使用 Bot 示例时，先构建上面的 OneBot 与 forest-test 包，准备启用正向 WS 的 v11 网关，再启动：
+
+```sh
+cargo run --locked -p forest-cli -- --package packages/forest-test --database data/config.sqlite3 --webui 127.0.0.1:8081
 ```
 
 在浏览器打开 `http://127.0.0.1:8081`，使用管理口令登录，无需用户名。模块进入 `Serving` 后，在群中发送 `#forest-test`，示例模块回复 `hello world`。
 
-上述地址为示例。测试时可通过 `--allow-group 123456789` 限定宿主接收与发送的群；正式运行通常由各模块的群配置决定处理范围。反向 WebSocket、HTTP API、启动参数和热重载说明见[运行时与 SDK](doc/13-runtime-and-sdk.md)。
+宿主根据订阅自动加载 `/module/onebot`。其 `/settings` 配置网关 `websocket`、`token`、建连/动作期限、重连间隔和可选测试群范围 `allowed_groups`。默认连接 `ws://127.0.0.1:8080`，凭据为空。修改后重载 OneBot 即可，其他模块和宿主继续运行。首版接入包只支持正向 WS。详见[运行时与 SDK](doc/13-runtime-and-sdk.md)。
 
 首次加载 Wasm 需要编译，后续启动可复用持久编译缓存。缓存位置和预热方法也见运行时文档。
 
@@ -86,7 +97,7 @@ docker compose up -d qdrant
 以 Agent 作为启动根包，宿主会根据 Manifest 加载其依赖：
 
 ```sh
-cargo run --locked -p forest-cli -- --package packages/agent --events-ws ws://127.0.0.1:8080 --database data/config.sqlite3 --webui 127.0.0.1:8081
+cargo run --locked -p forest-cli -- --package packages/agent --database data/config.sqlite3 --webui 127.0.0.1:8081
 ```
 
 在 WebUI 配置聊天模型、嵌入与重排服务、记忆数据库和允许响应的群，再重载相应模块。Agent 默认不启用任何群。模型服务的 endpoint、模型配置与凭据由所属插件管理，不由消息调用方逐次提供。
@@ -97,6 +108,7 @@ cargo run --locked -p forest-cli -- --package packages/agent --events-ws ws://12
 
 ```text
 --package packages/shell
+--controller /module/shell
 --package packages/typst-command
 ```
 
@@ -121,6 +133,7 @@ Shell 需要单独配置授权用户和群。Agent 输出使用 Markdown 专用�
 - [文档导航](doc/README.md)
 - [模块开发手册与完整示例](doc/module-development/README.md)
 - [运行时、SDK 与 Wasm ABI](doc/13-runtime-and-sdk.md)
+- [通用宿主、资源通知与接入模块](doc/36-generic-host-and-adapters.md)
 - [WebUI 与模块管理](doc/14-inspection-webui.md)
 - [Agent 使用指南](doc/22-agent-guide.md)
 - [群聊 Shell](doc/26-group-shell.md)

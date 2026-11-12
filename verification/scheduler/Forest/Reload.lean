@@ -2,8 +2,9 @@ import Forest.Store
 
 namespace Forest.Reload
 
-/-- Host-owned request data. No Store, Memory, guest pointer, Future or borrowed
-slice occurs in this type. Identity includes the original reply capability. -/
+/-- Transferable object-addressed requests only. Instance-bound activation and
+I/O notifications are accounted separately and never enter the handoff queue.
+No Store, Memory, guest pointer, Future or borrowed slice occurs here. -/
 structure Request where
   identity : Nat
   payload : List UInt8
@@ -16,16 +17,20 @@ structure Member where
   store : Store.State
   queued : Nat → List Request
   deferred : Nat → List Request
+  pinnedQueued : Nat
+  control : Nat
 
 abbrev World := Nat → Member
 
 def Safe (world : World) : Prop := ∀ m, Store.Safe (world m).store
 
 def CanCommit (targets : List Nat) (world : World) : Prop :=
-  ∀ m, m ∈ targets → (world m).store.phase = .serving ∧ Store.quiet (world m).store
+  ∀ m, m ∈ targets → (world m).store.phase = .serving ∧ Store.quiet (world m).store ∧
+    (world m).pinnedQueued = 0 ∧ (world m).control = 0
 
 def commitMember (member : Member) : Member :=
-  { store := { member.store with phase := .stopping },
+  { member with
+    store := { member.store with phase := .stopping },
     queued := fun _ => [],
     deferred := fun interface => member.queued interface ++ member.deferred interface }
 
@@ -40,7 +45,7 @@ theorem commit_preserves {targets : List Nat} {world : World}
   · have conditions := ready m selected
     exact Store.step_preserves (safe m)
       (by simpa [commit, selected, commitMember] using
-        Store.Step.stopDrain (world m).store conditions.1 conditions.2)
+        Store.Step.stopDrain (world m).store conditions.1 conditions.2.1)
   · simpa [commit, selected] using safe m
 
 theorem commit_has_no_old_owner {targets : List Nat} {world : World} {m : Nat}
@@ -48,7 +53,7 @@ theorem commit_has_no_old_owner {targets : List Nat} {world : World} {m : Nat}
     (commit targets world m).store.owner = none := by
   have conditions := ready m selected
   simpa [commit, selected, commitMember] using
-    Store.drain_has_no_owner (safe m) conditions.1 conditions.2
+    Store.drain_has_no_owner (safe m) conditions.1 conditions.2.1
 
 theorem commit_transfers_exact_requests (targets : List Nat) (world : World)
     (m interface : Nat) (selected : m ∈ targets) :
@@ -67,9 +72,18 @@ theorem commit_preserves_other_modules (targets : List Nat) (world : World)
 
 /-- The production code derives this conservation from linear Admission ownership;
 these counts are specification quantities, not extra runtime counters. -/
-theorem admission_accounting (available queued live cleaning capacity : Nat)
-    (conserved : available + queued + live + cleaning = capacity)
-    (commitCheck : available + queued = capacity) : live = 0 ∧ cleaning = 0 := by
+theorem admission_accounting (available queued pinned live cleaning capacity : Nat)
+    (conserved : available + queued + pinned + live + cleaning = capacity)
+    (commitCheck : available + queued = capacity) : pinned = 0 ∧ live = 0 ∧ cleaning = 0 := by
+  omega
+
+theorem commit_has_no_instance_callbacks {targets : List Nat} {world : World} {m : Nat}
+    (ready : CanCommit targets world) (selected : m ∈ targets) :
+    (commit targets world m).pinnedQueued = 0 ∧ (commit targets world m).control = 0 := by
+  simpa [commit, selected, commitMember] using (ready m selected).2.2
+
+theorem separate_control_admission (available used : Nat)
+    (conserved : available + used = 1) (quiet : available = 1) : used = 0 := by
   omega
 
 def appendDeferred (member : Member) (interface : Nat) (request : Request) : Member :=

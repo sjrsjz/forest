@@ -24,7 +24,7 @@ typst-assets = { version = "=0.15.1", features = ["fonts"] }
 
 [dev-dependencies]
 forest-markdown = { path = "../markdown" }
-forest-onebot = { path = "../../crates/forest-onebot", features = ["forest"] }
+forest-onebot = { path = "../onebot/protocol", features = ["forest"] }
 forest-runtime = { path = "../../crates/forest-runtime" }
 forest-config = { path = "../../crates/forest-config" }
 tempfile = "3.23.0"

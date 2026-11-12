@@ -26,7 +26,7 @@ test('real console: authentication, runtime stream, dependency SVG and config in
   await page.getByRole('button', { name: '依赖关系', exact: true }).click()
   await expect(page.locator('.graph-svg svg')).toBeVisible()
   await expect(page.locator('.graph-svg')).toContainText('/module/forest-test')
-  await expect(page.locator('.graph-svg')).toContainText('/core/onebot')
+  await expect(page.locator('.graph-svg')).toContainText('/module/onebot')
   await expect(page.locator('.graph-svg')).toContainText('/send_group_message')
   await expect(page.locator('.graph-view [role=alert]')).toHaveCount(0)
   await page.screenshot({ path: 'test-results/dependencies.png' })

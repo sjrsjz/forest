@@ -4,7 +4,7 @@
   "files": [
     {
       "path": "crates/forest-runtime/src/wasm.rs",
-      "sha256": "f2db299526874ed65ee6b884aaf1650aba0e558b43de99c2570ffb7d36702077",
+      "sha256": "52c2154fc8af1341aab850437c99e72f198f93d1a12079ae3678ca20e7422f69",
       "reviewed": [
         "Wasm::advance",
         "Wasm::advance_inner",
@@ -14,7 +14,7 @@
     },
     {
       "path": "crates/forest-runtime/src/driver.rs",
-      "sha256": "32dcb6960811d9d344b7c5f42cda0a7cf83f8e1205798ac761e691e029f647e6",
+      "sha256": "6e0f808de9564763ec0fdef8f123ad0fa83c972f7bf06e4bd2dbe9b257508442",
       "reviewed": [
         "spawn",
         "run_guest",
@@ -23,7 +23,7 @@
     },
     {
       "path": "crates/forest-runtime/src/core.rs",
-      "sha256": "b85c6f7210b663b418cdbbc9223aa0bfb816db9af95702cea1db21a670b41863",
+      "sha256": "2259e7aa778a60b9c1da2c4130614ada16ed12e1f0f5d72facc84bdc274baddd",
       "reviewed": [
         "Request",
         "Started",
@@ -34,7 +34,7 @@
     },
     {
       "path": "crates/forest-runtime/src/core/lifecycle.rs",
-      "sha256": "f9e3448e1e757b227c086b2d18a9911c1a067c64a531dd4627a4e30e4b574471",
+      "sha256": "7226afa8a88f615ca30560ccabfa1ba505da337bdb01ea0abccc7ce5fad114c3",
       "reviewed": [
         "Core::turn",
         "Core::complete",
@@ -44,7 +44,7 @@
     },
     {
       "path": "crates/forest-runtime/src/core/changes.rs",
-      "sha256": "146302a5cf99cf3d37c10d4b292c3e1b9597529ecdf39f519e4ffba7292c44f3",
+      "sha256": "40498dc1a79af93bc7a422a330a5d026f3f4e1b1a73f1fd71571aaa76f67862b",
       "reviewed": [
         "Core::try_commit_change",
         "Core::wait_staged",
@@ -97,7 +97,7 @@
         "Core::lock",
         "Core::unlock"
       ],
-      "sha256": "17b6d42a8105ed8a87ca3e7bead5d135ae0644e9536d2d72a542ab71a4f6b770"
+      "sha256": "06419c93b6e0c65ecb7ed36a423769c66364803eeccebdcfb97b42dd86c6120b"
     },
     {
       "path": "crates/forest-sdk/src/operation.rs",
@@ -122,7 +122,27 @@
         "lock",
         "unlock"
       ],
-      "sha256": "9145d39b8c76a890a0f486636be495bc4430df33136f31fc8583a2b5d512fe80"
+      "sha256": "659c9cc7bed61b7da487e77095461368e61b529826b3b4b861a87e6d17415a6f"
+    },
+    {
+      "path": "crates/forest-runtime/src/core/events.rs",
+      "reviewed": [
+        "Core::activation_request",
+        "Core::check_callback",
+        "Core::notify_instance",
+        "Core::emit"
+      ],
+      "sha256": "b21a3bd45ad62016c628e07a3f799f50f62d2a56b4b360799793478ae4041b9b"
+    },
+    {
+      "path": "crates/forest-runtime/src/services/notifications.rs",
+      "reviewed": [
+        "Resources::ws_watch",
+        "Resources::timer_after",
+        "Resources::stop_notifications",
+        "post"
+      ],
+      "sha256": "d477b3ac1a39ec4a24b548604ed6b39b7b3759e50a856d2ff374e962e0084357"
     }
   ]
 }

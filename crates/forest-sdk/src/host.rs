@@ -30,7 +30,12 @@ pub(crate) mod imports {
         sqlite,
         sleep,
         log,
-        now
+        now,
+        monotonic_now,
+        random_bytes,
+        emit,
+        ws_watch,
+        timer_after
     );
 
     #[cfg(target_arch = "wasm32")]
@@ -57,6 +62,44 @@ pub(crate) mod imports {
     pub unsafe fn task_wake(_: u64) {
         panic!("guest SDK requires Wasm")
     }
+}
+
+/// Milliseconds elapsed since this host process started; never wall-clock time.
+pub fn monotonic_now() -> Operation<DispatchResult<u64>> {
+    Operation::new(imports::monotonic_now, &())
+}
+
+pub fn random_bytes(length: u32) -> Operation<HostResult<Vec<u8>>> {
+    Operation::new(imports::random_bytes, &length)
+}
+
+pub fn emit<I: AsValue>(
+    event: Token,
+    input: &I,
+    subject: Option<Token>,
+) -> Operation<DispatchResult<Vec<EventDelivery>>> {
+    Operation::new(
+        imports::emit,
+        &EmitRequest {
+            event,
+            input: input.as_value(),
+            subject,
+        },
+    )
+}
+
+pub fn ws_watch(handle: u64, interface: Token) -> Operation<HostResult<()>> {
+    Operation::new(imports::ws_watch, &WebSocketWatch { handle, interface })
+}
+
+pub fn timer_after(delay_ms: u64, interface: Token) -> Operation<HostResult<u64>> {
+    Operation::new(
+        imports::timer_after,
+        &TimerRequest {
+            delay_ms,
+            interface,
+        },
+    )
 }
 
 /// Acquire a nonrecursive, FIFO lock in this Wasm instance for the current task.
@@ -130,8 +173,8 @@ pub fn http_request(request: HttpRequest) -> Operation<HostResult<HttpResponse>>
 pub fn ws_connect(request: WebSocketRequest) -> Operation<HostResult<u64>> {
     Operation::new(imports::ws_connect, &request)
 }
-pub fn ws_send(handle: u64, message: WebSocketMessage) -> Operation<HostResult<()>> {
-    Operation::new(imports::ws_send, &WebSocketSend { handle, message })
+pub fn ws_send(request: WebSocketSend) -> Operation<HostResult<()>> {
+    Operation::new(imports::ws_send, &request)
 }
 pub fn ws_receive(handle: u64) -> Operation<HostResult<WebSocketEvent>> {
     Operation::new(imports::ws_receive, &handle)

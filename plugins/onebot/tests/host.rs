@@ -1,3 +1,4 @@
+use forest_protocol::AsValue;
 use futures::{SinkExt, StreamExt};
 use std::{
     path::PathBuf,
@@ -23,6 +24,24 @@ async fn executable_receives_group_command_and_correlates_onebot_receipt() {
     assert!(
         Command::new("cargo")
             .current_dir(&root)
+            .args([
+                "build",
+                "--locked",
+                "--offline",
+                "-j",
+                "2",
+                "-p",
+                "forest-cli",
+                "--bin",
+                "forest"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("cargo")
+            .current_dir(&root)
             .env("CARGO_BUILD_JOBS", "2")
             .args([
                 "build",
@@ -32,6 +51,8 @@ async fn executable_receives_group_command_and_correlates_onebot_receipt() {
                 "wasm32-unknown-unknown",
                 "-p",
                 "forest-test",
+                "-p",
+                "forest-onebot-module",
                 "--lib"
             ])
             .status()
@@ -110,22 +131,34 @@ async fn run(root: &std::path::Path, restricted: bool) {
             socket.close(None).await.unwrap();
         }
     });
-    let mut command = Command::new(env!("CARGO_BIN_EXE_forest"));
+    let catalog = temp.path().join("catalog");
+    let adapter = catalog.join("onebot");
+    std::fs::create_dir_all(&adapter).unwrap();
+    std::fs::copy(
+        root.join("target/wasm32-unknown-unknown/debug/forest_onebot_module.wasm"),
+        adapter.join("module.wasm"),
+    )
+    .unwrap();
+    let mut manifest = forest_onebot_module::manifest();
+    manifest.configs[0].default = forest_onebot_module::Settings {
+        websocket: format!("ws://{address}"),
+        allowed_groups: if restricted { vec![42] } else { vec![] },
+        ..Default::default()
+    }
+    .as_value();
+    forest_package::write(&adapter, &manifest).unwrap();
+    let executable = root
+        .join("target/debug")
+        .join(format!("forest{}", std::env::consts::EXE_SUFFIX));
+    let mut command = Command::new(executable);
     command
         .current_dir(temp.path())
-        .args(["--package"])
+        .arg("--packages-directory")
+        .arg(&catalog)
+        .arg("--package")
         .arg(&package)
-        .args(["--package"])
-        .arg(&second_package)
-        .args([
-            "--events-ws",
-            &format!("ws://{address}"),
-            "--token-env",
-            "FOREST_TEST_EMPTY_TOKEN",
-        ]);
-    if restricted {
-        command.args(["--allow-group", "42"]);
-    }
+        .arg("--package")
+        .arg(&second_package);
     let mut child = Host(
         command
             .stdout(Stdio::null())
@@ -144,13 +177,14 @@ async fn run(root: &std::path::Path, restricted: bool) {
                 0,
                 "host exited before Serving"
             );
+            eprint!("{line}");
             if line.contains("module /module/second-root is Serving") {
                 break;
             }
         }
         reader
     });
-    let _reader = tokio::time::timeout(Duration::from_secs(15), read)
+    let _reader = tokio::time::timeout(Duration::from_secs(60), read)
         .await
         .unwrap()
         .unwrap();

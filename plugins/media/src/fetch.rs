@@ -32,6 +32,7 @@ pub async fn fetch(source: &str) -> Result<Blob, Error> {
             return Err(Error::Fetch("unsupported media scheme".into()));
         }
         let response = host::http_request(HttpRequest {
+            timeout_ms: None,
             method: "GET".into(),
             url: url.to_string(),
             headers: vec![],

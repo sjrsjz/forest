@@ -3,7 +3,7 @@ use crate::message::Message;
 use forest_serde::{DeriveSchema, DeriveValue};
 use serde::{Deserialize, Serialize};
 
-pub const OBJECT: &str = "/core/onebot";
+pub const OBJECT: &str = "/module/onebot";
 pub const GROUP_MESSAGE: &str = "/group_message";
 pub const SEND_GROUP_MESSAGE: &str = "/send_group_message";
 pub const SEND_PRIVATE_MESSAGE: &str = "/send_private_message";
@@ -90,6 +90,9 @@ pub struct SentMessage {
 
 #[derive(Clone, Debug, Serialize, Deserialize, DeriveSchema, DeriveValue)]
 pub enum OneBotError {
+    Disconnected,
+    ReceiptLost,
+    Timeout,
     Transport(String),
     Encode(String),
     Decode(String),

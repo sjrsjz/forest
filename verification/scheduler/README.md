@@ -24,6 +24,7 @@ lake env lean Audit.lean
 | [Store.lean](Forest/Store.lean) | 唯一推进持有者、任务和生命周期阶段、被动暂停、正常析构与异常回收 |
 | [Mutex.lean](Forest/Mutex.lean) | 实例隔离、任务持有的宿主锁、FIFO 授予、结果交付、取消、实例停止与原生工作收尾 |
 | [Reload.lean](Forest/Reload.lean) | 任意目标集合的提交、未启动请求按接口交接、整组替换与发布、提交前取消 |
+| [Resources.lean](Forest/Resources.lean) | 实例绑定通知、关闭投递、旧监听 join 与代际隔离 |
 | [Counterexamples.lean](Forest/Counterexamples.lean) | 证明错误地在借用期间增长内存、在推进未结束时释放执行权，会破坏不变量 |
 | [Audit.lean](Audit.lean) | 主定理的可信基础审计入口 |
 
@@ -46,3 +47,5 @@ lake env lean Audit.lean
 队列模型保留完整 Request 值和同接口顺序，不证明跨接口的全局 FIFO。组提交和发布表示目录锁中的一个可观察转换；各实例的实际 create/destroy 与宿主 I/O 不属于该原子转换。Manifest Schema/ACL 正确性、死锁自由、最终响应、OOM 不发生、队列容量以及调用者自定义资源使用均不属于本证明的结论。
 
 实际代码的对应和仍需审查的细化义务见[验证说明](../../doc/35-scheduler-lean-verification.md)。
+
+资源通知有独立有界接纳池，激活有一个独立控制名额，均不与普通等待调用争抢完成通知的名额。Reload 中的额度守恒可分别实例化到各池；仅 Object 未启动请求能从静止判断中扣除。Instance 通知的整个池及激活控制槽必须归还。

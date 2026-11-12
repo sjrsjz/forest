@@ -3,7 +3,7 @@
 独立的 OneBot v11 API 库，提供全部 38 个公开 action 的请求类型、关联响应类型和异步客户端。默认不包含网络运行时；启用 `http` 使用原生 HTTP(S) 传输。
 
 ```toml
-forest-onebot = { path = "crates/forest-onebot", features = ["http"] }
+forest-onebot = { path = "plugins/onebot/protocol", features = ["http"] }
 ```
 
 ```rust
@@ -26,7 +26,7 @@ match client.call(&GetLoginInfo {}).await? {
 
 `CallError` 区分传输、编码、解码、协议和远端 API 错误。HTTP 非 200 保留状态码与响应体；远端失败保留 retcode 和可选诊断字段。库不自动重试、不创建隐式后台任务、不设置固定调用超时。
 
-同一客户端可以并发调用；连接池由 `HttpTransport` 持有。默认协议层可编译到 Wasm，`Transport` 允许调用方接入自定义传输。`http` feature 提供原生 Reqwest 传输；Forest Wasm 模块通过宿主 `/core/onebot` 端口使用平台 API。
+同一客户端可以并发调用；连接池由 `HttpTransport` 持有。默认协议层可编译到 Wasm，`Transport` 允许调用方接入自定义传输。`http` feature 提供原生 Reqwest 传输；Forest Wasm 模块通过普通 Wasm 包 `/module/onebot` 端口使用平台 API。
 
 `HttpTransport::new` 沿用环境代理配置。需要直连本地服务、设置代理或自定义 TLS 根证书时，用 `with_client` 注入自行构造的 Reqwest 客户端；此时重试、重定向与超时策略由调用方明确配置。本地模拟服务测试显式使用 `.no_proxy()`，不受机器全局代理影响。
 
@@ -36,4 +36,4 @@ match client.call(&GetLoginInfo {}).await? {
 
 显式支持 NapCat 的 `markdown` 消息段，保留其 `content`，并提供可逆的 `[CQ:markdown,content=...]` 投影；其他未知消息段继续返回解码错误。类型依据为 [NapCat 消息声明](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/types/message.ts)。
 
-本库不包含 WS/反向 WS、事件上报服务器或 Forest 授权逻辑。接口边界与标准链接见[协议文档](../../doc/04-onebot-v11.md)。
+本库不包含 WS/反向 WS、事件上报服务器或 Forest 授权逻辑。接口边界与标准链接见[协议文档](../../../doc/04-onebot-v11.md)。

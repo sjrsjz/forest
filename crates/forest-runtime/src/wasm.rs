@@ -179,6 +179,11 @@ enum Import {
     Sleep,
     Log,
     Now,
+    MonotonicNow,
+    RandomBytes,
+    Emit,
+    WsWatch,
+    TimerAfter,
 }
 
 fn imports(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostState>> {
@@ -203,6 +208,11 @@ fn imports(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostState>> {
         ("sleep", Import::Sleep),
         ("log", Import::Log),
         ("now", Import::Now),
+        ("monotonic_now", Import::MonotonicNow),
+        ("random_bytes", Import::RandomBytes),
+        ("emit", Import::Emit),
+        ("ws_watch", Import::WsWatch),
+        ("timer_after", Import::TimerAfter),
     ] {
         linker.func_wrap(
             "forest_host",
@@ -321,6 +331,59 @@ fn submit(
         };
     }
     Ok(match operation {
+        Import::Emit => {
+            let request: EmitRequest = read(caller, ptr, len)?;
+            let service = core.clone();
+            let source = instance.clone();
+            launch!(HostAccess::Communication, async move {
+                service.emit(&source, origin, request)
+            })
+        }
+        Import::WsWatch => {
+            let request: WebSocketWatch = read(caller, ptr, len)?;
+            let validation = core.check_callback(&instance, &request.interface);
+            let owner = Arc::downgrade(&instance);
+            let service = Arc::downgrade(&core);
+            launch!(HostAccess::Communication, async move {
+                validation?;
+                Ok(resources.ws_watch(service, owner, request))
+            })
+        }
+        Import::TimerAfter => {
+            let request: TimerRequest = read(caller, ptr, len)?;
+            let validation = core.check_callback(&instance, &request.interface);
+            let owner = Arc::downgrade(&instance);
+            let service = Arc::downgrade(&core);
+            launch!(HostAccess::Communication, async move {
+                validation?;
+                Ok(Ok::<_, ServiceError>(
+                    resources.timer_after(service, owner, request),
+                ))
+            })
+        }
+        Import::MonotonicNow => {
+            let _: () = read(caller, ptr, len)?;
+            let service = core.clone();
+            launch!(HostAccess::Basic, async move {
+                Ok(service.services.monotonic_now())
+            })
+        }
+        Import::RandomBytes => {
+            let length: u32 = read(caller, ptr, len)?;
+            let limit = core.options.memory_bytes;
+            launch!(HostAccess::Basic, async move {
+                Ok(if length as usize > limit {
+                    Err(ServiceError::InvalidInput(
+                        "random output exceeds instance memory limit".into(),
+                    ))
+                } else {
+                    let mut bytes = vec![0; length as usize];
+                    getrandom::fill(&mut bytes)
+                        .map(|_| bytes)
+                        .map_err(|_| ServiceError::RandomUnavailable)
+                })
+            })
+        }
         Import::Lock => core.lock(&instance, &signal, read(caller, ptr, len)?),
         Import::Unlock => core.unlock(&instance, &signal, read(caller, ptr, len)?),
         Import::Call => {

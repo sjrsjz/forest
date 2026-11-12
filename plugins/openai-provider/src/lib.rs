@@ -50,6 +50,7 @@ impl OpenAi {
         }
         let body = provider::encode(&self.settings, &request)?;
         let response = host::http_request(HttpRequest {
+            timeout_ms: None,
             method: "POST".into(),
             url: self.settings.endpoint.clone(),
             headers: vec![
@@ -83,6 +84,8 @@ forest_sdk::export_module!(super::OpenAi);
 
 pub fn manifest() -> Manifest {
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),

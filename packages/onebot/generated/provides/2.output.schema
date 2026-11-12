@@ -1,0 +1,2 @@
+schema T0 = variant {Err(variant {Api {message: optional string, retcode: i32, wording: optional string}, Decode(string), Disconnected, Encode(string), GroupDenied, Protocol(string), ReceiptLost, Submitted, Timeout, Transport(string)}), Ok(string)};
+export T0;

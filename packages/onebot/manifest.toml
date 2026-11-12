@@ -1,0 +1,95 @@
+[package]
+id = "/module/onebot"
+version = "0.1.0"
+name = "OneBot v11 adapter"
+description = "Wasm protocol adapter using generic host WebSocket notifications"
+
+[module]
+file = "module.wasm"
+lifecycle-error = "generated/lifecycle-error.schema"
+activated = "/activated"
+
+[[configs]]
+key = "/settings"
+schema = "generated/configs/0.schema"
+default = "generated/configs/0.value"
+
+[configs.access]
+readers = [
+    "self",
+    "/user/admin",
+]
+writers = ["/user/admin"]
+
+[[provides]]
+path = "/activated"
+input = "generated/provides/0.input.schema"
+output = "generated/provides/0.output.schema"
+
+[provides.access]
+callers = ["/system/lifecycle"]
+
+[[provides]]
+path = "/io"
+input = "generated/provides/1.input.schema"
+output = "generated/provides/1.output.schema"
+
+[provides.access]
+callers = ["/system/io"]
+
+[[provides]]
+path = "/query"
+input = "generated/provides/2.input.schema"
+output = "generated/provides/2.output.schema"
+
+[provides.access]
+callers = [
+    "/module/**",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/send_group_message"
+input = "generated/provides/3.input.schema"
+output = "generated/provides/3.output.schema"
+
+[provides.access]
+callers = [
+    "/module/**",
+    "/user/admin",
+]
+
+[[provides]]
+path = "/send_private_message"
+input = "generated/provides/4.input.schema"
+output = "generated/provides/4.output.schema"
+
+[provides.access]
+callers = [
+    "/module/**",
+    "/user/admin",
+]
+
+[[events]]
+path = "/group_message"
+input = "generated/events/0.schema"
+
+[events.access]
+readers = ["/module/**"]
+
+[sha256]
+"generated/configs/0.schema" = "85bb7af5a1c1aa0be46436935ac7e9286fd29e14936824f4c9482ea95d1c0399"
+"generated/configs/0.value" = "562b62f938ad7d29323a1da7eb686c5849b4e6f9c1b37aefaeaf23b8e0024fa0"
+"generated/events/0.schema" = "0fb47ece9fe29014ae572e9bd5f5aaee5248e81d68c6385f5e416581422048fe"
+"generated/lifecycle-error.schema" = "3c606e0de80c536183a38b1be005f0d4d5d2ea2fe87c81faa65fd26d9c145e9a"
+"generated/provides/0.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
+"generated/provides/0.output.schema" = "ff66093d138a6828fd364cbbd2459dd571cd3ac97d01994c3fa504f827b0f4d4"
+"generated/provides/1.input.schema" = "04d3d01c297ac6f9cf903042fe2238734d30bb9a9710d595e712ace6fa1d64b4"
+"generated/provides/1.output.schema" = "ff66093d138a6828fd364cbbd2459dd571cd3ac97d01994c3fa504f827b0f4d4"
+"generated/provides/2.input.schema" = "b895131d97002252b5635d7acd18a8a40db4e3241b4dcae1f0f124ed8b996af3"
+"generated/provides/2.output.schema" = "5935dd1f08f54a0c9d0a526c190f780a056c443ba6dbc523fd56a492a4837a8c"
+"generated/provides/3.input.schema" = "d5e578a594814cf7fe162cb497110d22abc5d04f8436af0085255b3113d37841"
+"generated/provides/3.output.schema" = "59e76604394469d9decf3e622fdd49651e31bc0efd912e9e19c34b96d31cb207"
+"generated/provides/4.input.schema" = "f94ee35a2946aeb9220703bbfa27bd1c55a0ca320594d38d2d022f4f3bb64201"
+"generated/provides/4.output.schema" = "59e76604394469d9decf3e622fdd49651e31bc0efd912e9e19c34b96d31cb207"
+"module.wasm" = "6ea98b536df4ed5d0ba839d60f909115c676f316b251af2887f57128e1c76aca"

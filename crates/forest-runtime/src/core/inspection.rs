@@ -37,6 +37,8 @@ pub struct ModuleSnapshot {
     pub interfaces: Vec<InterfaceView>,
     pub uses: Vec<UseView>,
     pub subscriptions: Vec<SubscriptionView>,
+    pub events: Vec<Token>,
+    pub activated: Option<Token>,
     pub budget: BudgetView,
     pub queued_next: usize,
 }
@@ -135,6 +137,9 @@ pub struct SubscriptionView {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct BudgetView {
+    pub control_tasks_used: usize,
+    pub notifications_used: usize,
+    pub notification_bytes_used: usize,
     pub requests_used: usize,
     pub requests_max: usize,
     pub input_bytes_used: usize,
@@ -251,9 +256,15 @@ fn capture(slot: &Slot, options: &RuntimeOptions, directory: &Directory) -> Capt
             })
             .unwrap_or_default(),
         budget: BudgetView {
-            requests_used: options.max_requests - slot.budget.requests.available_permits(),
+            control_tasks_used: 1 - slot.budget.control.available_permits(),
+            notifications_used: options.max_requests
+                - slot.budget.notifications.requests.available_permits(),
+            notification_bytes_used: options.max_input_bytes
+                - slot.budget.notifications.bytes.available_permits(),
+            requests_used: options.max_requests - slot.budget.normal.requests.available_permits(),
             requests_max: options.max_requests,
-            input_bytes_used: options.max_input_bytes - slot.budget.bytes.available_permits(),
+            input_bytes_used: options.max_input_bytes
+                - slot.budget.normal.bytes.available_permits(),
             input_bytes_max: options.max_input_bytes,
         },
     }
@@ -307,6 +318,8 @@ impl Inspector {
                     lifecycle: captured.lifecycle,
                     budget: captured.budget,
                     queued_next: captured.queued_next,
+                    events: m.events.iter().map(|e| e.path.clone()).collect(),
+                    activated: m.activated.clone(),
                     interfaces: m
                         .provides
                         .iter()

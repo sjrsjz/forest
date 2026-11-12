@@ -1,0 +1,2 @@
+schema T0 = variant {Timer(i64), WebSocketReady(i64)};
+export T0;

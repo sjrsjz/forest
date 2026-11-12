@@ -23,7 +23,7 @@ input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
 
 [provides.access]
-callers = ["/core/onebot"]
+callers = ["/module/onebot"]
 
 [[uses]]
 object = "/core/control"
@@ -80,13 +80,13 @@ input = "generated/uses/8.input.schema"
 output = "generated/uses/8.output.schema"
 
 [[uses]]
-object = "/core/onebot"
+object = "/module/onebot"
 interface = "/send_group_message"
 input = "generated/uses/9.input.schema"
 output = "generated/uses/9.output.schema"
 
 [[subscriptions]]
-source = "/core/onebot"
+source = "/module/onebot"
 event = "/group_message"
 interface = "/group_message"
 
@@ -115,5 +115,5 @@ interface = "/group_message"
 "generated/uses/8.input.schema" = "f3e6d2e5a17a3a399c4a327cfc47cf2048f2e9ad815a05f20382e41de66672c0"
 "generated/uses/8.output.schema" = "524c4fa3d5efbd96e779f7cfaf7041b777d3fc8fccdf2fc771a36bffb4db20d7"
 "generated/uses/9.input.schema" = "d5e578a594814cf7fe162cb497110d22abc5d04f8436af0085255b3113d37841"
-"generated/uses/9.output.schema" = "27d66d278af0d580ff4c2058f85012e950201dc8cb7c2ee8e92a9ee494d39584"
-"module.wasm" = "b5ffa53809ba8993dfdb20e993876ae9530f3b751cf9df4370db25f03d21529d"
+"generated/uses/9.output.schema" = "59e76604394469d9decf3e622fdd49651e31bc0efd912e9e19c34b96d31cb207"
+"module.wasm" = "199c51e4d94aa51e3d3691d052c3415b3dfb3e57dc297687eeefbcc842ff9af8"

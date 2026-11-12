@@ -96,7 +96,7 @@ Serving 表示对象可以接纳工作，不表示它此刻正在执行 CPU 指�
 
 ```mermaid
 flowchart LR
-    Test["/module/forest-test"] -->|"uses /send_group_message"| OneBot["/core/onebot · 宿主"]
+    Test["/module/forest-test"] -->|"uses /send_group_message"| OneBot["/module/onebot · Wasm 包"]
     OneBot -.->|"/group_message → /group_message"| Test
 ```
 
@@ -218,10 +218,10 @@ pnpm --dir webui build
 
 ```powershell
 $env:FOREST_WEB_PASSWORD = 'your-local-console-password'
-cargo run -p forest-cli --locked -- --events-ws ws://127.0.0.1:8080 --allow-group 123456789 --webui 127.0.0.1:3210
+cargo run -p forest-cli --locked -- --package packages/forest-test --webui 127.0.0.1:3210
 ```
 
-地址和群号均为示例，网关访问令牌仍用 `FOREST_ONEBOT_TOKEN`。在浏览器打开 `http://127.0.0.1:3210`，仅需输入管理口令，没有用户名。WebUI 不提供默认口令；启动者必须明确设置。口令不通过命令行参数传递。`.env` 不由 CLI 自动加载，需要启动脚本或当前终端将其设置为环境变量。
+地址和群号均为示例，网关与令牌在 /module/onebot 的 /settings 设置。在浏览器打开 `http://127.0.0.1:3210`，仅需输入管理口令，没有用户名。WebUI 不提供默认口令；启动者必须明确设置。口令不通过命令行参数传递。`.env` 不由 CLI 自动加载，需要启动脚本或当前终端将其设置为环境变量。
 
 | 参数 | 默认值和用途 |
 |---|---|
@@ -241,7 +241,7 @@ cargo run -p forest-cli --locked -- --events-ws ws://127.0.0.1:8080 --allow-grou
 `forest-webui/tests/management.rs` 使用真实的两份 Wasm 工件，验证仅声明预览、依赖优先装载、无关坏包隔离、身份检查、存在使用者时拒绝卸载，以及三种重载方式。同时验证管理端配置 set 的鉴权、Schema 校验、来源不可伪造、私有状态写入拒绝和大于 4 KiB 的草稿。Drain 等待期间断开 HTTP 请求后，再由 Force 完成替换；新代码返回不同实现标识，持久计数继续累加。
 
 ```sh
-cargo test -p forest-config -p forest-runtime -p forest-cli -p forest-webui --tests --locked
+cargo test -p forest-config -p forest-runtime -p forest-cli -p forest-webui -p forest-onebot-module --tests --locked
 pnpm --dir webui build
 ```
 

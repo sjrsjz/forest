@@ -69,9 +69,10 @@ impl Shell {
         }
         let authorized = settings.administrators.contains(&message.user_id)
             && context.origin
-                == format!("/user/onebot/{}", message.user_id)
-                    .parse::<Token>()
-                    .unwrap();
+                == Origin::External {
+                    issuer: onebot::OBJECT.parse().unwrap(),
+                    subject: format!("/user/{}", message.user_id).parse().unwrap(),
+                };
         let reply = if !authorized {
             "没有群聊管理权限。".into()
         } else {
@@ -252,6 +253,8 @@ pub fn manifest() -> Manifest {
         output: <Result<SentMessage, OneBotError>>::as_schema(),
     });
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),

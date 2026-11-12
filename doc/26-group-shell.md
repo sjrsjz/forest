@@ -1,6 +1,6 @@
 # 群聊 Shell 与示例回复插件
 
-两个功能分别由 `/module/shell` 和 `/module/npucraft` 独立 Wasm 包实现。它们订阅宿主 OneBot 群消息事件，不调用 Agent、Provider 或 Memory。命令解析、触发匹配、授权用户和回复内容均属于插件。
+两个功能分别由 `/module/shell` 和 `/module/npucraft` 独立 Wasm 包实现。它们订阅 OneBot Wasm 包的群消息事件，不调用 Agent、Provider 或 Memory。命令解析、触发匹配、授权用户和回复内容均属于插件。
 
 ## 构建与启用
 
@@ -37,9 +37,9 @@ cargo build --offline --locked -j 2 -p forest-cli
 }
 ```
 
-每条命令读取一次当前授权，因此更改授权不需要重载 Shell。配置只能由 `/user/admin` 写入，不能由群成员给自己授权。身份来自 OneBot `user_id`，还要与宿主注入的 `/user/onebot/<账号>` origin 一致；昵称、群名片和 QQ 群角色不授予权限。匿名及自身账号消息不执行命令。
+每条命令读取一次当前授权，因此更改授权不需要重载 Shell。配置只能由 `/user/admin` 写入，不能由群成员给自己授权。身份来自 OneBot `user_id`，还要与宿主绑定的 External { issuer: /module/onebot, subject: /user/<账号> } 一致；昵称、群名片和 QQ 群角色不授予权限。匿名及自身账号消息不执行命令。
 
-未允许群不响应。允许群中的未授权用户收到拒绝回复。接收入口的静态 callers 仅允许 `/core/onebot`，其他模块不能伪造一个发送者账号直接调用它。
+未允许群不响应。允许群中的未授权用户收到拒绝回复。接收入口的静态 callers 仅允许 `/module/onebot`，其他模块不能伪造一个发送者账号直接调用它。
 
 ## 命令
 

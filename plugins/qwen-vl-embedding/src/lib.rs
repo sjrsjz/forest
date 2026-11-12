@@ -44,6 +44,7 @@ impl QwenVl {
             return Err(Error::NotConfigured);
         }
         let response = host::http_request(HttpRequest {
+            timeout_ms: None,
             method: "POST".into(),
             url: self.connection.endpoint.clone(),
             headers: vec![
@@ -77,6 +78,8 @@ forest_sdk::export_module!(super::QwenVl);
 
 pub fn manifest() -> Manifest {
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),

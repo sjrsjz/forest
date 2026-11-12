@@ -39,7 +39,7 @@ Lean 工具链是开发依赖，不进入宿主运行路径，Bot、Wasm SDK 和
 | 授予与取消 | `Mutex.cancel_removes_undelivered` 与 `cancel_keeps_delivered`：取消移除等待及未交付授予，不释放已交付给任务的许可 |
 | 持有者与实例停止 | `Mutex.other_task_cannot_unlock`、`stop_instance_blocks_all`、`stopped_cannot_deliver`：锁属于具体实例与任务；整个实例停止后，不再向其任务交付许可 |
 | 原生工作收尾 | `Mutex.cleanup_keeps_held_until_native_finishes`：已停止任务仍有不可中断原生工作时，合法转换不能提前释放其持有锁 |
-| 接纳额度 | `Reload.admission_accounting`：在线性接纳额度守恒前提下，扣除排队额度后归零意味着执行与收尾数量均为零 |
+| 接纳额度 | `Reload.admission_accounting`：在线性接纳额度守恒前提下，仅扣除 Object 排队额度后归零意味着 Instance 排队、执行与收尾均为零 |
 | 整组提交 | `Reload.commit_preserves` 与 `commit_has_no_old_owner`：对任意目标集合联合提交，保持 Store 安全，目标中没有旧推进 |
 | 请求交接 | `Reload.commit_transfers_exact_requests` 与 `old_requests_precede_new`：完整请求值和同接口 FIFO 顺序保留，提交后请求追加到原队列之后 |
 | 替换屏障 | `Reload.all_old_stores_closed` 与 `replacement_preserves`：全部旧 Store 关闭后创建整组候选，保持安全 |
@@ -102,4 +102,12 @@ resume 与 destroy 可以从无输入的 poll 准备阶段进入。Wasmtime 的�
 
 可信底层包括 Lean 内核及标准逻辑、Wasmtime 安全接口与异步取消机制、Rust/SDK 内存规则、分配器和操作系统。模型使用普通非共享 Wasm Memory；插件自行破坏内存规则、Wasm 内部线程、用户自定义数据竞争、框架外裸指针使用均不纳入结论。
 
-这里没有证明所有调用最终返回、没有死锁、不会 OOM、任何程序都不会 trap，也没有证明外部 I/O 或数据库的功能正确性。没有新增超时、死锁检测或运行时地址验证来替代上述协议。
+这里没有证明所有调用最终返回、没有死锁、不会 OOM、任何程序都不会 trap，也没有证明外部 I/O 或数据库的功能正确性。没有新增调度等待超时、死锁检测或运行时地址验证来替代上述协议。
+
+## 6. 通用事件与资源通知的扩展
+
+Reload.Member 分开表示可交接 Object 队列、不可交接 Instance 队列和激活控制凭据。CanCommit 要求后两者为零；独立 I/O 池须全部归还，执行与收尾仍由 Store 任务表示。commit_has_no_instance_callbacks 与 separate_control_admission 检查这一前提；Request 交接定理仅适用于 Object 请求。
+
+Resources 子模型区分原生空闲监听与已接纳回调。step_preserves 保证回调只带当前代际；closed_rejects_admission 与 stale_generation_rejected 排除关闭入口或旧实例向新实例投递。replace 必须在旧监听 join、旧回调结算后执行。模型抽象了目录锁与实例 ID 检查，没有证明网络协议或将 Rust 自动细化为 Lean。
+
+新增对应审查：core/events.rs 的实例与阶段检查在目录锁内；services/notifications.rs 的闭包捕获具体实例弱引用，不查询稳定对象的新实例；driver 在终结可注册监听的操作后取消并 join 监听。随机、网络超时、外部协议不在 Store 内存安全证明范围。

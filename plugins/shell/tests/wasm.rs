@@ -1,3 +1,6 @@
+use onebot_mock::{GroupScope, OneBotIngress};
+#[path = "../../onebot/tests/support/native.rs"]
+mod onebot_mock;
 use forest_config::{ConfigStore, Key};
 use forest_onebot::{
     Client, Transport, cq,
@@ -8,10 +11,7 @@ use forest_protocol::{
     AsValue, DispatchError, SubjectPattern,
     service::{ConfigKey, ConfigSet},
 };
-use forest_runtime::{
-    ModulePhase, RuntimeOptions, Scheduler, StopMode,
-    onebot::{self, GroupScope, OneBotIngress},
-};
+use forest_runtime::{ModulePhase, RuntimeOptions, Scheduler, StopMode};
 use std::{path::PathBuf, process::Command, time::Duration};
 use tokio::sync::mpsc;
 
@@ -131,7 +131,7 @@ async fn real_wasm_group_authorization_management_configuration_and_school_help(
     )
     .unwrap();
     let (tx, mut sent) = mpsc::unbounded_channel();
-    let ingress = onebot::install(
+    let ingress = onebot_mock::install(
         &scheduler,
         Client::new(Gateway(tx)),
         GroupScope::All,

@@ -32,7 +32,7 @@ input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
 
 [provides.access]
-callers = ["/core/onebot"]
+callers = ["/module/onebot"]
 
 [[provides]]
 path = "/status"
@@ -121,7 +121,7 @@ input = "generated/uses/12.input.schema"
 output = "generated/uses/12.output.schema"
 
 [[subscriptions]]
-source = "/core/onebot"
+source = "/module/onebot"
 event = "/group_message"
 interface = "/group_message"
 
@@ -130,7 +130,7 @@ interface = "/group_message"
 "generated/configs/0.value" = "0a1d0e2be7f2f5e939dbf24e2daa5f460df4b9b4aa9a75955caeab0da5c3488d"
 "generated/configs/1.schema" = "7789420b34cb5dba5705e4deee5d66201d84ffcb6c01ead806c299a51754c825"
 "generated/configs/1.value" = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-"generated/lifecycle-error.schema" = "4449c55994c31d38618ab8dec33533d44370271392eee7cf4b6927c430edcbcc"
+"generated/lifecycle-error.schema" = "e50f058b227fb391165f07c930ab61fa058a45682c0ec296385cce87fd62b2e5"
 "generated/provides/0.input.schema" = "0fb47ece9fe29014ae572e9bd5f5aaee5248e81d68c6385f5e416581422048fe"
 "generated/provides/0.output.schema" = "441f23aebad904c0cbbea6c268fd56fcade43d080f74929a1f947897acdc6eea"
 "generated/provides/1.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
@@ -142,9 +142,9 @@ interface = "/group_message"
 "generated/uses/10.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
 "generated/uses/10.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
 "generated/uses/11.input.schema" = "5cafdedb374c5999aae12caa4c9d14a7a4b8d51625e9a2423566175e0256523d"
-"generated/uses/11.output.schema" = "faccf627556765863ac86619e88778a123fbc4f3884ae665fb7a412ff7499d01"
+"generated/uses/11.output.schema" = "26939cb09423bc4c715ba710ad4b1f6aa186a28a3fdcaf0a2740f43ff4cd29ac"
 "generated/uses/12.input.schema" = "2f4a8795e3adab7f5160cf7000e5da042021fece7a7c468be3c729657c47b982"
-"generated/uses/12.output.schema" = "4ec8b26e014658ea6ebb3fbc59abe061ad3e6734b9db826694c160c83d451cf8"
+"generated/uses/12.output.schema" = "e6b30ec42169622b0f1ce97c4463dfaaa1131755c199037b29afcf791302f383"
 "generated/uses/2.input.schema" = "9e679638649f9e5d97a08ae998e04a7df43b7b51b1f79d73be69207ff5b8183e"
 "generated/uses/2.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
 "generated/uses/3.input.schema" = "4732bf399813b8b94e2c14a5911253185f6d2c5c45eaa50ea435e4e2998d6b39"
@@ -161,4 +161,4 @@ interface = "/group_message"
 "generated/uses/8.output.schema" = "1929375b15a2d02e3f233e3bdb571da0be4d2594c0e663d799eca3f4f7b67c11"
 "generated/uses/9.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
 "generated/uses/9.output.schema" = "c3ecdf449969f0e70891bdcdfb95c9811f3012454d9ea2a955148f9988444695"
-"module.wasm" = "b0f847ad834551538d80eaf0296421594310933f028ccb07f8cb7dcd85749707"
+"module.wasm" = "b90fab212ca04e8e378c671346a2272d75143f6690e086a60b3825a67b199d9a"

@@ -11,7 +11,13 @@ pub(crate) fn dependents(directory: &Directory, object: &Token) -> Vec<Token> {
         .slots
         .iter()
         .filter(|(id, slot)| {
-            *id != object && slot.published.uses.iter().any(|u| &u.object == object)
+            *id != object
+                && (slot.published.uses.iter().any(|u| &u.object == object)
+                    || slot
+                        .published
+                        .subscriptions
+                        .iter()
+                        .any(|s| &s.source == object))
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -135,6 +141,15 @@ fn plan(
                 && !directory.has_native(&dependency.object, &dependency.interface)
             {
                 pending.push(dependency.object.clone());
+            }
+        }
+        for subscription in &manifest.subscriptions {
+            if subscription.source != id
+                && !directory
+                    .events
+                    .contains_key(&(subscription.source.clone(), subscription.event.clone()))
+            {
+                pending.push(subscription.source.clone());
             }
         }
         selected.insert(id, manifest);

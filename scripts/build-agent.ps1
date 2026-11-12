@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $packages = @(
+    @('forest-onebot-module', 'package-onebot'),
     @('forest-shell', 'package-shell'),
     @('forest-npucraft', 'package-npucraft'),
     @('forest-media', 'package-media'),

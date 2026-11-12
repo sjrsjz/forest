@@ -1,3 +1,5 @@
+#[path = "../../onebot/tests/support/native.rs"]
+mod onebot_mock;
 use forest_markdown::{contract as md, typst};
 use forest_message_output::{Settings, contract::*, managed};
 use forest_onebot::{
@@ -121,10 +123,10 @@ async fn wasm_markdown_output_preserves_nodes_and_partial_delivery() {
     ))
     .unwrap();
     let gateway = Gateway::default();
-    forest_runtime::onebot::install(
+    onebot_mock::install(
         &s,
         Client::new(gateway.clone()),
-        forest_runtime::onebot::GroupScope::All,
+        onebot_mock::GroupScope::All,
         vec![SubjectPattern::Path("/module/**".parse().unwrap())],
     )
     .unwrap();

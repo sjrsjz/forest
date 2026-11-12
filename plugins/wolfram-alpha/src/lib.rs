@@ -117,6 +117,7 @@ impl WolframAlpha {
             .append_pair("maxchars", &args.max_chars.to_string());
         // The AppID stays in a header, never in a model-visible URL or result.
         let response = host::http_request(HttpRequest {
+            timeout_ms: None,
             method: "GET".into(),
             url: url.into(),
             headers: vec![(
@@ -162,6 +163,8 @@ forest_sdk::export_module!(super::WolframAlpha);
 
 pub fn manifest() -> Manifest {
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),

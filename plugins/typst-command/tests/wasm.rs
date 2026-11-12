@@ -1,3 +1,6 @@
+use onebot_mock::{GroupScope, OneBotIngress};
+#[path = "../../onebot/tests/support/native.rs"]
+mod onebot_mock;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use forest_onebot::{
     Client, Transport, cq,
@@ -8,10 +11,7 @@ use forest_protocol::{
     AsValue, SubjectPattern,
     service::{ConfigKey, ConfigSet},
 };
-use forest_runtime::{
-    RuntimeOptions, Scheduler, StopMode,
-    onebot::{self, GroupScope, OneBotIngress},
-};
+use forest_runtime::{RuntimeOptions, Scheduler, StopMode};
 use std::{path::PathBuf, process::Command, time::Duration};
 use tokio::sync::mpsc;
 
@@ -136,7 +136,7 @@ async fn actual_wasm_command_renders_delivers_reports_errors_and_reloads() {
     .await
     .unwrap();
     let (tx, mut sent) = mpsc::unbounded_channel();
-    let ingress = onebot::install(
+    let ingress = onebot_mock::install(
         &scheduler,
         Client::new(Gateway(tx)),
         GroupScope::All,

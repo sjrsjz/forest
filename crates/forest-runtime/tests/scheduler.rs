@@ -7,6 +7,8 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Notify;
+#[path = "scheduler/generic.rs"]
+mod generic;
 
 struct Artifacts {
     _directory: tempfile::TempDir,
@@ -1597,7 +1599,7 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
     let notifications = scheduler.notify(
         &"/core/variance-events".parse().unwrap(),
         &"/number".parse().unwrap(),
-        "/user/test".parse().unwrap(),
+        Origin::Principal("/user/test".parse().unwrap()),
         &1i32,
     );
     assert_eq!(notifications.len(), 1);

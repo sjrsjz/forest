@@ -54,7 +54,7 @@ Wasm 构建本身不等于形成完整包。实际装载还需要 Manifest、引
 | `Error` | 保留调度异常和 OneBot 操作错误，避免压成一个 String |
 | `Hello::create` | 读取 `/settings/reply`，建立当前实例 |
 | `handlers` | 注册路径、调用许可及实际处理函数 |
-| `on_message` | 识别命令，通过宿主 OneBot 接口发送文本 |
+| `on_message` | 识别命令，通过 OneBot 包接口发送文本 |
 | `greet` | 与群事件共用同一模块对象，返回格式化问候 |
 | `manifest` | 声明身份、配置、依赖和事件接收关系 |
 | `export_module!` | 提供宿主要求的固定 Wasm 导出 |
@@ -73,23 +73,21 @@ PowerShell：
 
 ```powershell
 $env:FOREST_WEB_PASSWORD = 'replace-with-a-console-password'
-$env:FOREST_ONEBOT_TOKEN = 'replace-with-the-gateway-token'
 ```
 
 POSIX shell：
 
 ```sh
 export FOREST_WEB_PASSWORD='replace-with-a-console-password'
-export FOREST_ONEBOT_TOKEN='replace-with-the-gateway-token'
 ```
 
-网关未启用令牌认证时，不设置 `FOREST_ONEBOT_TOKEN`。CLI 不自动读取 `.env` 文件。
+另行构建 OneBot 包（cargo run --locked -p forest-onebot-module --bin package-onebot）。在 WebUI 的 /module/onebot → /settings 设置 websocket、token 和测试 allowed_groups，重载后生效。CLI 不自动读取 .env，也不持有平台参数。
 
 ```sh
 cargo build --locked -j 2 -p forest-cli
 pnpm --dir webui install --frozen-lockfile
 pnpm --dir webui build
-cargo run --locked -p forest-cli -- --package packages/example-hello --packages-directory packages --database data/example-hello.sqlite3 --data-directory data/example-hello-modules --events-ws ws://127.0.0.1:8080 --allow-group 123456789 --webui 127.0.0.1:8081
+cargo run --locked -p forest-cli -- --package packages/example-hello --packages-directory packages --database data/example-hello.sqlite3 --data-directory data/example-hello-modules --webui 127.0.0.1:8081
 ```
 
 这是启动独立测试宿主的命令。已有运行中的 Forest 时，可以直接在其 WebUI 的“本地包”中加载示例，复用已有连接和配置库；无需再启动一个宿主。

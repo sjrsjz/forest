@@ -25,6 +25,12 @@ import Forest
 #print axioms Forest.Abi.no_exports_after_close
 #print axioms Forest.Store.reachable_protocol_safe
 #print axioms Forest.Reload.admission_accounting
+#print axioms Forest.Reload.commit_has_no_instance_callbacks
+#print axioms Forest.Reload.separate_control_admission
+#print axioms Forest.Resources.step_preserves
+#print axioms Forest.Resources.closed_rejects_admission
+#print axioms Forest.Resources.stale_generation_rejected
+#print axioms Forest.Resources.replacement_contains_no_old_callbacks
 #print axioms Forest.Counterexamples.normal_abi_roundtrip
 #print axioms Forest.Mutex.reachable_safe
 #print axioms Forest.Mutex.lease_unique

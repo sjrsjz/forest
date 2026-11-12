@@ -297,6 +297,8 @@ fn dependency<I: AsSchema, O: AsSchema>(object: &str, interface: &str) -> Interf
 
 pub fn manifest() -> Manifest {
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),

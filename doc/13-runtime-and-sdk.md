@@ -8,7 +8,7 @@
 | forest-package | 宿主侧 TOML 读写、Forest 文本引用解析及包文件 SHA-256 校验 |
 | forest-sdk | 类型化处理器、来宾 Future、固定导出和唤醒 |
 | forest-runtime | 唯一装载目录、请求接纳、实例执行权、生命周期、鉴权和资源 |
-| forest-cli | 启动参数、网关连接和 v11 API 回执关联 |
+| forest-cli | 包装载、宿主配置、关闭与可选 WebUI |
 
 ## 1. 构建并运行
 
@@ -21,36 +21,28 @@ cargo run -p forest-test --bin package --locked
 
 打包程序编译 `plugins/forest-test`，通过 `forest-package` 生成 `packages/forest-test/module.wasm`、外部 `manifest.toml` 和 `generated/` 下的 Schema/Value 文本。接口声明从同一份类型化处理器注册表产生，可在不执行 Wasm 的情况下读取。CLI、包目录和运行时共用包读取器；实际装载前校验全部索引文件，编译使用已校验的同一份 Wasm 字节。格式与可选作者、仓库、许可证等元信息见[模块 Manifest](07-module-manifest.md)。二进制构建产物不进入 Git。
 
-正向 WebSocket 可同时收事件与调用 API：
+宿主无需平台参数即可运行，未指定根包时不加载模块：
 
 ```sh
-cargo run -p forest-cli --locked -- \
-  --events-ws ws://127.0.0.1:8080 \
-  --allow-group 123456789
+cargo run -p forest-cli --locked -- --webui 127.0.0.1:8081
 ```
 
-地址和群号均为示例。网关要求令牌时，启动前设置 `FOREST_ONEBOT_TOKEN` 环境变量；凭据不放入命令行或 Manifest。`--token-env` 可指定其他变量名，`--event-token-env` 可为事件连接另选令牌。
+启用 WebUI 前设置非空 FOREST_WEB_PASSWORD，不需要用户名。CLI 不自动读取 .env。
 
-独立 HTTP API 配合反向 WS：
+Bot 示例另外构建普通 OneBot 包，根包的订阅会把它纳入依赖闭包：
 
 ```sh
-cargo run -p forest-cli --locked -- \
-  --onebot-http http://127.0.0.1:3000 \
-  --reverse-ws 127.0.0.1:3001 \
-  --allow-group 123456789
+cargo run -p forest-onebot-module --bin package-onebot --locked
+cargo run -p forest-cli --locked -- --package packages/forest-test --webui 127.0.0.1:8081
 ```
 
-由网关连接宿主的反向 WS 地址；也可将 `--reverse-ws` 换成 `--events-ws`。反向 WS 必须同时配置 HTTP API。非回环监听必须配置事件令牌。HTTP 默认直连，不隐式继承系统代理。
+在 /module/onebot 的 /settings 设置 websocket、token、connect_timeout_ms、action_timeout_ms、reconnect_min_ms、reconnect_max_ms 和 allowed_groups，然后重载此包。默认连接 ws://127.0.0.1:8080；allowed_groups 为空表示不额外限制平台范围。正常 Agent 群启用仍由 Agent 配置决定。首版支持正向 WS，反向监听需要未来的通用监听资源。
 
-模块 Serving 后，在允许群发送 `#forest-test`，模块回复一次 `hello world`。支持文本段及消息数组中对当前账号的 @。示例处理器显式持有 `/replies` 锁；发送成功后才持久化 `/state/replies`。其余命令不触发回复，未允许群不会进入模块或收到原生发送。
+在群中发送 #forest-test，示例包回复 hello world。它持有实例内 /replies 锁，发送成功后才更新 /state/replies。
 
-以上示例显式传入 `--allow-group` 以限制测试范围；该参数现在可选。省略时 OneBot 宿主不按群过滤，是否处理由接收模块决定，接口 ACL 始终检查。正常 Agent 实例只使用其配置表的 `allowed_groups`，见[Agent 启动](22-agent-guide.md)。需要宿主测试限制时才传此参数；`GroupScope::Only` 的空集合拒绝全部群，不将空集合解释为全放行。
+路径相对启动目录解析：包目录 packages，SQLite data/forest.sqlite3，资源 data/modules。--package 可指定多个根包，--packages-directory 修改可用包目录。--controller 显式授权 TokenPattern 调用 /core/control；例如 Shell 需要 --controller /module/shell，默认不授权模块。
 
-默认路径均从启动工作目录解析：包 `packages/forest-test`，SQLite `data/forest.sqlite3`，受管文件 `data/modules`。分别可用 `--package`、`--database`、`--data-directory` 修改。
-
-Ctrl+C 默认 Drain，可用 `--shutdown-mode yield` 或 `force` 显式选择。OneBot 正向 WS 在初次连接失败或运行中断开后自动重连，间隔按 1、2、4、8、16、30 秒退避；成功连接后恢复为 1 秒。连接恢复不重建调度器、模块或 Agent 会话，WebUI 继续运行。反向 WS 保持原监听器，连接结束后等待网关再次接入。
-
-双向 WS 的动作队列和回执表属于单次连接。未连接时请求立即返回 Disconnected，连接关闭时尚未收到回执的请求返回 ReceiptLost，已排队动作随该连接释放；重连后的队列为空。未收到回执并不证明平台未执行，因此不自动重发消息或重试动作。HTTP action 传输不因事件 WS 重连而自动重试。连接、回执及模块诊断可在[调试台运行日志](14-inspection-webui.md)查看。
+Ctrl+C 默认 Drain，--shutdown-mode yield/force 可显式中断。等待 Drain 时管理台继续服务。OneBot 自行维护重连与抖动退避，断线以 ReceiptLost 结算未返回动作，不自动重放可能已执行的请求。宿主不解释这些语义。
 
 ## 2. Rust 模块 SDK
 
@@ -141,9 +133,9 @@ ABI 结构与操作结构采用 `forest_protocol::abi` 固定小端、定长整�
 导入模块名为 `forest_host`。每个宿主操作有独立函数：
 
 ```text
-call send lock unlock config_get config_set config_reset
-http_request ws_connect ws_send ws_receive ws_close
-file_read file_write file_remove sqlite sleep log now
+call send emit lock unlock config_get config_set config_reset
+http_request ws_connect ws_send ws_receive ws_close ws_watch timer_after
+file_read file_write file_remove sqlite sleep log now monotonic_now random_bytes
 ```
 
 操作函数接受 `(ptr: u32, len: u32)`，返回实例内 operation id。提交时检查阶段、来源及权限；完成只保存结果并唤醒，不重入 Wasm。
@@ -165,9 +157,9 @@ lock/unlock 输入是编码后的具体 Token，结果为 DispatchResult<()>。l
 
 独立线程每 5 ms 推进 epoch，用于可恢复让出和显式 Force 检查，不是请求超时。Wasmtime Pending 保留原推进，SDK Pending 才释放实例执行权。已持有的宿主锁跨主动与被动暂停保留，按模块显式作用域释放。
 
-默认每个对象保留最多 1024 个请求、64 MiB 输入，Wasm 内存上限 256 MiB。名额随请求、任务和必要收尾移动，满额原子拒绝，不经隐藏的无界入口排队。原生接口也受接纳容量约束，宿主实现用自己的类型化同步结构协调数据。
+默认每个对象普通请求和 I/O 通知分别保留最多 1024 个名额、64 MiB 输入，Wasm 内存上限 256 MiB。名额随请求、任务和必要收尾移动，满额原子拒绝，不经隐藏的无界入口排队。原生接口也受接纳容量约束，宿主实现用自己的类型化同步结构协调数据。
 
-Wasm 使用的 HTTP/WS 原语不自动重试或重连；OneBot 宿主适配器的连接恢复与这些原语分开。受管文件由 capability directory 限制在实例目录内。卸载释放实例网络资源。配置与文件操作提交后必须等本地实际结束，丢弃 Future 不等于操作系统已撤销操作。
+Wasm 使用的 HTTP/WS 原语不自动重试或重连；OneBot Wasm 接入包的连接恢复与这些原语分开。受管文件由 capability directory 限制在实例目录内。卸载释放实例网络资源。配置与文件操作提交后必须等本地实际结束，丢弃 Future 不等于操作系统已撤销操作。
 
 ## 6. 验证与范围
 
@@ -177,4 +169,10 @@ cargo test --workspace --all-features --locked
 
 集成测试编译真实 Wasm，使用两个代码不同、契约相同的候选。覆盖类型化调用、ACL、宿主锁互斥与等待交错、自唤醒和组合 Future、容量、三种卸载方式、代码替换、trap、单线程执行器下的抢占、配置恢复和延迟 SQLite 写入交接、文件隔离、HTTP/WS，以及实际 CLI 的群消息到 OneBot 回执。自动测试流量只进入本地模拟服务。
 
-宿主注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`、`/send_private_message`、`/query`；查询入口接受固定的只读 action 枚举，Agent 工具封装位于独立 [OneBot 工具包](28-onebot-agent-tools.md)。CLI 的 OneBot callers 授权 `/module/**`，因此独立加载的插件可使用这些原生接口；可选 `--allow-group` 额外限制群接收、查询与发送，并禁止私聊发送。CLI 另安装 `/core/control` 管理适配器，仅授权 `/module/shell`，见[群聊 Shell](26-group-shell.md)。可选 WebUI 已提供观测和模块装卸。Agent、Memory 与工具网关已由独立 Wasm 包实现，见[实现与启动](22-agent-guide.md)。热重载可更新同 Schema 的声明默认值并保留当前值；配置项集合或 Schema 变更仍拒绝。包分发与配置变更通知尚未实现。
+OneBot 群消息与发送/查询接口由 /module/onebot 提供，与 Agent、Memory、工具一样是独立包。CLI 仅安装通用 /core/control 并按显式 controller 参数授权。配置默认值可在同 Schema 重载时更新并保留当前值；配置集合或 Schema 变更仍拒绝。
+
+## 7. 激活、通知与 I/O 期限
+
+Manifest 的 module.activated 指向 Unit 输入的普通接口，callers 允许 /system/lifecycle。整组发布后，调度器用独立控制名额投递一次激活；它可以使用普通能力并等待，不阻止其他处理器开始。
+
+模块事件和实例通知的权限与重载区别见[事件与依赖](11-notifier-and-dependencies.md)。空闲监听不占任务；已接受的实例通知不能转交下一代。HTTP、WS connect/send 的 timeout_ms 由调用方决定，超时返回 ServiceError::Timeout；HTTP 期限包括完整 body。monotonic_now 返回进程内单调毫秒，random_bytes 使用操作系统安全随机源。完整接口见[宿主 API](08-host-interfaces.md)。

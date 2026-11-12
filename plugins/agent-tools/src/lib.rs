@@ -155,6 +155,7 @@ impl Gateway {
             return Err(Error::Arguments("HTTP(S) URL required".into()));
         }
         let response = host::http_request(forest_protocol::service::HttpRequest {
+            timeout_ms: None,
             method: args.method,
             url: args.url,
             headers: args.headers.into_iter().collect(),
@@ -361,6 +362,8 @@ pub fn manifest_with_routes(routes: Vec<Route>) -> Manifest {
         },
     ]);
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: OBJECT.parse().unwrap(),
             version: "0.1.0".into(),

@@ -331,6 +331,13 @@ async function force() {
                 </li>
                 <li v-if="!manifest.uses.length" class="muted">无</li>
               </ul>
+              <h3>发布事件</h3>
+              <ul class="plain-list">
+                <li v-for="event in manifest.events" :key="event.path">
+                  <code>{{ event.path }}</code>
+                </li>
+                <li v-if="!manifest.events.length" class="muted">无</li>
+              </ul>
               <h3>事件接收</h3>
               <ul class="plain-list">
                 <li

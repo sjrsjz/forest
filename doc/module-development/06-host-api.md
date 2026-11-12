@@ -10,12 +10,17 @@
 | --- | --- | --- |
 | `call<I, O>` | object、interface、`&I` | `DispatchResult<O>` |
 | `send<I>` | object、interface、`&I` | `DispatchResult<()>` |
+| `emit<I>` | event、&I、可选 subject | DispatchResult<Vec<EventDelivery>> |
+| `ws_watch` | handle、接口 Token | HostResult<()> |
+| `timer_after` | 毫秒 u64、接口 Token | HostResult<u64> |
+| `random_bytes` | 长度 u32 | HostResult<Vec<u8>> |
+| `monotonic_now` | 无 | DispatchResult<u64>，单调毫秒 |
 | `config_get<T>` | object、key | `HostResult<T>` |
 | `config_set<T>` | object、key、`&T` | `HostResult<()>` |
 | `config_reset` | object、key | `HostResult<()>` |
 | `http_request` | HttpRequest | `HostResult<HttpResponse>` |
 | `ws_connect` | WebSocketRequest | `HostResult<u64>` |
-| `ws_send` | handle、WebSocketMessage | `HostResult<()>` |
+| `ws_send` | WebSocketSend | `HostResult<()>` |
 | `ws_receive` | handle | `HostResult<WebSocketEvent>` |
 | `ws_close` | handle | `HostResult<()>` |
 | `file_read` | 相对路径 String | `HostResult<Vec<u8>>` |
@@ -28,7 +33,7 @@
 
 `DispatchResult<T> = Result<T, DispatchError>`；`HostResult<T> = DispatchResult<Result<T, ServiceError>>`。HostError 可接收这两层错误，但每个模块仍可定义自己的错误枚举。
 
-这些专用宿主操作不需要写成 Manifest 的 uses。uses 用于按对象/接口寻址的 send/call，包括调用 `/core/onebot`。生命周期限制和资源所有权依然适用，见[能力表](03-lifecycle-and-scheduling.md#3-普通接口与-destroy)。
+这些专用宿主操作不需要写成 Manifest 的 uses。uses 用于按对象/接口寻址的 send/call，包括调用 `/module/onebot`。生命周期限制和资源所有权依然适用，见[能力表](03-lifecycle-and-scheduling.md#3-普通接口与-destroy)。
 
 ## 2. HTTP
 
@@ -40,6 +45,7 @@ let response = host::http_request(HttpRequest {
     url: "https://example.org/data".into(),
     headers: vec![("Accept".into(), "application/json".into())],
     body: vec![],
+    timeout_ms: Some(30_000),
 }).await??;
 ```
 
@@ -52,13 +58,16 @@ endpoint、凭据、模型选择等运行参数适合通过所属模块配置读
 ## 3. WebSocket
 
 ```rust
-use forest_protocol::service::{WebSocketRequest, WebSocketMessage, WebSocketEvent};
+use forest_protocol::service::{WebSocketRequest, WebSocketSend, WebSocketMessage, WebSocketEvent};
 
 let handle = host::ws_connect(WebSocketRequest {
     url: "wss://example.org/events".into(),
     headers: vec![],
+    timeout_ms: Some(10_000),
 }).await??;
-host::ws_send(handle, WebSocketMessage::Text("hello".into())).await??;
+host::ws_send(WebSocketSend {
+    handle, message: WebSocketMessage::Text("hello".into()), timeout_ms: Some(10_000),
+}).await??;
 let event: WebSocketEvent = host::ws_receive(handle).await??;
 host::ws_close(handle).await??;
 ```
@@ -99,7 +108,7 @@ sleep 参数不能为负数。它提供可等待的计时操作，不引入自�
 
 ## 6. OneBot 接入
 
-群消息通过宿主事件 `(/core/onebot, /group_message)` 接收。平台操作通过同一对象的普通接口调用：
+群消息通过 Wasm 包事件 `(/module/onebot, /group_message)` 接收。平台操作通过同一对象的普通接口调用：
 
 | 接口 | 输入 | 模块输出 |
 | --- | --- | --- |
@@ -107,7 +116,7 @@ sleep 参数不能为负数。它提供可等待的计时操作，不引入自�
 | `/send_private_message` | SendPrivateMessage | `Result<SentMessage, OneBotError>` |
 | `/query` | Query | `Result<String, OneBotError>`，String 为查询数据 JSON |
 
-Query 当前包含账号、好友、群、群成员及陌生人查询的固定分支。完整类型位于 [forest-onebot 的 Forest 契约](../../crates/forest-onebot/src/forest.rs)。Rust v11 客户端库具有的动作不等于全部已经暴露为宿主接口；Wasm 只能调用已注册且满足 uses/ACL 的入口。
+Query 当前包含账号、好友、群、群成员及陌生人查询的固定分支。完整类型位于 [forest-onebot 的 Forest 契约](../../plugins/onebot/protocol/src/forest.rs)。Rust v11 客户端库具有的动作不等于全部已经暴露为宿主接口；Wasm 只能调用已注册且满足 uses/ACL 的入口。
 
 原生消息可以使用 OneBot 的类型化 Segment。需要 Forest Markdown、受管媒体或长消息转发策略时，应使用相应输出模块公开的契约，见[Markdown 协议](../33-markdown-messages.md)和[消息输出](../30-message-output.md)。这些能力不由普通 OneBot 文本发送自动执行。
 
@@ -118,3 +127,11 @@ Query 当前包含账号、好友、群、群成员及陌生人查询的固定�
 需要让 Agent 使用新能力时，可按[Agent 工具配置](../22-agent-guide.md)增加网关路由，并用相同契约重建相关包。模块的独立接口仍可保持类型明确；Agent 适配只负责将模型参数转换成该能力所需的数据。
 
 宿主错误和资源协议的完整定义见 [service.rs](../../crates/forest-protocol/src/service.rs)，SDK 签名见 [host.rs](../../crates/forest-sdk/src/host.rs)。
+
+## 7. 期限、资源通知与随机
+
+HTTP 和 WS connect/send 的 timeout_ms 为可选相对期限，None 不设期限。HTTP 从执行到完整读取 body 共用一个期限，超时返回 ServiceError::Timeout，不承诺撤销对端副作用。重试由调用方决定。
+
+ws_watch 绑定当前实例的 IoEvent 接口，其 callers 允许 /system/io；每连接最多缓冲一条结果，处理器收到 WebSocketReady 后调用 ws_receive 取走才继续收。timer_after 同样投递一次实例通知。create/destroy 禁止这两项操作和 emit，发布后激活可以使用。
+
+random_bytes 使用操作系统安全随机源。monotonic_now 只比较当前进程内间隔，不能跨重启作为持久时刻。

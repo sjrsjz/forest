@@ -9,7 +9,6 @@ mod io_settings;
 mod locks;
 mod logs;
 mod management;
-pub mod onebot;
 mod operations;
 mod package;
 mod ready;

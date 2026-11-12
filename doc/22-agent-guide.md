@@ -21,7 +21,7 @@ Agent 由多个独立 Wasm 包协作实现：Agent 管理工作循环，Memory �
 | `/module/deepseek-web` | `/search`、`/fetch` | 默认网页搜索与 Markdown 抓取 |
 | `/module/wolfram-alpha` | `/query` | 官方 LLM API 精确计算与科学知识查询 |
 | `/module/ai-paint` | `/generate` | 三种绘图后端、受管图片与 Markdown 图片链接 |
-| `/module/onebot-tools` | 账号、好友、群、成员查询与独立发送 | 无凭据 Wasm 工具，复用宿主 OneBot 连接 |
+| `/module/onebot-tools` | 账号、好友、群、成员查询与独立发送 | 无凭据 Wasm 工具，调用 OneBot Wasm 包接口 |
 | `/module/context` | `/format` | 人格提示词、账号身份、来源标记、Markdown 和图片格式化 |
 | `/module/openai-provider` | `/complete`、`/capabilities` | 模型协议和多模态能力声明 |
 | `/module/qwen-vl-embedding` | `/embed` | 固定模型、2048 维文本或图片向量 |
@@ -96,10 +96,10 @@ cargo run --locked --offline -j 2 -p forest-agent-module --example configure
 
 ```powershell
 docker compose up -d qdrant
-cargo run --locked --offline -j 2 -p forest-cli -- --package packages/agent --events-ws ws://127.0.0.1:8080
+cargo run --locked --offline -j 2 -p forest-cli -- --package packages/agent
 ```
 
-网关地址是示例。正常运行不传 `--allow-group`，群启用只由 Agent 配置表 `/settings` 中的 `allowed_groups` 决定；在管理端保存并重载 Agent 后生效，不需要重启宿主。`--allow-group` 仅用于显式测试限制：一旦提供，宿主会额外过滤入站事件和原生发送目标，不随 Agent 热重载改变。网关凭据仍通过 `FOREST_ONEBOT_TOKEN` 环境变量提供。CLI 从 `--packages-directory` 的 Manifest 规划依赖，只加载根包实际使用的包。Qdrant Compose 使用命名卷，避免把服务数据库直接挂载到 Windows 工作目录；固定镜像版本 [v1.19.2](https://github.com/qdrant/qdrant/releases/tag/v1.19.2)。
+网关与凭据保存在 /module/onebot 的 /settings，修改后重载 OneBot。正常启用群由 Agent 的 allowed_groups 决定；OneBot 的 allowed_groups 为空不额外限制，可在显式测试时设置范围。CLI 从 `--packages-directory` 的 Manifest 规划依赖，只加载根包实际使用的包。Qdrant Compose 使用命名卷，避免把服务数据库直接挂载到 Windows 工作目录；固定镜像版本 [v1.19.2](https://github.com/qdrant/qdrant/releases/tag/v1.19.2)。
 
 ## 5. 工具扩展
 

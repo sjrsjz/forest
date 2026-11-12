@@ -39,13 +39,11 @@ impl Module for Hello {
         Handlers::new()
             .with(
                 "/group_message".parse().unwrap(),
-                false,
                 callers(vec![SubjectPattern::Path(onebot::OBJECT.parse().unwrap())]),
                 Self::on_message,
             )
             .with(
                 "/greet".parse().unwrap(),
-                true,
                 callers(vec![
                     SubjectPattern::Path("/module/example-consumer".parse().unwrap()),
                     SubjectPattern::Path("/user/admin".parse().unwrap()),
@@ -110,6 +108,8 @@ forest_sdk::export_module!(super::Hello);
 
 pub fn manifest() -> Manifest {
     Manifest {
+        events: vec![],
+        activated: None,
         package: PackageInfo {
             id: "/module/example-hello".parse().unwrap(),
             version: "0.1.0".into(),

@@ -48,6 +48,7 @@ pub async fn download(address: &str) -> Result<Blob, Error> {
         }
         // Generated URLs may point to a CDN; never forward the API credential.
         let response = host::http_request(HttpRequest {
+            timeout_ms: None,
             method: "GET".into(),
             url: url.to_string(),
             headers: vec![],

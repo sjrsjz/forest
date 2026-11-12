@@ -1,3 +1,5 @@
+#[path = "../../../onebot/tests/support/native.rs"]
+mod onebot_mock;
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -353,10 +355,10 @@ impl Harness {
         .await
         .unwrap();
         let (tx, sent) = mpsc::unbounded_channel();
-        forest_runtime::onebot::install(
+        onebot_mock::install(
             &scheduler,
             forest_onebot::Client::new(OneBotTransport(tx)),
-            forest_runtime::onebot::GroupScope::All,
+            onebot_mock::GroupScope::All,
             vec![SubjectPattern::Path("/module/**".parse().unwrap())],
         )
         .unwrap();

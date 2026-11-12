@@ -6,7 +6,7 @@
 
 Forest 采用 Rust 宿主与 Wasm 模块。宿主提供模块执行、生命周期、通信及受控资源访问；具体功能由模块实现，Agent 是其中一个模块。
 
-当前范围为单个 Bot 账号，可同时处理多个群聊。不设计多 Bot 实体目录、账号选择路由或跨账号配置挂载；群聊仍可由接收模块独立排队并异步处理。
+运行时不包含账号、群聊或 Agent 概念，可以不加载任何聊天模块。随仓库提供的 OneBot 应用包面向单账号、多群聊；它与其他协议接入一样是可替换 Wasm 包。
 
 调度器管理的是模块及其调用，位于底层异步执行器之上：
 
@@ -44,7 +44,7 @@ plugin/
 └── generated/       # Rust 打包器生成的 Schema 与默认 Value 文本
 ```
 
-磁盘 Manifest 顶层为 `package`、`module`、`configs`、`provides`、`uses`、`subscriptions`、`sha256`，其中空声明列表可以省略。`module.lifecycle-error`、接口契约、配置 Schema 和默认值均为 Forest 文本文件引用。宿主侧 `forest-package` 负责读取、摘要校验和解析，向内核提供含完整 Schema/Value 的 Manifest。生命周期入口和逻辑方法到 Wasm 入口的映射由统一 ABI 规定，Manifest 不逐包配置这些名字，不包含 ABI 版本或 UI 配置。
+磁盘 Manifest 顶层为 `package`、`module`、`configs`、`provides`、`uses`、`events`、`subscriptions`、`sha256`，其中空声明列表可以省略。`module.lifecycle-error`、接口契约、配置 Schema 和默认值均为 Forest 文本文件引用。宿主侧 `forest-package` 负责读取、摘要校验和解析，向内核提供含完整 Schema/Value 的 Manifest。生命周期入口和逻辑方法到 Wasm 入口的映射由统一 ABI 规定，Manifest 不逐包配置这些名字，不包含 ABI 版本或 UI 配置。
 
 配置声明还包含各项允许读取、写入的主体规则。插件声明谁可以访问自己的配置，宿主装载并执行，不以插件申请自身配置访问权替代资源声明。规则属于插件元数据，普通配置写入不能改变，详见[配置访问声明](06-config-access.md)。
 
@@ -71,7 +71,7 @@ Wasm 可以导出多个函数。单入口是调用约定的选择，不是 Wasm 
 
 配置与可恢复状态留在宿主表中，`snapshot` 不作为所有模块必须实现的标准钩子。重载不复制旧 Wasm 的线性内存、对象地址或执行栈。
 
-create 负责初始化，禁止 send/call（包括宿主原生服务对象），成功后才开放普通入口；正常退出运行受限 destroy，trap 或 Force 不执行来宾清理，宿主按实例资源所有权回收。外部卸载/重载有 Drain、AtYield、Force 三种方式，详见[生命周期设计](10-module-lifecycle.md)。必要状态由模块显式保存，不承诺强制退出时仍有机会写回；不另增一组初始化和停止钩子。
+create 负责初始化，禁止 send/call/emit 与资源通知注册（包括调用宿主原生服务对象），成功后才开放普通入口；正常退出运行受限 destroy，trap 或 Force 不执行来宾清理，宿主按实例资源所有权回收。外部卸载/重载有 Drain、AtYield、Force 三种方式，详见[生命周期设计](10-module-lifecycle.md)。必要状态由模块显式保存，不承诺强制退出时仍有机会写回；发布后可向 module.activated 指定的普通 Unit 接口通知一次；等待期间其他处理器仍可执行。不新增 ABI 导出或第二个初始化屏障。
 
 ## 5. `send` 与 `call`
 
@@ -113,16 +113,16 @@ ABI 实现须区分模块可见的错误数据与 Wasmtime 的执行控制错误
 
 热重载对其他包保持对象身份、地址和调用契约；调用者不持有目标的 Wasm 函数或执行实例，无需替换后重新绑定。Drain 完成旧请求，显式 AtYield/Force 可以中断旧调用，框架不自动重试。宿主保持结果关联与交接期间待派发请求，候选破坏已发布接口契约时不能直接透明切换。
 
-群消息等事件由宿主接入能力产生，调度器内置 notifier 按模块 Manifest 的静态接收声明投递为普通请求，不直接重入处理器。模块没有事件生产声明或发布宿主接口，彼此通信仍使用 send/call。宿主处理逐目标接纳结果，接收宿主事件不产生同名插件加载依赖，详见[notifier 与依赖设计](11-notifier-and-dependencies.md)。
+接入包通过通用 I/O 解释外部协议，发布自身 events 声明的类型化事件；调度器绑定来源并按静态 subscriptions 投递。模块事件形成接收者到源包的依赖边，允许环。emit 逐目标报告接纳结果；需要响应时仍用 call。实例资源通知绑定当前代际，不能转交重载后的实例，详见[事件与依赖设计](11-notifier-and-dependencies.md)。
 
 ## 7. 实现范围与扩展边界
 
 模块需要的通信、单项配置、HTTP、WebSocket、受管文件、日志和时间接口见[宿主接口设计](08-host-interfaces.md)，已实现的固定 ABI、异步执行及上下文类型见[运行说明](13-runtime-and-sdk.md)。
 
 - 包归档、分发及通用代码生成工具；当前使用目录包和示例打包程序。
-- 独立主动任务的启动接口；当前请求由 call/send 或宿主事件进入。
+- 独立主动任务的启动接口；当前请求由 call/send、事件、激活或实例资源通知进入。
 - 依赖环启动策略；当前显式拒绝环，不做运行时死锁处理。
 - 配置 Schema 或键集合的变更策略，以及配置应用通知；同 Schema 的默认值更新已实现，并保留当前值。
-- 代用户操作的通用外部认证；当前已绑定模块来源和 OneBot 用户来源。
+- 代用户操作的通用外部认证；当前使用 Principal 与发行者绑定的 External 来源。
 
 两端路由、在途请求交接、重入及唤醒已实现。普通 call 不提供主动取消与超时；显式生命周期中断遵守既定三种停止方式。

@@ -1,6 +1,7 @@
 mod api;
 pub(crate) mod changes;
 mod dispatch;
+mod events;
 pub(crate) mod inspection;
 mod lifecycle;
 
@@ -150,7 +151,7 @@ pub(crate) struct Directory {
     pub slots: HashMap<Token, Slot>,
     natives: HashMap<(Token, Token), Arc<RegisteredNative>>,
     native_budgets: HashMap<Token, Arc<Budget>>,
-    events: HashMap<(Token, Token), EventDefinition>,
+    pub(super) events: HashMap<(Token, Token), EventDefinition>,
 }
 pub(crate) struct Slot {
     pub published: Arc<Manifest>,
@@ -235,15 +236,33 @@ pub(crate) struct Instance {
     pub force: AtomicBool,
 }
 pub(crate) struct Budget {
-    requests: Arc<Semaphore>,
-    bytes: Arc<Semaphore>,
+    normal: Capacity,
+    notifications: Capacity,
+    control: Arc<Semaphore>,
     changed: Arc<Notify>,
 }
+struct Capacity {
+    requests: Arc<Semaphore>,
+    bytes: Arc<Semaphore>,
+}
 pub(crate) struct Admission {
-    _request: OwnedSemaphorePermit,
-    _bytes: OwnedSemaphorePermit,
+    _charge: Charge,
     // Fields drop in order; notify only after the permits have returned.
     _changed: NotifyReleased,
+}
+enum Charge {
+    Request {
+        _request: OwnedSemaphorePermit,
+        _bytes: OwnedSemaphorePermit,
+    },
+    Activation {
+        _permit: OwnedSemaphorePermit,
+    },
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Binding {
+    Object,
+    Instance,
 }
 struct NotifyReleased(Arc<Notify>);
 impl Drop for NotifyReleased {
@@ -252,6 +271,7 @@ impl Drop for NotifyReleased {
     }
 }
 pub(crate) struct Request {
+    pub binding: Binding,
     pub invocation: Invocation,
     pub bytes: Vec<u8>,
     pub admission: Admission,
@@ -290,27 +310,56 @@ impl Outcome {
 impl Budget {
     fn new(options: &RuntimeOptions, changed: Arc<Notify>) -> Self {
         Self {
-            requests: Arc::new(Semaphore::new(options.max_requests)),
-            bytes: Arc::new(Semaphore::new(options.max_input_bytes)),
+            normal: Capacity::new(options),
+            notifications: Capacity::new(options),
+            control: Arc::new(Semaphore::new(1)),
             changed,
         }
     }
     fn reserve(&self, bytes: usize) -> DispatchResult<Admission> {
-        let request = self
+        self.reserve_from(&self.normal, bytes)
+    }
+    fn reserve_notification(&self, bytes: usize) -> DispatchResult<Admission> {
+        self.reserve_from(&self.notifications, bytes)
+    }
+    fn reserve_from(&self, capacity: &Capacity, bytes: usize) -> DispatchResult<Admission> {
+        let request = capacity
             .requests
             .clone()
             .try_acquire_owned()
             .map_err(|_| DispatchError::QueueFull)?;
-        let bytes = self
+        let bytes = capacity
             .bytes
             .clone()
             .try_acquire_many_owned(bytes.try_into().map_err(|_| DispatchError::QueueFull)?)
             .map_err(|_| DispatchError::QueueFull)?;
         Ok(Admission {
-            _request: request,
-            _bytes: bytes,
+            _charge: Charge::Request {
+                _request: request,
+                _bytes: bytes,
+            },
             _changed: NotifyReleased(self.changed.clone()),
         })
+    }
+    fn activation(&self) -> Admission {
+        Admission {
+            _charge: Charge::Activation {
+                _permit: self
+                    .control
+                    .clone()
+                    .try_acquire_owned()
+                    .expect("one activation per instance"),
+            },
+            _changed: NotifyReleased(self.changed.clone()),
+        }
+    }
+}
+impl Capacity {
+    fn new(options: &RuntimeOptions) -> Self {
+        Self {
+            requests: Arc::new(Semaphore::new(options.max_requests)),
+            bytes: Arc::new(Semaphore::new(options.max_input_bytes)),
+        }
     }
 }
 impl State {
@@ -387,6 +436,7 @@ impl Live {
         self.interfaces
             .values()
             .flat_map(|inbox| &inbox.queue)
+            .filter(|request| request.binding == Binding::Object)
             .fold((0, 0), |(count, bytes), request| {
                 (count + 1, bytes + request.bytes.len())
             })

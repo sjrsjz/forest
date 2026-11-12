@@ -212,6 +212,7 @@ mod tests {
             }
         });
         let request = || HttpRequest {
+            timeout_ms: None,
             method: "GET".into(),
             url: format!("http://{address}"),
             headers: vec![],
@@ -270,6 +271,7 @@ mod tests {
                 .unwrap();
             let handle = resources
                 .ws_connect(forest_protocol::service::WebSocketRequest {
+                    timeout_ms: None,
                     url: format!("ws://{address}"),
                     headers: vec![],
                 })

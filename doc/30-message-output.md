@@ -1,6 +1,6 @@
 # 群消息输出与长消息转发
 
-`/module/message-output` 是独立 Wasm 包，源码位于 `plugins/message-output`。模型输出通过 `/send_markdown` 调用独立 Markdown 包进行解析与排版，再解析受管图片、按群选择长消息展示方式并调用 OneBot。原生 `/send` 用于框架命令与错误报告。Agent 持有包自己的契约副本，不链接其实现；宿主仍只提供 OneBot 原生传输。
+`/module/message-output` 是独立 Wasm 包，源码位于 `plugins/message-output`。模型输出通过 `/send_markdown` 调用独立 Markdown 包进行解析与排版，再解析受管图片、按群选择长消息展示方式并调用 OneBot。原生 `/send` 用于框架命令与错误报告。Agent 持有包自己的契约副本，不链接其实现；平台传输由普通 OneBot Wasm 包提供。
 
 ## 调用与回执
 

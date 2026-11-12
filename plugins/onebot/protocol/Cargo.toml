@@ -14,7 +14,7 @@ forest = ["dep:forest-serde"]
 serde.workspace = true
 serde_json.workspace = true
 thiserror = "2.0.18"
-forest-serde = { path = "../forest-serde", optional = true }
+forest-serde = { path = "../../../crates/forest-serde", optional = true }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"], optional = true }
 
 [dev-dependencies]
