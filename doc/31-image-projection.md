@@ -14,7 +14,7 @@ Memory /project → image-projection /prepare → Media /get
 
 依据图片实际内容识别 JPEG、PNG、GIF、WebP，无法识别格式或处理失败时返回图片错误。尺寸已符合要求时保留原字节，MIME 使用识别出的格式。超出最长边上限时等比例缩小，不放大；缩放前应用图片的方向信息。
 
-缩放后的 JPEG 使用质量 90 编码为 JPEG，其他格式输出 PNG。GIF/WebP 缩放采用静态首帧；原始动画仍完整保存在 Media。处理在 Wasm 中完成，使用优化的 guest 构建；`/prepare` 不可重入，以串行执行控制同时存在的解码工作区。
+缩放后的 JPEG 使用质量 90 编码为 JPEG，其他格式输出 PNG。GIF/WebP 缩放采用静态首帧；原始动画仍完整保存在 Media。处理在 Wasm 中完成，使用优化的 guest 构建；`/prepare` 与缩略图入口共同获取 `/project` 宿主锁，以串行执行控制同时存在的解码工作区。
 
 派生图写入本模块私有 SQLite，以 `(reference, max_side)` 为键。Media 中已经取得的原图字节不可变，因此已完成的同键派生图可复用。缓存只保存缩放结果，不复制尺寸已经合适的原图；热重载后仍可读取缓存。配置更换尺寸后使用新的键，不覆盖旧尺寸结果。
 

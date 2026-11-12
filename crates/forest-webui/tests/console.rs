@@ -52,7 +52,6 @@ async fn authenticated_inspection_is_read_only_and_stream_closes_on_shutdown() {
         .register_native(NativeInterface::new(
             "/core/test".parse().unwrap(),
             "/must-not-run".parse().unwrap(),
-            true,
             callers(vec![SubjectPattern::SelfModule]),
             move |_, (): ()| {
                 let calls = observations.clone();

@@ -61,7 +61,6 @@ writers = ["self", "/user/admin"]
 path = "/render"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = false
 [provides.access]
 callers = ["/module/**"]
 
@@ -123,7 +122,7 @@ Schema 文件可以声明辅助类型和递归结构，通过 export 指定根�
 
 完整调用地址为 `(对象 Token, 接口路径)`。接口路径可以是任意合法具体 Token，包括 `/`，不要求固定前缀；只在所属对象内唯一。文件名、数组序号、Rust 函数名和 Wasm 函数地址都不构成接口身份。
 
-provides 必须声明输入 Schema、完整 `Result<T, E>` 输出 Schema、布尔 reentrant 和访问规则。uses 指定目标对象、目标接口及调用方要求的输入输出契约，不使用依赖槽位或版本范围。subscriptions 指定宿主事件及本模块 provides 中的接收接口，不声明模块事件生产能力。
+provides 必须声明输入 Schema、完整 `Result<T, E>` 输出 Schema、访问规则。uses 指定目标对象、目标接口及调用方要求的输入输出契约，不使用依赖槽位或版本范围。subscriptions 指定宿主事件及本模块 provides 中的接收接口，不声明模块事件生产能力。
 
 ACL 的主体采用统一文本表示：
 
@@ -154,4 +153,4 @@ Rust 打包器从类型化 Manifest 生成声明文件，计算摘要，最后�
 
 配置键集合及 Schema 保持等价，默认值可以更新并保留全部当前值。生命周期错误 Schema 属于具体执行实例，允许随候选改变；错误始终携带所属实例的契约。元信息和文件摘要不替代这些兼容检查。
 
-普通加载采用静态依赖闭包，拒绝依赖环。生命周期、执行交接、ACL 发布及请求队列仍按[模块生命周期](10-module-lifecycle.md)和[调度器状态机](12-scheduler-state-machine.md)执行。
+普通加载求静态依赖闭包，允许依赖环；宿主在联合候选目录中检查接口，再初始化并统一发布整组成员。生命周期、执行交接、ACL 发布及请求队列仍按[模块生命周期](10-module-lifecycle.md)和[调度器状态机](12-scheduler-state-machine.md)执行。

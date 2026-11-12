@@ -1,6 +1,7 @@
 //! Typed guest SDK. Futures stay in the Wasm instance.
 mod handlers;
 pub mod host;
+mod lock;
 mod operation;
 #[doc(hidden)]
 pub mod runtime;
@@ -12,6 +13,7 @@ pub use forest_protocol::{
 };
 pub use forest_serde::{DeriveSchema, DeriveValue};
 pub use handlers::Handlers;
+pub use lock::LockGuard;
 pub use operation::Operation;
 
 /// Keeps the dispatch and resource failure layers intact in module error types.

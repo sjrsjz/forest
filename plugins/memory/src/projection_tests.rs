@@ -59,7 +59,6 @@ async fn malformed_generated_cq_can_be_archived_read_and_projected_by_real_wasm(
         .register_native(NativeInterface::new(
             managed::OBJECT.parse().unwrap(),
             "/register".parse().unwrap(),
-            true,
             access.clone(),
             |_, _: managed::Source| async { Ok::<(), managed::Error>(()) },
         ))
@@ -68,7 +67,6 @@ async fn malformed_generated_cq_can_be_archived_read_and_projected_by_real_wasm(
         .register_native(NativeInterface::new(
             managed::OBJECT.parse().unwrap(),
             "/get".parse().unwrap(),
-            true,
             access.clone(),
             |_, reference: String| async move {
                 if reference == format!("media:{}", "a".repeat(64)) {
@@ -86,7 +84,6 @@ async fn malformed_generated_cq_can_be_archived_read_and_projected_by_real_wasm(
         .register_native(NativeInterface::new(
             image_projection::OBJECT.parse().unwrap(),
             image_projection::PREPARE.parse().unwrap(),
-            false,
             access.clone(),
             |_, reference: String| async move {
                 if reference == format!("media:{}", "a".repeat(64)) {
@@ -104,7 +101,6 @@ async fn malformed_generated_cq_can_be_archived_read_and_projected_by_real_wasm(
         .register_native(NativeInterface::new(
             embedding::OBJECT.parse().unwrap(),
             embedding::EMBED.parse().unwrap(),
-            true,
             access.clone(),
             |_, _: Vec<embedding::Input>| async {
                 Err::<embedding::Embeddings, _>(embedding::Error::NotConfigured)
@@ -115,7 +111,6 @@ async fn malformed_generated_cq_can_be_archived_read_and_projected_by_real_wasm(
         .register_native(NativeInterface::new(
             image_projection::OBJECT.parse().unwrap(),
             image_projection::THUMBNAIL.parse().unwrap(),
-            false,
             access.clone(),
             |_, _: image_projection::Thumbnail| async {
                 Err::<managed::Blob, _>(image_projection::Error::Media(managed::Error::NotFound))
@@ -126,7 +121,6 @@ async fn malformed_generated_cq_can_be_archived_read_and_projected_by_real_wasm(
         .register_native(NativeInterface::new(
             reranker::OBJECT.parse().unwrap(),
             reranker::RANK.parse().unwrap(),
-            true,
             access,
             |_, _: reranker::Request| async {
                 Err::<reranker::Scores, _>(reranker::Error::NotConfigured)
@@ -139,7 +133,6 @@ async fn malformed_generated_cq_can_be_archived_read_and_projected_by_real_wasm(
         .register_native(NativeInterface::new(
             crate::markdown::OBJECT.parse().unwrap(),
             "/encode".parse().unwrap(),
-            true,
             callers(vec![SubjectPattern::Path(
                 "/module/memory".parse().unwrap(),
             )]),

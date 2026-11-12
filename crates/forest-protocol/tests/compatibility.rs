@@ -40,7 +40,6 @@ fn interface<I: AsSchema, T: AsSchema, E: AsSchema>() -> InterfaceDeclaration {
         path: "/example".parse().unwrap(),
         input: I::as_schema(),
         output: <Result<T, E>>::as_schema(),
-        reentrant: false,
         access: callers(vec![]),
     }
 }

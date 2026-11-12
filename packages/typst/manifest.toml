@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/render"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = false
 
 [provides.access]
 callers = [
@@ -34,7 +33,6 @@ callers = [
 path = "/typeset"
 input = "generated/provides/1.input.schema"
 output = "generated/provides/1.output.schema"
-reentrant = false
 
 [provides.access]
 callers = [
@@ -66,4 +64,4 @@ output = "generated/uses/1.output.schema"
 "generated/uses/0.output.schema" = "3800a6ddd2264b2d2570bd230d9bf00de97e3bcc731fb45fe48feb5a30a53c9f"
 "generated/uses/1.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
 "generated/uses/1.output.schema" = "4d980205471782dbd4195c353ecf862074599807c7b4f6cfd2fa94ac98f54e20"
-"module.wasm" = "3d4560fa7641b727194d48a0698ee0e2aada0ae92dbd2d3fc5cf847717696c59"
+"module.wasm" = "268f32562e7256d0e7be2a001b66b3e2762a9be58c8647904de7682694210581"

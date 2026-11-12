@@ -109,7 +109,6 @@ async fn actual_wasm_scales_long_images_preserves_originals_and_reuses_persisten
         .register_native(NativeInterface::new(
             media::OBJECT.parse().unwrap(),
             "/get".parse().unwrap(),
-            true,
             callers(vec![SubjectPattern::Path(OBJECT.parse().unwrap())]),
             move |_, reference: String| {
                 let original = original.clone();

@@ -32,7 +32,6 @@ impl Module for Shell {
     fn handlers() -> Handlers<Self> {
         Handlers::new().with(
             "/group_message".parse().unwrap(),
-            true,
             callers(vec![SubjectPattern::Path(onebot::OBJECT.parse().unwrap())]),
             Self::on_message,
         )

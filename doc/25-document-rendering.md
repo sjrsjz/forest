@@ -67,7 +67,7 @@ Media 保留所有已发布对象，不提供删除或自动清理接口。Typst
 }
 ```
 
-Agent 将返回的 `markdown` 放进正常 assistant 正文即可发送。编译失败作为工具错误返回 diagnostics，包含原始源码中的行、列、消息和建议；警告随成功结果返回。框架不猜测、改写或自动重新编译。调用完成后清空编译缓存；渲染接口不可重入，同一实例依次处理文档，计算时间片仍由既有调度器控制。另提供 `/typeset: string -> Result<Vec<string>, Error>` 给独立 Markdown 包，沿用相同编译、像素限制和媒体发布流程，不经过工具网关或模型。
+Agent 将返回的 `markdown` 放进正常 assistant 正文即可发送。编译失败作为工具错误返回 diagnostics，包含原始源码中的行、列、消息和建议；警告随成功结果返回。框架不猜测、改写或自动重新编译。调用完成后清空编译缓存；渲染和排版入口共同获取 `/document` 宿主锁，同一实例依次处理文档，计算时间片仍由既有调度器控制。另提供 `/typeset: string -> Result<Vec<string>, Error>` 给独立 Markdown 包，沿用相同编译、像素限制和媒体发布流程，不经过工具网关或模型。
 
 使用 Typst/typst-render 0.15.1，内置 typst-assets 字体和 OFL 授权的 Noto Sans CJK SC 2.004，无需宿主安装字体或浏览器。字体来源、摘要及许可证见插件 assets 目录。字体与引擎均编入包，通过 Wasm 热重载替换。
 

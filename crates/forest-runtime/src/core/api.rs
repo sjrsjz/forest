@@ -47,7 +47,9 @@ impl Scheduler {
             services,
             logs: crate::LogWriter::default(),
             run_queue,
+            changed: Arc::new(Notify::new()),
             directory: Mutex::new(Directory {
+                changes: HashMap::new(),
                 host_config: crate::io_settings::IoSettings::access(),
                 slots: HashMap::new(),
                 natives: HashMap::new(),
@@ -55,6 +57,7 @@ impl Scheduler {
                 events: HashMap::new(),
             }),
             next_instance: AtomicU64::new(1),
+            next_request: AtomicU64::new(1),
             _ticker: ticker,
         });
         Ok(Self { core })
@@ -104,6 +107,13 @@ impl Scheduler {
             !directory.slots.contains_key(&native.object),
             "native object conflicts with Wasm object"
         );
+        ensure!(
+            directory
+                .changes
+                .values()
+                .all(|c| !c.snapshot().objects.contains(&native.object)),
+            "native object conflicts with a reserved module"
+        );
         let key = (native.object.clone(), native.declaration.path.clone());
         ensure!(
             !directory.natives.contains_key(&key),
@@ -112,18 +122,15 @@ impl Scheduler {
         directory
             .native_budgets
             .entry(native.object.clone())
-            .or_insert_with(|| Arc::new(Budget::new(&self.core.options)));
+            .or_insert_with(|| {
+                Arc::new(Budget::new(&self.core.options, self.core.changed.clone()))
+            });
         let access = AclTable::new([AclEntry {
             entity: native.object.clone(),
             key: native.declaration.path.clone(),
             owner: native.object.clone(),
             access: native.declaration.access.clone(),
         }])?;
-        let gate = if native.declaration.reentrant {
-            NativeGate::Parallel
-        } else {
-            NativeGate::Serial(Arc::new(Semaphore::new(1)))
-        };
         directory.natives.insert(
             key,
             Arc::new(RegisteredNative {
@@ -131,13 +138,19 @@ impl Scheduler {
                 declaration: native.declaration,
                 handler: native.handler,
                 access,
-                gate,
             }),
         );
         Ok(())
     }
     pub fn register_event(&self, event: EventDefinition) -> Result<()> {
         let mut directory = self.core.directory.lock().unwrap();
+        ensure!(
+            directory
+                .changes
+                .values()
+                .all(|c| !c.snapshot().objects.contains(&event.source)),
+            "event source conflicts with a reserved module"
+        );
         let key = (event.source.clone(), event.event.clone());
         ensure!(!directory.events.contains_key(&key), "duplicate host event");
         ensure!(
@@ -148,90 +161,66 @@ impl Scheduler {
         Ok(())
     }
     pub async fn load(&self, package: Package) -> Result<()> {
-        let (reply, receive) = oneshot::channel();
-        let instance = self.core.instance(package.clone())?;
-        {
-            let mut directory = self.core.directory.lock().unwrap();
-            self.core
-                .check_dependencies(&directory, &package.manifest)?;
-            ensure!(
-                !directory
-                    .natives
-                    .keys()
-                    .any(|(object, _)| object == &instance.object),
-                "reserved native object"
-            );
-            if let Some(slot) = directory.slots.get(&instance.object) {
-                ensure!(
-                    matches!(slot.state, State::Failed(_)),
-                    "module already loaded"
-                );
-            }
-            for reserved in ["/user", "/system"] {
-                ensure!(
-                    !reserved.parse::<Token>()?.is_prefix_of(&instance.object),
-                    "module identity uses a reserved principal namespace"
-                );
-            }
-            ensure!(
-                !directory
-                    .events
-                    .keys()
-                    .any(|(source, _)| source == &instance.object),
-                "module identity conflicts with a host event source"
-            );
-            directory.slots.insert(
-                instance.object.clone(),
-                Slot {
-                    published: package.manifest.clone(),
-                    access: package.access.clone(),
-                    budget: Arc::new(Budget::new(&self.core.options)),
-                    state: State::Creating {
-                        instance: instance.clone(),
-                        inbox: CreatingInbox::Closed,
-                        completion: reply,
-                    },
-                },
-            );
-        }
-        crate::driver::spawn(self.core.clone(), instance);
-        receive
+        self.load_many(vec![package]).await
+    }
+    pub async fn load_many(&self, packages: Vec<Package>) -> Result<()> {
+        self.core
+            .begin_change(changes::Action::Load(packages), StopMode::Drain)?
+            .wait()
             .await
-            .context("module driver stopped during initialization")?
-            .map_err(anyhow::Error::new)
+            .map_err(Into::into)
     }
     pub async fn unload(&self, object: &Token, mode: StopMode) -> Result<()> {
-        let receive = self.core.stop(object, mode, None)?;
-        receive
+        self.unload_many(vec![object.clone()], mode).await
+    }
+    pub async fn unload_many(&self, objects: Vec<Token>, mode: StopMode) -> Result<()> {
+        self.core
+            .begin_change(changes::Action::Unload(objects), mode)?
+            .wait()
             .await
-            .context("module driver stopped during unload")?
-            .map_err(anyhow::Error::new)
+            .map_err(Into::into)
     }
     pub async fn reload(&self, package: Package, mode: StopMode) -> Result<()> {
-        let object = package.manifest.package.id.clone();
-        let receive = self.core.stop(&object, mode, Some(package))?;
-        receive
+        self.request_reload(vec![package], mode)?
+            .wait()
             .await
-            .context("module driver stopped during reload")?
-            .map_err(anyhow::Error::new)
+            .map_err(Into::into)
+    }
+    pub fn request_reload(
+        &self,
+        packages: Vec<Package>,
+        mode: StopMode,
+    ) -> Result<crate::ManagementRequest> {
+        self.core.begin_change(
+            changes::Action::Reload(
+                packages
+                    .into_iter()
+                    .map(changes::Source::Prepared)
+                    .collect(),
+            ),
+            mode,
+        )
+    }
+    pub fn request_reload_from(
+        &self,
+        replacements: Vec<crate::ReloadTarget>,
+        mode: StopMode,
+    ) -> Result<crate::ManagementRequest> {
+        self.core.begin_change(
+            changes::Action::Reload(
+                replacements
+                    .into_iter()
+                    .map(changes::Source::Directory)
+                    .collect(),
+            ),
+            mode,
+        )
+    }
+    pub fn cancel(&self, request: crate::RequestId) -> std::result::Result<(), crate::CancelError> {
+        self.core.cancel_change(request)
     }
     pub fn force(&self, object: &Token) -> Result<()> {
-        let mut directory = self.core.directory.lock().unwrap();
-        let slot = directory.slots.get_mut(object).context("unknown module")?;
-        let instance = slot
-            .state
-            .instance()
-            .context("module is not executing")?
-            .clone();
-        match &mut slot.state {
-            State::Stopping { mode, .. } => *mode = StopMode::Force,
-            State::Creating { .. } | State::Destroying { .. } => {}
-            _ => anyhow::bail!("force requires an initialization or an existing stop operation"),
-        }
-        instance.force.store(true, Ordering::Release);
-        self.core.engine.increment_epoch();
-        instance.mailbox.changed.notify_one();
-        Ok(())
+        self.core.force_change(object)
     }
     pub async fn call<I: AsValue, O: AsValue>(
         &self,

@@ -41,7 +41,6 @@ impl Module for Reranker {
     fn handlers() -> Handlers<Self> {
         Handlers::new().with(
             RANK.parse().unwrap(),
-            true,
             callers(vec![
                 SubjectPattern::Path("/module/**".parse().unwrap()),
                 SubjectPattern::Path("/user/admin".parse().unwrap()),

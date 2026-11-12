@@ -30,7 +30,6 @@ impl Module for Context {
     fn handlers() -> Handlers<Self> {
         Handlers::new().with(
             FORMAT.parse().unwrap(),
-            true,
             callers(vec![
                 SubjectPattern::Path("/module/**".parse().unwrap()),
                 SubjectPattern::Path("/user/admin".parse().unwrap()),

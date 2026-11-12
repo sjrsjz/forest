@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/query"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -35,4 +34,4 @@ callers = [
 "generated/lifecycle-error.schema" = "47e3497dc397c49f4881887fa4bdd31f4ab7ca1e2611473354df63c5c35a24dc"
 "generated/provides/0.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
 "generated/provides/0.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
-"module.wasm" = "85890acfd406791f9dde547cc25ffe736a22ded82336afe8e61eaa525dff5db6"
+"module.wasm" = "2e5b288e350b36ce4e3787b00ccf35b5cdea39baac7589bb6a491e9a478bd26c"

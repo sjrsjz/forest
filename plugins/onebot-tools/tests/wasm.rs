@@ -169,7 +169,6 @@ async fn wasm_tools_query_native_onebot_and_send_markdown_with_real_receipts() {
         .register_native(forest_runtime::NativeInterface::new(
             "/module/typst".parse().unwrap(),
             "/typeset".parse().unwrap(),
-            false,
             forest_protocol::manifest::callers(vec![SubjectPattern::Path(
                 "/module/markdown".parse().unwrap(),
             )]),

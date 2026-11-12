@@ -12,7 +12,6 @@ lifecycle-error = "generated/lifecycle-error.schema"
 path = "/get_friend_list"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -24,7 +23,6 @@ callers = [
 path = "/get_group_info"
 input = "generated/provides/1.input.schema"
 output = "generated/provides/1.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -36,7 +34,6 @@ callers = [
 path = "/get_group_list"
 input = "generated/provides/2.input.schema"
 output = "generated/provides/2.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -48,7 +45,6 @@ callers = [
 path = "/get_group_member_info"
 input = "generated/provides/3.input.schema"
 output = "generated/provides/3.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -60,7 +56,6 @@ callers = [
 path = "/get_group_member_list"
 input = "generated/provides/4.input.schema"
 output = "generated/provides/4.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -72,7 +67,6 @@ callers = [
 path = "/get_login_info"
 input = "generated/provides/5.input.schema"
 output = "generated/provides/5.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -84,7 +78,6 @@ callers = [
 path = "/get_stranger_info"
 input = "generated/provides/6.input.schema"
 output = "generated/provides/6.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -96,7 +89,6 @@ callers = [
 path = "/send_group_message"
 input = "generated/provides/7.input.schema"
 output = "generated/provides/7.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -108,7 +100,6 @@ callers = [
 path = "/send_private_message"
 input = "generated/provides/8.input.schema"
 output = "generated/provides/8.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -176,4 +167,4 @@ output = "generated/uses/4.output.schema"
 "generated/uses/3.output.schema" = "4d980205471782dbd4195c353ecf862074599807c7b4f6cfd2fa94ac98f54e20"
 "generated/uses/4.input.schema" = "1b52b18d01f6b7db54d7253ccc8742722d3ac41e665cf2baf78335f2b6ac8485"
 "generated/uses/4.output.schema" = "a90dc8f0ea9e433e46698f24bbdbef0e36147d770f448fe2581973a78f15c472"
-"module.wasm" = "6ec5b98426a5d409c585cc565f8bbbfb708965db38d5f80ace6af00604ac1f79"
+"module.wasm" = "b96fa41e657dcd52dff6997948a9a63ff34332b293b8467267542c4745fdd259"

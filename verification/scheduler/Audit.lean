@@ -1,0 +1,38 @@
+import Forest
+
+-- The checker script rejects any additional trust, including sorryAx.
+#print axioms Forest.Abi.reachable_safe
+#print axioms Forest.Abi.free_valid
+#print axioms Forest.Abi.no_double_free
+#print axioms Forest.Abi.borrowed_reference_valid
+#print axioms Forest.Store.reachable_safe
+#print axioms Forest.Store.drain_has_no_owner
+#print axioms Forest.Store.preemption_keeps_owner
+#print axioms Forest.Store.queued_unbound
+#print axioms Forest.Store.stale_completion_rejected
+#print axioms Forest.Reload.commit_preserves
+#print axioms Forest.Reload.commit_has_no_old_owner
+#print axioms Forest.Reload.commit_transfers_exact_requests
+#print axioms Forest.Reload.old_requests_precede_new
+#print axioms Forest.Reload.publish_preserves
+#print axioms Forest.Reload.publish_all_together
+#print axioms Forest.Reload.cancellation_leaves_world
+#print axioms Forest.Reload.no_commit_after_cancel
+#print axioms Forest.Reload.replacement_preserves
+#print axioms Forest.Reload.all_old_stores_closed
+#print axioms Forest.Counterexamples.grow_while_borrowed_is_unsafe
+#print axioms Forest.Counterexamples.early_unlock_is_unsafe
+#print axioms Forest.Abi.no_exports_after_close
+#print axioms Forest.Store.reachable_protocol_safe
+#print axioms Forest.Reload.admission_accounting
+#print axioms Forest.Counterexamples.normal_abi_roundtrip
+#print axioms Forest.Mutex.reachable_safe
+#print axioms Forest.Mutex.lease_unique
+#print axioms Forest.Mutex.grant_is_fifo
+#print axioms Forest.Mutex.cancel_removes_undelivered
+#print axioms Forest.Mutex.cancel_keeps_delivered
+#print axioms Forest.Mutex.other_task_cannot_unlock
+#print axioms Forest.Mutex.stop_instance_blocks_all
+#print axioms Forest.Mutex.instance_step_is_local
+#print axioms Forest.Mutex.stopped_cannot_deliver
+#print axioms Forest.Mutex.cleanup_keeps_held_until_native_finishes

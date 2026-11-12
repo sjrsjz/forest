@@ -12,7 +12,6 @@ lifecycle-error = "generated/lifecycle-error.schema"
 path = "/encode"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -24,7 +23,6 @@ callers = [
 path = "/format"
 input = "generated/provides/1.input.schema"
 output = "generated/provides/1.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -46,4 +44,4 @@ output = "generated/uses/0.output.schema"
 "generated/provides/1.output.schema" = "a90dc8f0ea9e433e46698f24bbdbef0e36147d770f448fe2581973a78f15c472"
 "generated/uses/0.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
 "generated/uses/0.output.schema" = "4850e767c897c34c66c0a7744cb340250c3514d0c8c066bcc064ef7f82b64ee5"
-"module.wasm" = "19b42f6cb81cc60b7a9702413f8fda548625f411017bbd5516dd59d9a42d674e"
+"module.wasm" = "515800e3303b5d6dd0ac3781325a27526b3e3225b15d2febde2455141a5ae42b"

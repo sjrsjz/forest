@@ -42,7 +42,6 @@ pub(crate) struct Provides {
     pub path: Token,
     pub input: String,
     pub output: String,
-    pub reentrant: bool,
     pub access: Policy,
 }
 
@@ -141,7 +140,6 @@ impl Document {
                     path: p.path,
                     input: files.schema(&p.input)?,
                     output: files.schema(&p.output)?,
-                    reentrant: p.reentrant,
                     access: p.access.resolve()?,
                 })
             })

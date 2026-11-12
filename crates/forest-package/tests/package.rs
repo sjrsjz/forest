@@ -41,7 +41,6 @@ fn manifest() -> Manifest {
                 path: path.parse().unwrap(),
                 input: String::as_schema(),
                 output: <Result<String, bool>>::as_schema(),
-                reentrant: true,
                 access: callers(vec![SubjectPattern::Path("/module/**".parse().unwrap())]),
             })
             .collect(),

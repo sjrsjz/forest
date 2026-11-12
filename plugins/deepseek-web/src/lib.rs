@@ -68,13 +68,8 @@ impl Module for DeepSeekWeb {
             SubjectPattern::Path("/user/admin".parse().unwrap()),
         ]);
         Handlers::new()
-            .with(
-                "/search".parse().unwrap(),
-                true,
-                access.clone(),
-                Self::search,
-            )
-            .with("/fetch".parse().unwrap(), true, access, Self::fetch)
+            .with("/search".parse().unwrap(), access.clone(), Self::search)
+            .with("/fetch".parse().unwrap(), access, Self::fetch)
     }
 }
 

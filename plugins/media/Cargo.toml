@@ -17,7 +17,6 @@ forest-protocol = { path = "../../crates/forest-protocol" }
 forest-serde = { path = "../../crates/forest-serde" }
 sha2 = "0.10.9"
 base64 = "0.22.1"
-futures.workspace = true
 url = "2.5.8"
 serde_json.workspace = true
 

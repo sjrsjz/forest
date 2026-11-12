@@ -146,15 +146,28 @@ impl Packages {
         self.manager.load(available, &[plan.object]).await
     }
     pub async fn reload(&self, request: ReloadRequest) -> Result<()> {
-        let package = self
-            .manager
-            .package(self.directory(&request.directory).await?)
-            .await?;
-        ensure!(
-            package.manifest().package.id == request.object,
-            "replacement changes module identity"
-        );
-        self.manager.reload(package, request.mode).await
+        self.reload_group(ReloadGroupRequest {
+            replacements: vec![ReloadSelection {
+                object: request.object,
+                directory: request.directory,
+            }],
+            mode: request.mode,
+        })
+        .await
+    }
+    pub async fn reload_group(&self, request: ReloadGroupRequest) -> Result<()> {
+        let mut replacements = Vec::new();
+        for target in request.replacements {
+            replacements.push(forest_runtime::ReloadTarget {
+                object: target.object,
+                directory: self.directory(&target.directory).await?,
+            });
+        }
+        self.manager
+            .request_reload_from(replacements, request.mode)?
+            .wait()
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -163,6 +176,18 @@ impl Packages {
 pub struct ReloadRequest {
     pub object: Token,
     pub directory: String,
+    pub mode: StopMode,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReloadSelection {
+    pub object: Token,
+    pub directory: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReloadGroupRequest {
+    pub replacements: Vec<ReloadSelection>,
     pub mode: StopMode,
 }
 
@@ -185,6 +210,12 @@ impl Packages {
     }
     pub async fn unload(&self, object: &Token, mode: StopMode) -> Result<()> {
         self.manager.unload(object, mode).await
+    }
+    pub async fn unload_many(&self, objects: Vec<Token>, mode: StopMode) -> Result<()> {
+        self.manager.unload_many(objects, mode).await
+    }
+    pub fn cancel(&self, request: forest_runtime::RequestId) -> Result<()> {
+        self.manager.cancel(request).map_err(Into::into)
     }
     pub fn force(&self, object: &Token) -> Result<()> {
         self.manager.force(object)

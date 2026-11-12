@@ -8,17 +8,18 @@
 | --- | --- |
 | 本地包无效 | TOML、文件路径、摘要、Schema/Value 语法、默认值 |
 | `missing ABI function` | 编译目标、export_module、导出名称与签名 |
-| 无法完成依赖规划 | uses 的对象/接口、完整 Result 类型、跨模块依赖环 |
+| 无法完成依赖规划 | uses 的对象/接口、完整 Result 类型、可用声明闭包 |
 | create 失败 | LifecycleError 的阶段、Schema 和 Value，配置及本地数据 |
 | 收不到群事件 | 包是否 Serving、subscriptions、输入契约、事件源 callers、宿主测试群限制 |
 | `Denied` | 调用方 uses、目标 callers、配置 readers/writers，以及实际 caller |
 | `LifecycleRestricted` | create/destroy 中执行了禁止的操作 |
-| `QueueFull` | 模块请求/输入额度、入口重入方式、未完成任务数量 |
+| `QueueFull` | 模块请求/输入额度、持锁与等待关系、未完成任务数量 |
 | `InputContract` | 调用输入和 uses/目标 Schema 是否一致 |
 | `OutputContract` | 实际返回值、调用方解码类型、完整错误分支是否一致 |
 | `ExecutionFailed` 或 Failed | trap、panic、借用冲突、错误 ABI，及相关宿主日志 |
 | 重载拒绝 | 对象 ID、接口子类型、配置键集合和 Schema |
-| 重载一直 Stopping | 旧工作是否等待 I/O、永不结束、持续生成旧集合内的后续工作 |
+| 重载一直 Waiting，模块仍 Serving | 目标集合尚未同时静止；可取消请求或明确选择 Force |
+| 已提交后停在 Creating / Releasing | 候选初始化、明确的宿主操作等待及必要资源收尾 |
 
 普通模块返回 `Err(E)` 是正常的类型化结果，不等于模块已 Failed。QueueFull 表示没有接纳本次提交；成功 send 也不能当作目标完成的证据。
 

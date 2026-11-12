@@ -5,6 +5,7 @@ pub const OBJECT: &str = "/core/control";
 
 #[derive(Clone, Debug, DeriveSchema, DeriveValue)]
 pub enum Phase {
+    Staged,
     Creating,
     Serving,
     Stopping,

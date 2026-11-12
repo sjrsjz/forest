@@ -50,7 +50,6 @@ async fn markdown_wasm_renders_real_math_tables_code_and_styling() {
         .register_native(NativeInterface::new(
             OBJECT.parse().unwrap(),
             "/typeset".parse().unwrap(),
-            false,
             callers(vec![SubjectPattern::Path(md::OBJECT.parse().unwrap())]),
             move |_, source: String| {
                 let fonts = fonts.clone();

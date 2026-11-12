@@ -84,31 +84,15 @@ impl Module for Memory {
         ]);
         let admin = callers(vec![SubjectPattern::Path("/user/admin".parse().unwrap())]);
         Handlers::new()
-            .with(
-                "/accept".parse().unwrap(),
-                false,
-                agent.clone(),
-                Self::accept,
-            )
-            .with(
-                "/archive".parse().unwrap(),
-                false,
-                agent.clone(),
-                Self::archive,
-            )
-            .with("/link".parse().unwrap(), false, agent.clone(), Self::link)
-            .with("/delivery".parse().unwrap(), false, agent, Self::delivery)
-            .with("/read".parse().unwrap(), true, read.clone(), Self::read)
-            .with(
-                "/project".parse().unwrap(),
-                true,
-                read.clone(),
-                Self::project,
-            )
-            .with("/recall".parse().unwrap(), true, read, Self::recall)
+            .with("/accept".parse().unwrap(), agent.clone(), Self::accept)
+            .with("/archive".parse().unwrap(), agent.clone(), Self::archive)
+            .with("/link".parse().unwrap(), agent.clone(), Self::link)
+            .with("/delivery".parse().unwrap(), agent, Self::delivery)
+            .with("/read".parse().unwrap(), read.clone(), Self::read)
+            .with("/project".parse().unwrap(), read.clone(), Self::project)
+            .with("/recall".parse().unwrap(), read, Self::recall)
             .with(
                 "/index/advance".parse().unwrap(),
-                false,
                 callers(vec![
                     SubjectPattern::SelfModule,
                     SubjectPattern::Path("/module/agent".parse().unwrap()),
@@ -118,15 +102,15 @@ impl Module for Memory {
             )
             .with(
                 "/index/rebuild".parse().unwrap(),
-                false,
                 admin.clone(),
                 Self::rebuild,
             )
-            .with("/status".parse().unwrap(), true, admin, Self::status)
+            .with("/status".parse().unwrap(), admin, Self::status)
     }
 }
 impl Memory {
     async fn accept(self: Rc<Self>, _: CallContext, input: Incoming) -> Result<Accepted, Error> {
+        let _guard = host::lock("/messages".parse().unwrap()).await?;
         let accepted = store::accept(input).await?;
         // Also resumes durable index work left by a previous instance.
         if let Err(error) = self.wake().await {
@@ -139,6 +123,7 @@ impl Memory {
         Ok(accepted)
     }
     async fn archive(self: Rc<Self>, _: CallContext, ids: Vec<MemoryId>) -> Result<(), Error> {
+        let _guard = host::lock("/messages".parse().unwrap()).await?;
         store::archive(&ids, &self.settings.collection).await?;
         if let Err(error) = self.wake().await {
             let _ = host::log(
@@ -157,9 +142,11 @@ impl Memory {
         store::read(&ids, true).await
     }
     async fn link(self: Rc<Self>, _: CallContext, links: Vec<RecallLink>) -> Result<(), Error> {
+        let _guard = host::lock("/messages".parse().unwrap()).await?;
         store::link(links).await
     }
     async fn delivery(self: Rc<Self>, _: CallContext, input: Delivery) -> Result<(), Error> {
+        let _guard = host::lock("/messages".parse().unwrap()).await?;
         execute(vec![stmt(
             "INSERT INTO deliveries VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
             vec![
@@ -179,6 +166,7 @@ impl Memory {
         self.region(seeds).await
     }
     async fn rebuild(self: Rc<Self>, _: CallContext, _: ()) -> Result<(), Error> {
+        let _guard = host::lock("/index-writer".parse().unwrap()).await?;
         // One page at a time; no complete history is materialized in Wasm.
         let mut cursor = 0;
         loop {

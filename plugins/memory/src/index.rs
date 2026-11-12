@@ -102,7 +102,8 @@ impl Memory {
             .ok_or_else(|| Error::Embedding("empty embedding response".into()))
     }
     pub async fn advance(self: Rc<Self>, _: CallContext, _: ()) -> Result<(), Error> {
-        // The interface is serial. A durable pending item is settled only after processing.
+        let _guard = host::lock("/index-writer".parse().unwrap()).await?;
+        // A durable pending item is settled only after processing.
         self.wake_pending.set(false);
         loop {
             let pending=execute(vec![stmt("SELECT point_id,group_id,sequence,representation FROM vectors WHERE space=? AND state='pending' ORDER BY rowid LIMIT 1",vec![text(&self.settings.collection)])]).await?;

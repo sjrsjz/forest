@@ -8,7 +8,7 @@
 | --- | --- |
 | [快速开始](01-quickstart.md) | 构建一个能响应群聊命令的完整模块，修改配置并重载 |
 | [类型与接口契约](02-contracts.md) | Schema/Value、Rust 类型映射、类型化错误、跨语言契约 |
-| [生命周期与并发](03-lifecycle-and-scheduling.md) | create/destroy、共享内存、重入、主动与被动让出 |
+| [生命周期与并发](03-lifecycle-and-scheduling.md) | create/destroy、共享内存、宿主锁、主动与被动让出 |
 | [通信、事件与权限](04-communication-and-permissions.md) | send/call、uses、宿主事件、可信来源和 ACL |
 | [配置与数据存储](05-configuration-and-storage.md) | 默认值、原子性、私有 SQLite、受管文件和状态恢复 |
 | [宿主 API](06-host-api.md) | SDK 函数、HTTP、WebSocket、日志、时间和 OneBot |

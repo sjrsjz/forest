@@ -131,13 +131,33 @@ async fn phase(s: &Scheduler, object: &str, wanted: ModulePhase) {
     .await
     .unwrap();
 }
+async fn waiting(s: &Scheduler, object: &str) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if s.inspector().snapshot().unwrap().requests.iter().any(|r| {
+                r.objects.iter().any(|o| o.to_string() == object)
+                    && matches!(r.state, forest_runtime::RequestState::Waiting)
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+fn instance_failure(error: &anyhow::Error) -> &forest_runtime::InstanceFailure {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref())
+        .expect("typed instance failure in management error chain")
+}
 fn observe(s: &Scheduler) -> Arc<Observations> {
     let observations = Arc::new(Observations::default());
     let target = observations.clone();
     s.register_native(NativeInterface::new(
         "/core/probe".parse().unwrap(),
         "/observe".parse().unwrap(),
-        true,
         callers(vec![SubjectPattern::Path("/module/**".parse().unwrap())]),
         move |_, value: i64| {
             let target = target.clone();
@@ -149,6 +169,720 @@ fn observe(s: &Scheduler) -> Arc<Observations> {
     ))
     .unwrap();
     observations
+}
+
+fn gated_observe(
+    s: &Scheduler,
+) -> (
+    tokio::sync::mpsc::UnboundedReceiver<i64>,
+    Arc<tokio::sync::Semaphore>,
+) {
+    let (started, events) = tokio::sync::mpsc::unbounded_channel();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let held = gate.clone();
+    s.register_native(NativeInterface::new(
+        "/core/probe".parse().unwrap(),
+        "/observe".parse().unwrap(),
+        callers(vec![SubjectPattern::Path("/module/**".parse().unwrap())]),
+        move |_, value: i64| {
+            let started = started.clone();
+            let held = held.clone();
+            async move {
+                if value > 0 {
+                    started.send(value).unwrap();
+                    held.acquire().await.unwrap().forget();
+                }
+                Ok::<_, String>(value)
+            }
+        },
+    ))
+    .unwrap();
+    (events, gate)
+}
+
+fn peer_package(
+    parent: &Path,
+    name: &str,
+    object: &str,
+    peer: &str,
+    second: bool,
+    create_delay: i64,
+) -> PathBuf {
+    let path = package(parent, name, object, second);
+    let mut manifest = forest_package::read_manifest(&path).unwrap();
+    manifest.uses.push(InterfaceUse {
+        object: peer.parse().unwrap(),
+        interface: "/chain".parse().unwrap(),
+        input: <(Token, i64)>::as_schema(),
+        output: <Result<i64, String>>::as_schema(),
+    });
+    manifest
+        .configs
+        .iter_mut()
+        .find(|c| c.key.to_string() == "/lifecycle/create-delay")
+        .unwrap()
+        .default = create_delay.as_value();
+    manifest
+        .configs
+        .iter_mut()
+        .find(|c| c.key.to_string() == "/lifecycle/peer")
+        .unwrap()
+        .default = forest_scheduler_probe::PeerConfig::Read(peer.parse().unwrap()).as_value();
+    manifest
+        .configs
+        .iter_mut()
+        .find(|c| c.key.to_string() == "/counter")
+        .unwrap()
+        .access
+        .readers
+        .push(SubjectPattern::Path("/module/**".parse().unwrap()));
+    forest_package::write(&path, &manifest).unwrap();
+    path
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_reload_keeps_ingress_and_cancellation_preserves_the_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let scheduler = Scheduler::in_memory(RuntimeOptions {
+        data_directory: temp.path().join("data"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let (mut entered, gate) = gated_observe(&scheduler);
+    let object = "/module/probe-a";
+    let first = scheduler
+        .package(package(temp.path(), "old", object, false))
+        .await
+        .unwrap();
+    let second = scheduler
+        .package(package(temp.path(), "new", object, true))
+        .await
+        .unwrap();
+    scheduler.load(first).await.unwrap();
+    let preparing = scheduler
+        .request_reload_from(
+            vec![forest_runtime::ReloadTarget {
+                object: object.parse().unwrap(),
+                directory: temp.path().join("new"),
+            }],
+            StopMode::Drain,
+        )
+        .unwrap();
+    preparing.cancel().unwrap();
+    assert!(matches!(
+        preparing.wait().await,
+        Err(forest_runtime::ManagementFailure::Cancelled)
+    ));
+    let before = scheduler.inspector().snapshot().unwrap().modules[0]
+        .lifecycle
+        .clone();
+    let active_scheduler = scheduler.clone();
+    let active =
+        tokio::spawn(
+            async move { call::<_, i64>(&active_scheduler, object, "/serial", &0i64).await },
+        );
+    assert_eq!(entered.recv().await, Some(1));
+    let request = scheduler
+        .request_reload(vec![second.clone()], StopMode::Drain)
+        .unwrap();
+    waiting(&scheduler, object).await;
+    assert_eq!(
+        scheduler.phase(&object.parse().unwrap()),
+        Some(ModulePhase::Serving)
+    );
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/implementation", &()).await,
+        1
+    );
+    request.cancel().unwrap();
+    assert!(matches!(
+        request.wait().await,
+        Err(forest_runtime::ManagementFailure::Cancelled)
+    ));
+    let after = scheduler.inspector().snapshot().unwrap().modules[0]
+        .lifecycle
+        .clone();
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(after).unwrap()
+    );
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/destroyed", &()).await,
+        0
+    );
+    gate.add_permits(1);
+    assert_eq!(active.await.unwrap(), 1);
+    scheduler.reload(second, StopMode::Drain).await.unwrap();
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/implementation", &()).await,
+        2
+    );
+    scheduler.shutdown(StopMode::Drain).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn drain_reload_waits_for_started_lock_waiters() {
+    let temp = tempfile::tempdir().unwrap();
+    let scheduler = Scheduler::in_memory(RuntimeOptions {
+        max_requests: 4,
+        data_directory: temp.path().join("data"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let (mut entered, gate) = gated_observe(&scheduler);
+    let object = "/module/probe-a";
+    let mut packages = Vec::new();
+    for (name, second) in [("old", false), ("new", true)] {
+        let path = package(temp.path(), name, object, second);
+        let mut manifest = forest_package::read_manifest(&path).unwrap();
+        manifest
+            .configs
+            .iter_mut()
+            .find(|c| c.key.to_string() == "/lifecycle/create-delay")
+            .unwrap()
+            .default = 300i64.as_value();
+        forest_package::write(&path, &manifest).unwrap();
+        packages.push(scheduler.package(path).await.unwrap());
+    }
+    scheduler.load(packages.remove(0)).await.unwrap();
+    let spawn_call = || {
+        let scheduler = scheduler.clone();
+        tokio::spawn(async move { call::<_, i64>(&scheduler, object, "/serial", &0i64).await })
+    };
+    let send = || {
+        scheduler.send(
+            "/user/test".parse().unwrap(),
+            object.parse().unwrap(),
+            "/serial".parse().unwrap(),
+            &0i64,
+        )
+    };
+    let active = spawn_call();
+    assert_eq!(entered.recv().await, Some(1));
+    let first = spawn_call();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while scheduler.inspector().snapshot().unwrap().modules[0]
+            .budget
+            .requests_used
+            != 2
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    send().unwrap();
+    let third = spawn_call();
+    let reload = scheduler.request_reload(packages, StopMode::Drain).unwrap();
+    waiting(&scheduler, object).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let snapshot = scheduler.inspector().snapshot().unwrap();
+            let module = &snapshot.modules[0];
+            if module.budget.requests_used == 4 && module.interfaces.iter().all(|i| i.queued == 0) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(send(), Err(DispatchError::QueueFull)));
+    gate.add_permits(1);
+    assert_eq!(active.await.unwrap(), 1);
+    assert_eq!(entered.recv().await, Some(2));
+    assert!(matches!(
+        reload.snapshot().state,
+        forest_runtime::RequestState::Waiting
+    ));
+    assert_eq!(
+        scheduler.inspector().snapshot().unwrap().modules[0]
+            .published
+            .version,
+        "1"
+    );
+    // These tasks already entered Wasm and waited on the host lock. They finish
+    // on the old instance; none can be migrated as an unstarted request.
+    gate.add_permits(3);
+    assert_eq!(first.await.unwrap(), 2);
+    assert_eq!(third.await.unwrap(), 4);
+    assert_eq!(entered.recv().await, Some(3));
+    assert_eq!(entered.recv().await, Some(4));
+    tokio::time::timeout(Duration::from_secs(15), reload.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        scheduler.inspector().snapshot().unwrap().modules[0]
+            .published
+            .version,
+        "2"
+    );
+    gate.add_permits(1);
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/serial", &0i64).await,
+        1
+    );
+    scheduler.shutdown(StopMode::Drain).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mutex_wait_does_not_block_other_interfaces_and_trap_kills_the_entire_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let scheduler = Scheduler::in_memory(RuntimeOptions {
+        data_directory: temp.path().join("data"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let (mut entered, gate) = gated_observe(&scheduler);
+    let object = "/module/probe-a";
+    let first = scheduler
+        .package(package(temp.path(), "old", object, false))
+        .await
+        .unwrap();
+    let next = scheduler
+        .package(package(temp.path(), "new", object, true))
+        .await
+        .unwrap();
+    scheduler.load(first).await.unwrap();
+    let start = |interface: &'static str| {
+        let scheduler = scheduler.clone();
+        tokio::spawn(async move {
+            scheduler
+                .call::<_, Result<i64, String>>(
+                    "/user/test".parse().unwrap(),
+                    object.parse().unwrap(),
+                    interface.parse().unwrap(),
+                    &0i64,
+                )
+                .await
+        })
+    };
+    let holder = start("/serial");
+    assert_eq!(entered.recv().await, Some(1));
+    let waiter = start("/serial-alt");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let snapshot = scheduler.inspector().snapshot().unwrap();
+            let module = &snapshot.modules[0];
+            if module.budget.requests_used == 2 && module.interfaces.iter().all(|i| i.queued == 0) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/implementation", &()).await,
+        1
+    );
+    assert!(
+        entered.try_recv().is_err(),
+        "shared lock must exclude the second interface"
+    );
+    // Both instances use the literal key /serial, with independent lock tables.
+    let other = "/module/probe-b";
+    let other_package = scheduler
+        .package(package(temp.path(), "other", other, false))
+        .await
+        .unwrap();
+    scheduler.load(other_package).await.unwrap();
+    let other_scheduler = scheduler.clone();
+    let other_holder =
+        tokio::spawn(
+            async move { call::<_, i64>(&other_scheduler, other, "/serial", &0i64).await },
+        );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(15), entered.recv())
+            .await
+            .unwrap(),
+        Some(1),
+        "a lock in one Wasm instance must not block another instance"
+    );
+    let trap = scheduler
+        .call::<_, Result<(), String>>(
+            "/user/test".parse().unwrap(),
+            object.parse().unwrap(),
+            "/trap".parse().unwrap(),
+            &(),
+        )
+        .await;
+    assert!(matches!(trap, Err(DispatchError::ExecutionFailed(_))));
+    assert!(holder.await.unwrap().is_err());
+    assert!(waiter.await.unwrap().is_err());
+    phase(&scheduler, object, ModulePhase::Failed).await;
+    assert!(
+        entered.try_recv().is_err(),
+        "trap must not resume another guest task"
+    );
+    assert!(!other_holder.is_finished());
+    assert_eq!(
+        call::<_, i64>(&scheduler, other, "/implementation", &()).await,
+        1
+    );
+    scheduler.load(next).await.unwrap();
+    gate.add_permits(3); // Old independent native call, other instance, replacement.
+    assert_eq!(other_holder.await.unwrap(), 1);
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/serial", &0i64).await,
+        1
+    );
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/destroyed", &()).await,
+        0
+    );
+    scheduler.shutdown(StopMode::Drain).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cyclic_calls_can_return_through_a_module_waiting_for_reload() {
+    let temp = tempfile::tempdir().unwrap();
+    let scheduler = Scheduler::in_memory(RuntimeOptions {
+        data_directory: temp.path().join("data"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let (mut entered, gate) = gated_observe(&scheduler);
+    let a = "/module/probe-a";
+    let b = "/module/probe-b";
+    let first = scheduler
+        .package(peer_package(temp.path(), "a", a, b, false, 0))
+        .await
+        .unwrap();
+    let other = scheduler
+        .package(peer_package(temp.path(), "b", b, a, false, 0))
+        .await
+        .unwrap();
+    let replacement = scheduler
+        .package(peer_package(temp.path(), "a-new", a, b, true, 0))
+        .await
+        .unwrap();
+    scheduler
+        .load_roots(vec![first, other], &[a.parse().unwrap()])
+        .await
+        .unwrap();
+    let active_scheduler = scheduler.clone();
+    let active = tokio::spawn(async move {
+        call::<_, i64>(
+            &active_scheduler,
+            a,
+            "/chain",
+            &(b.parse::<Token>().unwrap(), 2i64),
+        )
+        .await
+    });
+    assert_eq!(entered.recv().await, Some(501));
+    let request = scheduler
+        .request_reload(vec![replacement], StopMode::Drain)
+        .unwrap();
+    waiting(&scheduler, a).await;
+    gate.add_permits(1);
+    assert_eq!(
+        active.await.unwrap(),
+        1,
+        "B's callback must still run on old A"
+    );
+    tokio::time::timeout(Duration::from_secs(15), request.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        call::<_, i64>(&scheduler, a, "/implementation", &()).await,
+        2
+    );
+    assert_eq!(
+        call::<_, i64>(&scheduler, b, "/implementation", &()).await,
+        1
+    );
+    scheduler
+        .unload_many(
+            vec![a.parse().unwrap(), b.parse().unwrap()],
+            StopMode::Drain,
+        )
+        .await
+        .unwrap();
+    assert!(scheduler.inspector().snapshot().unwrap().modules.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cyclic_group_waits_for_joint_quiescence_and_publishes_all_candidates_together() {
+    let temp = tempfile::tempdir().unwrap();
+    let scheduler = Scheduler::in_memory(RuntimeOptions {
+        data_directory: temp.path().join("data"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let (mut entered, gate) = gated_observe(&scheduler);
+    let a = "/module/probe-a";
+    let b = "/module/probe-b";
+    let mut old = Vec::new();
+    let mut new = Vec::new();
+    for (name, object, peer, delay) in [("a", a, b, 0), ("b", b, a, 300)] {
+        let old_path = peer_package(temp.path(), name, object, peer, false, delay);
+        let mut declaration = forest_package::read_manifest(&old_path).unwrap();
+        if object == a {
+            declaration.uses.retain(|u| u.object.to_string() != b);
+        }
+        if object == b {
+            declaration
+                .provides
+                .retain(|p| p.path.to_string() != "/chain");
+        }
+        forest_package::write(&old_path, &declaration).unwrap();
+        old.push(scheduler.package(old_path).await.unwrap());
+        new.push(
+            scheduler
+                .package(peer_package(
+                    temp.path(),
+                    &format!("{name}-new"),
+                    object,
+                    peer,
+                    true,
+                    delay,
+                ))
+                .await
+                .unwrap(),
+        );
+    }
+    scheduler.load_many(old).await.unwrap();
+    let active_scheduler = scheduler.clone();
+    let active =
+        tokio::spawn(async move { call::<_, i64>(&active_scheduler, b, "/serial", &0i64).await });
+    entered.recv().await.unwrap();
+    let request = scheduler.request_reload(new, StopMode::Drain).unwrap();
+    waiting(&scheduler, a).await;
+    assert_eq!(
+        call::<_, i64>(&scheduler, a, "/implementation", &()).await,
+        1,
+        "idle A must stay open while B is busy"
+    );
+    gate.add_permits(1);
+    active.await.unwrap();
+    let id = request.snapshot().id;
+    let completion = tokio::spawn(request.wait());
+    let mut saw_creating = false;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let snapshot = scheduler.inspector().snapshot().unwrap();
+            saw_creating |= snapshot.modules.iter().any(|m| {
+                matches!(
+                    m.lifecycle,
+                    forest_runtime::LifecycleSnapshot::Creating { .. }
+                )
+            });
+            if saw_creating {
+                assert!(matches!(
+                    scheduler.cancel(id),
+                    Err(forest_runtime::CancelError::AlreadyCommitted)
+                        | Err(forest_runtime::CancelError::NotFound)
+                ));
+            }
+            let serving = snapshot
+                .modules
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        m.lifecycle,
+                        forest_runtime::LifecycleSnapshot::Serving { .. }
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                serving.is_empty() || serving.len() == 2,
+                "partial group publication"
+            );
+            if serving.len() == 2 {
+                assert_eq!(serving[0].published.version, serving[1].published.version);
+            }
+            if completion.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    completion.await.unwrap().unwrap();
+    assert!(saw_creating);
+    assert!(
+        scheduler
+            .inspector()
+            .snapshot()
+            .unwrap()
+            .modules
+            .iter()
+            .all(|m| m.published.version == "2")
+    );
+    scheduler.shutdown(StopMode::Drain).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_group_initialization_never_publishes_a_successful_member() {
+    let temp = tempfile::tempdir().unwrap();
+    let scheduler = Scheduler::in_memory(RuntimeOptions {
+        data_directory: temp.path().join("data"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    observe(&scheduler);
+    let a = peer_package(
+        temp.path(),
+        "a",
+        "/module/probe-a",
+        "/module/probe-b",
+        false,
+        0,
+    );
+    let b = peer_package(
+        temp.path(),
+        "b",
+        "/module/probe-b",
+        "/module/probe-a",
+        false,
+        0,
+    );
+    let mut manifest = forest_package::read_manifest(&b).unwrap();
+    manifest
+        .configs
+        .iter_mut()
+        .find(|c| c.key.to_string() == "/lifecycle/failure")
+        .unwrap()
+        .default = forest_scheduler_probe::FailureStage::Create.as_value();
+    forest_package::write(&b, &manifest).unwrap();
+    let error = scheduler
+        .load_many(vec![
+            scheduler.package(a).await.unwrap(),
+            scheduler.package(b).await.unwrap(),
+        ])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        instance_failure(&error),
+        forest_runtime::InstanceFailure::Lifecycle {
+            phase: forest_runtime::LifecyclePhase::Create,
+            ..
+        }
+    ));
+    let snapshot = scheduler.inspector().snapshot().unwrap();
+    assert!(snapshot.requests.is_empty());
+    assert!(snapshot.modules.iter().all(|m| matches!(
+        m.lifecycle,
+        forest_runtime::LifecycleSnapshot::Failed { .. }
+    )));
+    assert!(snapshot.modules.iter().all(|m| m.budget.requests_used == 0));
+    scheduler.shutdown(StopMode::Drain).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_reload_can_be_explicitly_changed_to_force() {
+    let temp = tempfile::tempdir().unwrap();
+    let scheduler = Scheduler::in_memory(RuntimeOptions {
+        data_directory: temp.path().join("data"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let (mut entered, gate) = gated_observe(&scheduler);
+    let object = "/module/probe-a";
+    let first = scheduler
+        .package(package(temp.path(), "old", object, false))
+        .await
+        .unwrap();
+    let second = scheduler
+        .package(package(temp.path(), "new", object, true))
+        .await
+        .unwrap();
+    scheduler.load(first).await.unwrap();
+    let active_scheduler = scheduler.clone();
+    let active = tokio::spawn(async move {
+        active_scheduler
+            .call::<_, Result<i64, String>>(
+                "/user/test".parse().unwrap(),
+                object.parse().unwrap(),
+                "/serial".parse().unwrap(),
+                &0i64,
+            )
+            .await
+    });
+    entered.recv().await.unwrap();
+    let request = scheduler
+        .request_reload(vec![second], StopMode::Drain)
+        .unwrap();
+    waiting(&scheduler, object).await;
+    scheduler.force(&object.parse().unwrap()).unwrap();
+    tokio::time::timeout(Duration::from_secs(15), request.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        active.await.unwrap(),
+        Err(DispatchError::Interrupted)
+    ));
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/implementation", &()).await,
+        2
+    );
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/destroyed", &()).await,
+        0
+    );
+    gate.add_permits(1);
+    scheduler.shutdown(StopMode::Drain).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn forced_shutdown_interrupts_an_already_committed_initialization() {
+    let temp = tempfile::tempdir().unwrap();
+    let scheduler = Scheduler::in_memory(RuntimeOptions {
+        data_directory: temp.path().join("data"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    observe(&scheduler);
+    let object = "/module/probe-a";
+    let first = scheduler
+        .package(peer_package(
+            temp.path(),
+            "old",
+            object,
+            object,
+            false,
+            60_000,
+        ))
+        .await
+        .unwrap();
+    let second = scheduler
+        .package(peer_package(
+            temp.path(),
+            "new",
+            object,
+            object,
+            true,
+            60_000,
+        ))
+        .await
+        .unwrap();
+    scheduler.load(first).await.unwrap();
+    let request = scheduler
+        .request_reload(vec![second], StopMode::Drain)
+        .unwrap();
+    phase(&scheduler, object, ModulePhase::Creating).await;
+    tokio::time::timeout(Duration::from_secs(15), scheduler.shutdown(StopMode::Force))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(request.wait().await.is_err());
+    let snapshot = scheduler.inspector().snapshot().unwrap();
+    assert!(snapshot.modules.is_empty());
+    assert!(snapshot.requests.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -194,9 +928,7 @@ async fn lifecycle_rejections_preserve_schema_value_and_stage() {
                 .await
                 .unwrap_err()
         };
-        let failure = error
-            .downcast_ref::<InstanceFailure>()
-            .expect("typed management failure");
+        let failure = instance_failure(&error);
         let InstanceFailure::Lifecycle {
             phase: actual,
             schema,
@@ -265,7 +997,7 @@ async fn lifecycle_host_errors_stay_typed_and_invalid_payloads_are_contract_fail
             .load(scheduler.package(path).await.unwrap())
             .await
             .unwrap_err();
-        let failure = error.downcast_ref::<InstanceFailure>().unwrap();
+        let failure = instance_failure(&error);
         if mismatched_schema {
             assert!(matches!(
                 failure,
@@ -394,7 +1126,7 @@ async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
         1
     );
 
-    // Accepted old work drains, new work stays bounded and runs on new code.
+    // A pending reload keeps old ingress open; all admitted work stays bounded.
     let offset = observations.count();
     let s = scheduler.clone();
     let active = tokio::spawn(async move {
@@ -410,13 +1142,25 @@ async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
     let s = scheduler.clone();
     let candidate = second.clone();
     let reload = tokio::spawn(async move { s.reload(candidate, StopMode::Drain).await });
-    phase(&scheduler, "/module/probe-a", ModulePhase::Stopping).await;
+    waiting(&scheduler, "/module/probe-a").await;
+    assert_eq!(
+        call::<_, i64>(&scheduler, "/module/probe-a", "/implementation", &()).await,
+        1
+    );
     let s = scheduler.clone();
     let deferred =
-        tokio::spawn(
-            async move { call::<_, i64>(&s, "/module/probe-a", "/implementation", &()).await },
-        );
-    tokio::task::yield_now().await;
+        tokio::spawn(async move { call::<_, i64>(&s, "/module/probe-a", "/serial", &0i64).await });
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while scheduler.inspector().snapshot().unwrap().modules[0]
+            .budget
+            .requests_used
+            != 2
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     let full = scheduler.send(
         "/user/test".parse().unwrap(),
         "/module/probe-a".parse().unwrap(),
@@ -424,7 +1168,7 @@ async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
         &(),
     );
     assert!(matches!(full, Err(DispatchError::QueueFull)));
-    assert!(active.await.unwrap().unwrap().is_ok());
+    let completed = active.await.unwrap().unwrap().unwrap();
     reload.await.unwrap().unwrap();
     assert_eq!(
         scheduler.inspector().snapshot().unwrap().modules[0]
@@ -432,7 +1176,11 @@ async fn actual_sdk_concurrency_reload_trap_preemption_and_host_io() {
             .version,
         "2"
     );
-    assert_eq!(deferred.await.unwrap(), 2);
+    assert_eq!(
+        deferred.await.unwrap(),
+        completed + 1,
+        "lock waiters finish on the old instance"
+    );
     assert_eq!(
         call::<_, i64>(&scheduler, "/module/probe-a", "/increment", &()).await,
         2,
@@ -733,7 +1481,6 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
         .register_native(NativeInterface::new(
             "/core/variance".parse().unwrap(),
             "/variance".parse().unwrap(),
-            true,
             callers(vec![SubjectPattern::Path("/module/**".parse().unwrap())]),
             |_, input: i64| async move { if input < 0 { Err(9i32) } else { Ok(7i32) } },
         ))
@@ -806,7 +1553,7 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
         1
     );
 
-    // A request admitted under the old contract executes on the new instance.
+    // Requests during Pending still execute on the old instance.
     let offset = observations.count();
     let active_scheduler = scheduler.clone();
     let active =
@@ -817,31 +1564,14 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
     let reload_scheduler = scheduler.clone();
     let reload =
         tokio::spawn(async move { reload_scheduler.reload(second, StopMode::Drain).await });
-    phase(&scheduler, object, ModulePhase::Stopping).await;
+    waiting(&scheduler, object).await;
     let deferred_scheduler = scheduler.clone();
     let deferred = tokio::spawn(async move {
         call::<_, i64>(&deferred_scheduler, caller, "/use-variance", &-1i32).await
     });
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while scheduler
-            .inspector()
-            .snapshot()
-            .unwrap()
-            .modules
-            .iter()
-            .find(|m| m.object.to_string() == object)
-            .unwrap()
-            .queued_next
-            == 0
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    assert_eq!(deferred.await.unwrap(), -9);
     active.await.unwrap();
     reload.await.unwrap().unwrap();
-    assert_eq!(deferred.await.unwrap(), -9);
     assert_eq!(
         call::<_, i32>(&scheduler, object, "/variance", &i64::MAX).await,
         7
@@ -915,8 +1645,7 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
         1
     );
 
-    // A guest that lies about a narrowed output must fail even for a deferred
-    // request that was admitted while the old, broader contract was published.
+    // The narrowed output is checked against the actual executing instance.
     let path = temp.path().join("variance-new");
     let mut declaration: Manifest = forest_package::read_manifest(&path).unwrap();
     declaration
@@ -937,7 +1666,13 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
     let reload_scheduler = scheduler.clone();
     let reload =
         tokio::spawn(async move { reload_scheduler.reload(dishonest, StopMode::Drain).await });
-    phase(&scheduler, object, ModulePhase::Stopping).await;
+    waiting(&scheduler, object).await;
+    assert_eq!(
+        call::<_, i64>(&scheduler, object, "/implementation", &()).await,
+        2
+    );
+    active.await.unwrap();
+    reload.await.unwrap().unwrap();
     let result = scheduler
         .call::<_, Result<i64, String>>(
             "/user/test".parse().unwrap(),
@@ -947,8 +1682,6 @@ async fn variant_contracts_load_reload_and_reject_before_stopping_the_live_insta
         )
         .await;
     assert!(matches!(result, Err(DispatchError::OutputContract)));
-    active.await.unwrap();
-    reload.await.unwrap().unwrap();
     phase(&scheduler, object, ModulePhase::Failed).await;
     scheduler.shutdown(StopMode::Drain).await.unwrap();
 }

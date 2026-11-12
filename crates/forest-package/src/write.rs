@@ -52,7 +52,6 @@ pub fn write(root: impl AsRef<Path>, manifest: &Manifest) -> Result<(), Error> {
             path: p.path.clone(),
             input: schema(format!("generated/provides/{i}.input.schema"), &p.input),
             output: schema(format!("generated/provides/{i}.output.schema"), &p.output),
-            reentrant: p.reentrant,
             access: p.access.clone().into(),
         })
         .collect();

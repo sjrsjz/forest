@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/group_message"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = ["/core/onebot"]
@@ -53,4 +52,4 @@ interface = "/group_message"
 "generated/uses/0.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
 "generated/uses/1.input.schema" = "5cafdedb374c5999aae12caa4c9d14a7a4b8d51625e9a2423566175e0256523d"
 "generated/uses/1.output.schema" = "faccf627556765863ac86619e88778a123fbc4f3884ae665fb7a412ff7499d01"
-"module.wasm" = "76db019c453fa043b75ffef1f366e4afc9b8f19b4d1e1e058648d02c089eee96"
+"module.wasm" = "232d388600a93f39ef89b18915828beb1c38b660bc882d1df1b26517137155b9"

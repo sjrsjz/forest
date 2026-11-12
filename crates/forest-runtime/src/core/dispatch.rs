@@ -24,18 +24,25 @@ impl Core {
         }
         let phase = slot.state.phase();
         match phase {
-            ModulePhase::Creating if matches!(access, HostAccess::Communication) => {
+            ModulePhase::Creating
+                if matches!(access, HostAccess::Communication | HostAccess::Lock) =>
+            {
                 Err(DispatchError::LifecycleRestricted)
             }
             ModulePhase::Destroying
                 if matches!(
                     access,
-                    HostAccess::Communication | HostAccess::Network | HostAccess::Wait
+                    HostAccess::Communication
+                        | HostAccess::Network
+                        | HostAccess::Wait
+                        | HostAccess::Lock
                 ) =>
             {
                 Err(DispatchError::LifecycleRestricted)
             }
-            ModulePhase::Releasing | ModulePhase::Failed => Err(DispatchError::Interrupted),
+            ModulePhase::Staged | ModulePhase::Releasing | ModulePhase::Failed => {
+                Err(DispatchError::Interrupted)
+            }
             _ => Ok(phase),
         }
     }
@@ -136,19 +143,35 @@ impl Core {
         match &mut slot.state {
             State::Serving(live) => live.enqueue(accepted),
             State::Stopping {
-                after: After::Reload { inbox, .. },
+                after:
+                    After::Change {
+                        inbox: Ingress::Deferred(inbox),
+                        ..
+                    },
                 ..
             }
             | State::Destroying {
-                after: After::Reload { inbox, .. },
+                after:
+                    After::Change {
+                        inbox: Ingress::Deferred(inbox),
+                        ..
+                    },
                 ..
             }
             | State::Releasing {
-                after: After::Reload { inbox, .. },
+                after:
+                    After::Change {
+                        inbox: Ingress::Deferred(inbox),
+                        ..
+                    },
                 ..
-            } => inbox.push_back(accepted),
-            State::Creating {
-                inbox: CreatingInbox::Deferred(inbox),
+            }
+            | State::Staged {
+                inbox: Ingress::Deferred(inbox),
+                ..
+            }
+            | State::Creating {
+                inbox: Ingress::Deferred(inbox),
                 ..
             } => inbox.push_back(accepted),
             _ => return Err(DispatchError::Unavailable(request.object)),
@@ -201,6 +224,28 @@ impl Core {
 }
 
 impl Core {
+    pub(crate) fn lock(
+        &self,
+        instance: &Arc<Instance>,
+        signal: &Arc<crate::ready::TaskSignal>,
+        key: Token,
+    ) -> u64 {
+        let directory = self.directory.lock().unwrap();
+        let permission = Self::permission_in(&directory, instance, &HostAccess::Lock).map(|_| ());
+        instance.operations.lock(signal, key, permission)
+    }
+
+    pub(crate) fn unlock(
+        &self,
+        instance: &Arc<Instance>,
+        signal: &Arc<crate::ready::TaskSignal>,
+        key: Token,
+    ) -> u64 {
+        let directory = self.directory.lock().unwrap();
+        let permission = Self::permission_in(&directory, instance, &HostAccess::Lock).map(|_| ());
+        instance.operations.unlock(signal, &key, permission)
+    }
+
     pub(crate) fn submit<T: serde::Serialize + Send + 'static>(
         &self,
         instance: &Arc<Instance>,
@@ -242,15 +287,6 @@ async fn run_native(
     outcome: Outcome,
     admission: Admission,
 ) {
-    let _permit = match &native.gate {
-        NativeGate::Parallel => None,
-        NativeGate::Serial(gate) => Some(
-            gate.clone()
-                .acquire_owned()
-                .await
-                .expect("native gate stays open"),
-        ),
-    };
     let value = (native.handler)(context, input).await;
     let result = if value.check(&native.declaration.output, false) {
         Ok(value)

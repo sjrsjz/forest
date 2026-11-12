@@ -119,7 +119,6 @@ impl Module for Renderer {
         Handlers::new()
             .with(
                 "/render".parse().unwrap(),
-                false,
                 callers(vec![
                     SubjectPattern::Path("/module/agent-tools".parse().unwrap()),
                     SubjectPattern::Path("/module/typst-command".parse().unwrap()),
@@ -129,7 +128,6 @@ impl Module for Renderer {
             )
             .with(
                 "/typeset".parse().unwrap(),
-                false,
                 callers(vec![
                     SubjectPattern::Path("/module/markdown".parse().unwrap()),
                     SubjectPattern::Path("/user/admin".parse().unwrap()),
@@ -158,6 +156,9 @@ impl Renderer {
             .collect())
     }
     async fn document(&self, request: Request) -> Result<Answer, Error> {
+        let _guard = host::lock("/document".parse().unwrap())
+            .await
+            .map_err(|error| Error::Execution(error.to_string()))?;
         if request.source.trim().is_empty() || request.source.len() > 100_000 {
             return Err(Error::Arguments(
                 "source must contain 1–100000 UTF-8 bytes".into(),

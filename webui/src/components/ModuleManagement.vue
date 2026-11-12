@@ -19,6 +19,9 @@ const mode = ref<StopMode>('drain')
 const refresh = ref(0)
 const busy = shallowRef<{ intent: 'load' | 'reload' | 'unload'; object: string } | null>(null)
 const forcing = ref(false)
+const cancelling = ref(false)
+const additional = ref<string[]>([])
+const memberDirectories = ref<Record<string, string>>({})
 const result = ref('')
 const error = ref('')
 const details = ref<'summary' | 'manifest'>('summary')
@@ -34,6 +37,7 @@ watch([() => props.open, () => props.intent, () => props.target], () => {
     error.value = ''
     mode.value = 'drain'
     details.value = 'summary'
+    additional.value = []
   }
 })
 const title = computed(
@@ -56,22 +60,49 @@ const targetModule = computed(() => props.snapshot.modules.find((m) => m.object 
 const operationModule = computed(() =>
   props.snapshot.modules.find((m) => m.object === (busy.value?.object ?? props.target)),
 )
-const users = computed(() =>
+const members = computed(() => [props.target, ...additional.value])
+const operationRequest = computed(() =>
+  props.snapshot.requests.find((r) => r.objects.includes(busy.value?.object ?? props.target)),
+)
+const batchOptions = computed(() =>
   props.snapshot.modules.filter(
-    (m) => m.object !== props.target && m.uses.some((u) => u.object === props.target),
+    (m) =>
+      m.object !== props.target &&
+      (m.lifecycle.phase === 'serving' ||
+        (props.intent === 'unload' && m.lifecycle.phase === 'failed')),
   ),
 )
-const canForce = computed(
-  () =>
-    operationModule.value &&
-    ['creating', 'stopping', 'destroying'].includes(operationModule.value.lifecycle.phase),
+const directoriesFor = (object: string) =>
+  entries.value.filter((p) => p.status === 'ready' && p.manifest.package.id === object)
+watch(entries, () => {
+  for (const m of props.snapshot.modules) {
+    const choices = directoriesFor(m.object)
+    if (!choices.some((p) => p.directory === memberDirectories.value[m.object]))
+      memberDirectories.value[m.object] = choices[0]?.directory ?? ''
+  }
+})
+const users = computed(() =>
+  props.snapshot.modules.filter(
+    (m) =>
+      !members.value.includes(m.object) && m.uses.some((u) => members.value.includes(u.object)),
+  ),
+)
+const canForce = computed(() => !!operationRequest.value)
+const canCancel = computed(
+  () => operationRequest.value && operationRequest.value.phase !== 'committed',
 )
 const canSubmit = computed(() => {
-  if (busy.value) return false
+  if (busy.value || operationRequest.value) return false
   if (props.intent === 'load')
     return plan.value.status === 'ready' && plan.value.value.order.length > 0
   if (props.intent === 'reload')
-    return !!manifest.value && targetModule.value?.lifecycle.phase === 'serving'
+    return (
+      !!manifest.value &&
+      members.value.every((id) =>
+        props.snapshot.modules.some((m) => m.object === id && m.lifecycle.phase === 'serving'),
+      ) &&
+      additional.value.every((id) => !!memberDirectories.value[id])
+    )
   return (
     !!targetModule.value &&
     ['serving', 'failed'].includes(targetModule.value.lifecycle.phase) &&
@@ -136,24 +167,44 @@ async function submit() {
       intent === 'load'
         ? { directory: directory.value }
         : intent === 'reload'
-          ? { object, directory: directory.value, mode: mode.value }
-          : { object, mode: mode.value }
-    await command(intent, input)
+          ? {
+              replacements: members.value.map((id) => ({
+                object: id,
+                directory: id === object ? directory.value : memberDirectories.value[id],
+              })),
+              mode: mode.value,
+            }
+          : { objects: members.value, mode: mode.value }
+    await command(intent === 'load' ? 'load' : `${intent}-group`, input)
     result.value = { load: '已加载', reload: '已重载', unload: '已卸载' }[intent]
     emit('updated', intent === 'unload' ? '' : object)
     refresh.value++
   } catch (e) {
-    error.value = message(e)
+    if (e instanceof HttpError && e.code === 'cancelled') result.value = '已取消'
+    else error.value = message(e)
   } finally {
     busy.value = null
   }
 }
+async function cancel() {
+  cancelling.value = true
+  error.value = ''
+  try {
+    await command('cancel', { request: operationRequest.value!.id })
+    emit('updated', operationModule.value?.object ?? '')
+  } catch (e) {
+    error.value = message(e)
+  } finally {
+    cancelling.value = false
+  }
+}
 async function force() {
+  const object = operationRequest.value!.objects[0]!
   forcing.value = true
   error.value = ''
   try {
-    await command('force', { object: operationModule.value!.object })
-    emit('updated', operationModule.value?.object ?? '')
+    await command('force', { object })
+    emit('updated', object)
   } catch (e) {
     error.value = message(e)
   } finally {
@@ -293,7 +344,7 @@ async function force() {
             </div>
           </template>
           <section v-if="intent === 'load'" class="load-plan">
-            <h3>装载顺序</h3>
+            <h3>装载集合</h3>
             <p v-if="plan.status === 'loading'" class="muted">规划中…</p>
             <p v-else-if="plan.status === 'error'" class="notice danger" role="alert">
               {{ plan.message }}
@@ -309,6 +360,33 @@ async function force() {
             </template>
           </section>
         </template>
+        <details v-if="intent !== 'load' && batchOptions.length" class="batch-members">
+          <summary>
+            同批处理的其他模块
+            <span v-if="additional.length">· 已选 {{ additional.length }}</span>
+          </summary>
+          <fieldset :disabled="!!busy || !!operationRequest" aria-label="同批模块">
+            <div v-for="m in batchOptions" :key="m.object" class="batch-member">
+              <label>
+                <input v-model="additional" type="checkbox" :value="m.object" />
+                <code>{{ m.object }}</code>
+              </label>
+              <select
+                v-if="intent === 'reload' && additional.includes(m.object)"
+                v-model="memberDirectories[m.object]"
+                :aria-label="`${m.object} 候选包`"
+              >
+                <option
+                  v-for="p in directoriesFor(m.object)"
+                  :key="p.directory"
+                  :value="p.directory"
+                >
+                  {{ p.directory }}
+                </option>
+              </select>
+            </div>
+          </fieldset>
+        </details>
         <template v-if="intent === 'unload'">
           <p v-if="!targetModule" class="muted">模块已卸载</p>
           <section v-if="users.length" class="dependent-list">
@@ -332,7 +410,7 @@ async function force() {
           <legend>停止方式</legend>
           <label>
             <input v-model="mode" type="radio" value="drain" name="stop-mode" />
-            排空后停止
+            等待整组静止
             <code>Drain</code>
           </label>
           <label>
@@ -353,12 +431,24 @@ async function force() {
           <p v-else-if="busy">
             {{ { load: '加载中…', reload: '重载中…', unload: '卸载中…' }[busy.intent] }}
             <code>{{ busy.object }}</code>
-            <span v-if="operationModule">{{ phaseLabel[operationModule.lifecycle.phase] }}</span>
+            <span v-if="operationRequest">
+              {{
+                {
+                  preparing: '准备候选',
+                  waiting: '等待静止，旧实例继续服务',
+                  committed: '正在替换',
+                }[operationRequest.phase]
+              }}
+            </span>
+            <span v-else-if="operationModule">
+              {{ phaseLabel[operationModule.lifecycle.phase] }}
+            </span>
           </p>
           <p v-else-if="result" class="management-success">{{ result }}</p>
           <p v-else-if="targetModule">{{ phaseLabel[targetModule.lifecycle.phase] }}</p>
         </div>
         <div class="button-group">
+          <button v-if="canCancel" :disabled="cancelling" @click="cancel">取消请求</button>
           <button v-if="canForce" class="danger-button" :disabled="forcing" @click="force">
             强制中断
           </button>

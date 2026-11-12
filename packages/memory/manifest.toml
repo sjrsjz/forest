@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/accept"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = false
 
 [provides.access]
 callers = [
@@ -33,7 +32,6 @@ callers = [
 path = "/archive"
 input = "generated/provides/1.input.schema"
 output = "generated/provides/1.output.schema"
-reentrant = false
 
 [provides.access]
 callers = [
@@ -45,7 +43,6 @@ callers = [
 path = "/delivery"
 input = "generated/provides/2.input.schema"
 output = "generated/provides/2.output.schema"
-reentrant = false
 
 [provides.access]
 callers = [
@@ -57,7 +54,6 @@ callers = [
 path = "/index/advance"
 input = "generated/provides/3.input.schema"
 output = "generated/provides/3.output.schema"
-reentrant = false
 
 [provides.access]
 callers = [
@@ -70,7 +66,6 @@ callers = [
 path = "/index/rebuild"
 input = "generated/provides/4.input.schema"
 output = "generated/provides/4.output.schema"
-reentrant = false
 
 [provides.access]
 callers = ["/user/admin"]
@@ -79,7 +74,6 @@ callers = ["/user/admin"]
 path = "/link"
 input = "generated/provides/5.input.schema"
 output = "generated/provides/5.output.schema"
-reentrant = false
 
 [provides.access]
 callers = [
@@ -91,7 +85,6 @@ callers = [
 path = "/project"
 input = "generated/provides/6.input.schema"
 output = "generated/provides/6.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -103,7 +96,6 @@ callers = [
 path = "/read"
 input = "generated/provides/7.input.schema"
 output = "generated/provides/7.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -115,7 +107,6 @@ callers = [
 path = "/recall"
 input = "generated/provides/8.input.schema"
 output = "generated/provides/8.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -127,7 +118,6 @@ callers = [
 path = "/status"
 input = "generated/provides/9.input.schema"
 output = "generated/provides/9.output.schema"
-reentrant = true
 
 [provides.access]
 callers = ["/user/admin"]
@@ -220,4 +210,4 @@ output = "generated/uses/7.output.schema"
 "generated/uses/6.output.schema" = "5e660b70c3f379ccbe7413453d019ed6f00c2a2ab5b48e0cfe0f7c6bf42f7378"
 "generated/uses/7.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
 "generated/uses/7.output.schema" = "d7ecffb295f4844b8af27a37e9bebdc5fb2534d10790cc74b46f0c76eb4b873f"
-"module.wasm" = "5a606662515718ffaac2c4eebf73c0d5da1c83c5f581f40bfbe23a149656d923"
+"module.wasm" = "327ccee10b0bcd334ab2a8c21fea9daa613eac30624cded009bb98f8da438d98"

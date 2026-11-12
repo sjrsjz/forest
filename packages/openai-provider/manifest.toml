@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/capabilities"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -33,7 +32,6 @@ callers = [
 path = "/complete"
 input = "generated/provides/1.input.schema"
 output = "generated/provides/1.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -49,4 +47,4 @@ callers = [
 "generated/provides/0.output.schema" = "373308d2b9992b852772f26b7ae184963d27974fa7087662af858b5a82f06499"
 "generated/provides/1.input.schema" = "54289721ec74eb1068076c943729f11b43c7475444695e4b750c2ee286c74009"
 "generated/provides/1.output.schema" = "1929375b15a2d02e3f233e3bdb571da0be4d2594c0e663d799eca3f4f7b67c11"
-"module.wasm" = "6a415938d13e17459f6f468461ace6aad9cc4c10252d4ed03a299d40a7444aa6"
+"module.wasm" = "da1db304ab8996e615d9b3df3f9ddf4a359648b295630f5fe5cc13dbcac810fb"

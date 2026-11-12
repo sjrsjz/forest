@@ -102,7 +102,6 @@ impl Module for Painter {
     fn handlers() -> Handlers<Self> {
         Handlers::new().with(
             "/generate".parse().unwrap(),
-            true,
             callers(vec![
                 SubjectPattern::Path("/module/agent-tools".parse().unwrap()),
                 SubjectPattern::Path("/user/admin".parse().unwrap()),

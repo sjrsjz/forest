@@ -30,7 +30,6 @@ writers = ["self"]
 path = "/group_message"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = ["/core/onebot"]
@@ -39,7 +38,6 @@ callers = ["/core/onebot"]
 path = "/status"
 input = "generated/provides/1.input.schema"
 output = "generated/provides/1.output.schema"
-reentrant = true
 
 [provides.access]
 callers = ["/user/admin"]
@@ -163,4 +161,4 @@ interface = "/group_message"
 "generated/uses/8.output.schema" = "1929375b15a2d02e3f233e3bdb571da0be4d2594c0e663d799eca3f4f7b67c11"
 "generated/uses/9.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
 "generated/uses/9.output.schema" = "c3ecdf449969f0e70891bdcdfb95c9811f3012454d9ea2a955148f9988444695"
-"module.wasm" = "bebed6a2bcfe9cc7334e1b0155c307c79ec805a55a41168b3012059109395a0b"
+"module.wasm" = "b0f847ad834551538d80eaf0296421594310933f028ccb07f8cb7dcd85749707"

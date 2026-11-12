@@ -12,7 +12,6 @@ lifecycle-error = "generated/lifecycle-error.schema"
 path = "/acquire"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = false
 
 [provides.access]
 callers = ["self"]
@@ -21,7 +20,6 @@ callers = ["self"]
 path = "/get"
 input = "generated/provides/1.input.schema"
 output = "generated/provides/1.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -33,7 +31,6 @@ callers = [
 path = "/put"
 input = "generated/provides/2.input.schema"
 output = "generated/provides/2.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -46,7 +43,6 @@ callers = [
 path = "/register"
 input = "generated/provides/3.input.schema"
 output = "generated/provides/3.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -72,4 +68,4 @@ output = "generated/uses/0.output.schema"
 "generated/provides/3.output.schema" = "2198e5eac0a7a566d3dea4911e4de7e7b3a17ce27e156ffe4f59aa6594497b1b"
 "generated/uses/0.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
 "generated/uses/0.output.schema" = "2198e5eac0a7a566d3dea4911e4de7e7b3a17ce27e156ffe4f59aa6594497b1b"
-"module.wasm" = "c4c2f7d8a6ee4af7369cc035e00672a5010b6d324e78a577d23f45ca6b28b30c"
+"module.wasm" = "1f8190543071722ee90fbd585b462d1b4d3a2815528a1d46800143d2bcdfce5b"

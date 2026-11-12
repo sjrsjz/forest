@@ -22,7 +22,6 @@ impl Module for QwenVl {
     fn handlers() -> Handlers<Self> {
         Handlers::new().with(
             EMBED.parse().unwrap(),
-            true,
             callers(vec![
                 SubjectPattern::Path("/module/**".parse().unwrap()),
                 SubjectPattern::Path("/user/admin".parse().unwrap()),

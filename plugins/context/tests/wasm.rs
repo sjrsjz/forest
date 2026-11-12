@@ -386,7 +386,6 @@ async fn actual_wasm_formats_native_roles_multimodal_recalls_and_reloads_prompt(
         .register_native(forest_runtime::NativeInterface::new(
             "/module/typst".parse().unwrap(),
             "/typeset".parse().unwrap(),
-            false,
             forest_protocol::manifest::callers(vec![forest_protocol::SubjectPattern::Path(
                 "/module/markdown".parse().unwrap(),
             )]),

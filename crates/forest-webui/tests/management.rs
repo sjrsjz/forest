@@ -63,6 +63,22 @@ async fn phase(scheduler: &Scheduler, object: &str, expected: ModulePhase) {
     .await
     .unwrap();
 }
+async fn waiting(scheduler: &Scheduler) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !scheduler
+            .inspector()
+            .snapshot()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|r| matches!(r.state, forest_runtime::RequestState::Waiting))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
 async fn value(scheduler: &Scheduler, object: &str, interface: &str) -> i64 {
     scheduler
         .call::<_, Result<i64, String>>(
@@ -146,7 +162,6 @@ async fn local_packages_load_dependencies_and_replace_code_without_losing_config
         .register_native(NativeInterface::new(
             "/core/probe".parse().unwrap(),
             "/observe".parse().unwrap(),
-            true,
             callers(vec![SubjectPattern::Path("/module/**".parse().unwrap())]),
             move |_, input: i64| {
                 let observations = observations.clone();
@@ -257,12 +272,14 @@ async fn local_packages_load_dependencies_and_replace_code_without_losing_config
     .await
     .unwrap();
     assert_eq!(
-        plan["order"][0]["manifest"]["package"]["id"],
-        "/module/provider"
-    );
-    assert_eq!(
-        plan["order"][1]["manifest"]["package"]["id"],
-        "/module/consumer"
+        plan["order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["manifest"]["package"]["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["/module/consumer", "/module/provider"],
+        "the plan lists a deterministic set, not a topological initialization order",
     );
     // Declaration preview neither compiles invalid artifacts nor starts modules.
     assert_eq!(
@@ -369,7 +386,7 @@ async fn local_packages_load_dependencies_and_replace_code_without_losing_config
         )
         .await
     });
-    phase(&scheduler, "/module/provider", ModulePhase::Stopping).await;
+    waiting(&scheduler).await;
     let snapshot: Value = client
         .get(format!("{base}/api/inspect/snapshot"))
         .header("Cookie", &cookie)
@@ -385,8 +402,38 @@ async fn local_packages_load_dependencies_and_replace_code_without_losing_config
         .iter()
         .find(|m| m["object"] == "/module/provider")
         .unwrap();
-    assert_eq!(view["lifecycle"]["phase"], "stopping");
-    assert_eq!(view["lifecycle"]["replacement"]["version"], "2");
+    assert_eq!(view["lifecycle"]["phase"], "serving");
+    assert_eq!(view["published"]["version"], "1");
+    assert_eq!(snapshot["requests"][0]["phase"], "waiting");
+    success(
+        post(
+            &client,
+            &base,
+            &cookie,
+            "cancel",
+            json!({"request":snapshot["requests"][0]["id"]}),
+        )
+        .await,
+    )
+    .await;
+    let cancelled = pending.await.unwrap();
+    assert_eq!(cancelled.status(), 422);
+    assert_eq!(
+        cancelled.json::<Value>().await.unwrap()["code"],
+        "cancelled"
+    );
+    assert!(!call.is_finished());
+    assert_eq!(
+        value(&scheduler, "/module/provider", "/implementation").await,
+        1
+    );
+    let http = client.clone();
+    let url = base.clone();
+    let session = cookie.clone();
+    let pending = tokio::spawn(async move {
+        post(&http, &url, &session, "reload-group", json!({"replacements":[{"object":"/module/provider","directory":"provider"}],"mode":"drain"})).await
+    });
+    waiting(&scheduler).await;
     pending.abort();
     let _ = pending.await;
     success(

@@ -17,22 +17,17 @@ impl Core {
         &self,
         directory: &Directory,
         manifest: &Manifest,
+        catalog: &HashMap<Token, &Manifest>,
     ) -> Result<()> {
-        crate::dependencies::order(directory, Some(manifest))?;
         for dependency in &manifest.uses {
-            let declaration = if dependency.object == manifest.package.id {
-                manifest
-                    .provides
-                    .iter()
-                    .find(|p| p.path == dependency.interface)
-            } else if let Some(native) = directory
+            let declaration = if let Some(native) = directory
                 .natives
                 .get(&(dependency.object.clone(), dependency.interface.clone()))
             {
                 Some(&native.declaration)
             } else {
-                directory.slots.get(&dependency.object).and_then(|slot| {
-                    slot.published
+                catalog.get(&dependency.object).and_then(|manifest| {
+                    manifest
                         .provides
                         .iter()
                         .find(|p| p.path == dependency.interface)
@@ -81,129 +76,9 @@ impl Core {
         }
         Ok(())
     }
-    pub(super) fn stop(
-        &self,
-        object: &Token,
-        mode: StopMode,
-        package: Option<Package>,
-    ) -> Result<oneshot::Receiver<std::result::Result<(), crate::InstanceFailure>>> {
-        let (completion, receive) = oneshot::channel();
-        let mut directory = self.directory.lock().unwrap();
-        if let Some(package) = &package {
-            self.check_dependencies(&directory, &package.manifest)?;
-        } else {
-            let users = crate::dependencies::dependents(&directory, object);
-            ensure!(users.is_empty(), "module {object} is required by {users:?}");
-        }
-        let slot = directory.slots.get_mut(object).context("unknown module")?;
-        if let Some(package) = &package {
-            package.check_replacement(&slot.published)?;
-        }
-        if matches!(slot.state, State::Failed(_)) {
-            ensure!(
-                package.is_none(),
-                "reload of a failed object uses load(package)"
-            );
-            directory.slots.remove(object);
-            let _ = completion.send(Ok(()));
-            return Ok(receive);
-        }
-        ensure!(
-            matches!(slot.state, State::Serving(_)),
-            "module already changing lifecycle phase"
-        );
-        let Slot {
-            published,
-            access,
-            budget,
-            state,
-        } = directory.slots.remove(object).unwrap();
-        let State::Serving(live) = state else {
-            unreachable!()
-        };
-        let after = match package {
-            Some(package) => After::Reload {
-                package,
-                inbox: VecDeque::new(),
-                completion,
-            },
-            None => After::Unload {
-                completion,
-                failure: None,
-            },
-        };
-        if mode == StopMode::Force {
-            live.instance.force.store(true, Ordering::Release);
-            self.engine.increment_epoch();
-        }
-        live.instance.mailbox.changed.notify_one();
-        directory.slots.insert(
-            object.clone(),
-            Slot {
-                published,
-                access,
-                budget,
-                state: State::Stopping { live, mode, after },
-            },
-        );
-        Ok(receive)
-    }
-}
-
-impl Core {
-    pub(crate) fn activate(&self, instance: &Arc<Instance>) -> Result<()> {
-        let mut directory = self.directory.lock().unwrap();
-        ensure!(
-            !instance.force.load(Ordering::Acquire),
-            "initialization interrupted"
-        );
-        let Slot {
-            published: _,
-            access: _,
-            budget,
-            state,
-        } = directory
-            .slots
-            .remove(&instance.object)
-            .expect("initializing slot");
-        let State::Creating {
-            instance: current,
-            inbox,
-            completion,
-        } = state
-        else {
-            unreachable!()
-        };
-        assert_eq!(current.id, instance.id);
-        let mut live = Live::new(instance.clone());
-        if let CreatingInbox::Deferred(inbox) = inbox {
-            for request in inbox {
-                live.enqueue(request);
-            }
-        }
-        directory.slots.insert(
-            instance.object.clone(),
-            Slot {
-                published: instance.package.manifest.clone(),
-                access: instance.package.access.clone(),
-                budget,
-                state: State::Serving(live),
-            },
-        );
-        drop(directory);
-        self.logs.write(
-            service::LogLevel::Info,
-            instance.object.clone(),
-            format!(
-                "module {} is Serving (instance {})",
-                instance.object, instance.id
-            ),
-        );
-        let _ = completion.send(Ok(()));
-        Ok(())
-    }
     pub(crate) fn turn(&self, instance: &Instance, tasks_empty: bool) -> crate::driver::Turn {
         let mut directory = self.directory.lock().unwrap();
+        self.commit_before_start(&mut directory, &instance.object);
         let slot = directory.slots.get_mut(&instance.object).unwrap();
         match &slot.state {
             State::Serving(_) => {}
@@ -227,8 +102,8 @@ impl Core {
                     State::Serving(live) | State::Stopping { live, .. } => live,
                     _ => unreachable!("schedulable phase"),
                 };
-                // Remove readiness, take the request and transfer its interface permit
-                // under the same lock used by enqueue/complete.
+                // Remove readiness and bind the request under the same lock as
+                // admission and management commitment.
                 crate::driver::Turn::Start(Box::new(live.begin(&interface)))
             }
             Some(crate::ready::Work::Resume(id)) => crate::driver::Turn::Resume(id),
@@ -252,12 +127,7 @@ impl Core {
         started: Started,
         result: DispatchResult<Value>,
     ) {
-        let mut directory = self.directory.lock().unwrap();
-        let live = match &mut directory.slots.get_mut(&instance.object).unwrap().state {
-            State::Serving(live) | State::Stopping { live, .. } => live,
-            _ => unreachable!(),
-        };
-        live.complete(started.permit);
+        let _directory = self.directory.lock().unwrap();
         let result = if instance.force.load(Ordering::Acquire) {
             Err(DispatchError::Interrupted)
         } else {
@@ -307,13 +177,39 @@ impl Core {
         );
         true
     }
+    pub(crate) fn abort_creation(&self, instance: &Arc<Instance>) {
+        let mut directory = self.directory.lock().unwrap();
+        let Slot {
+            published,
+            access,
+            budget,
+            state,
+        } = directory.slots.remove(&instance.object).unwrap();
+        let State::Creating { inbox, .. } = state else {
+            unreachable!("unpublished initialized instance")
+        };
+        inbox.reject(&DispatchError::Interrupted);
+        directory.slots.insert(
+            instance.object.clone(),
+            Slot {
+                published,
+                access,
+                budget,
+                state: State::Destroying {
+                    instance: instance.clone(),
+                    after: After::Fail(DispatchError::Interrupted.into()),
+                },
+            },
+        );
+    }
     pub(crate) fn begin_releasing(
         &self,
         instance: &Arc<Instance>,
-        error: Option<crate::InstanceFailure>,
+        reported: Option<crate::InstanceFailure>,
     ) {
-        let reported = error.clone();
-        let failure = error.unwrap_or_else(|| DispatchError::Interrupted.into());
+        let failure = reported
+            .clone()
+            .unwrap_or_else(|| DispatchError::Interrupted.into());
         let error = failure.dispatch_error(&instance.object);
         let mut directory = self.directory.lock().unwrap();
         let Slot {
@@ -323,15 +219,8 @@ impl Core {
             state,
         } = directory.slots.remove(&instance.object).unwrap();
         let after = match state {
-            State::Creating {
-                inbox, completion, ..
-            } => {
-                if let CreatingInbox::Deferred(inbox) = inbox {
-                    for request in inbox {
-                        request.outcome.settle(Err(error.clone()));
-                    }
-                }
-                let _ = completion.send(Err(failure.clone()));
+            State::Creating { inbox, .. } => {
+                inbox.reject(&error);
                 After::Fail(failure)
             }
             State::Serving(live) => {
@@ -342,15 +231,8 @@ impl Core {
                 live.reject_queued(&error);
                 after
             }
-            State::Destroying {
-                after: After::Unload { completion, .. },
-                ..
-            } => After::Unload {
-                completion,
-                failure: reported,
-            },
             State::Destroying { after, .. } => after,
-            _ => unreachable!("driver releases its live instance once"),
+            _ => unreachable!("driver releases its instance once"),
         };
         directory.slots.insert(
             instance.object.clone(),
@@ -361,156 +243,44 @@ impl Core {
                 state: State::Releasing {
                     instance: instance.clone(),
                     after,
+                    failure: reported,
                 },
             },
         );
+        drop(directory);
+        self.changed.notify_waiters();
     }
-    pub(crate) fn finish_releasing(self: &Arc<Self>, instance: &Arc<Instance>) {
-        let next = {
-            let mut directory = self.directory.lock().unwrap();
-            let Slot {
+    pub(crate) fn finish_releasing(&self, instance: &Arc<Instance>) {
+        let mut directory = self.directory.lock().unwrap();
+        let Slot {
+            published,
+            access,
+            budget,
+            state,
+        } = directory.slots.remove(&instance.object).unwrap();
+        let State::Releasing {
+            instance: current,
+            after,
+            failure,
+        } = state
+        else {
+            unreachable!("released instance")
+        };
+        assert_eq!(current.id, instance.id);
+        let state = match after {
+            After::Fail(reason) => State::Failed(reason),
+            After::Change { inbox, .. } => State::Staged { inbox, failure },
+        };
+        directory.slots.insert(
+            instance.object.clone(),
+            Slot {
                 published,
                 access,
                 budget,
                 state,
-            } = directory.slots.remove(&instance.object).unwrap();
-            let State::Releasing {
-                instance: current,
-                after,
-            } = state
-            else {
-                unreachable!()
-            };
-            assert_eq!(current.id, instance.id);
-            match after {
-                After::Unload {
-                    completion,
-                    failure,
-                } => {
-                    let _ = completion.send(failure.map_or(Ok(()), Err));
-                    None
-                }
-                After::Fail(reason) => {
-                    directory.slots.insert(
-                        instance.object.clone(),
-                        Slot {
-                            published,
-                            access,
-                            budget,
-                            state: State::Failed(reason),
-                        },
-                    );
-                    None
-                }
-                After::Reload {
-                    package,
-                    inbox,
-                    completion,
-                } => {
-                    let next = self
-                        .instance(package)
-                        .expect("candidate metadata already validated");
-                    directory.slots.insert(
-                        instance.object.clone(),
-                        Slot {
-                            published,
-                            access,
-                            budget,
-                            state: State::Creating {
-                                instance: next.clone(),
-                                inbox: CreatingInbox::Deferred(inbox),
-                                completion,
-                            },
-                        },
-                    );
-                    Some(next)
-                }
-            }
-        };
-        if let Some(next) = next {
-            crate::driver::spawn(self.clone(), next);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::driver::Turn;
-
-    #[tokio::test]
-    async fn selecting_serial_work_transfers_its_permit_before_new_admission() {
-        let root = tempfile::tempdir().unwrap();
-        let scheduler = Scheduler::in_memory(RuntimeOptions {
-            data_directory: root.path().into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-        let core = &scheduler.core;
-        let object: Token = "/module/serial-test".parse().unwrap();
-        let interface: Token = "/serial".parse().unwrap();
-        let caller: Token = "/user/test".parse().unwrap();
-        let manifest = Arc::new(Manifest {
-            package: PackageInfo {
-                id: object.clone(),
-                version: "test".into(),
-                name: None,
-                description: None,
-                ..Default::default()
-            },
-            module: "module.wasm".into(),
-            lifecycle_error: <std::convert::Infallible>::as_schema(),
-            configs: vec![],
-            uses: vec![],
-            subscriptions: vec![],
-            provides: vec![InterfaceDeclaration {
-                path: interface.clone(),
-                input: i64::as_schema(),
-                output: Result::<i64, String>::as_schema(),
-                reentrant: false,
-                access: manifest::callers(vec![SubjectPattern::Path(
-                    "/user/test".parse().unwrap(),
-                )]),
-            }],
-        });
-        let access = Arc::new(AccessTables::compile(&manifest).unwrap());
-        let instance = core
-            .instance(Package {
-                sha256: "0".repeat(64),
-                manifest: manifest.clone(),
-                access: access.clone(),
-                // This test exercises admission and ownership; it never executes guest code.
-                module: wasmtime::Module::new(&core.engine, "(module)").unwrap(),
-            })
-            .unwrap();
-        core.directory.lock().unwrap().slots.insert(
-            object.clone(),
-            Slot {
-                published: manifest,
-                access,
-                budget: Arc::new(Budget::new(&core.options)),
-                state: State::Serving(Live::new(instance.clone())),
             },
         );
-        scheduler
-            .send(caller.clone(), object.clone(), interface.clone(), &1i64)
-            .unwrap();
-        let Turn::Start(first) = core.turn(&instance, true) else {
-            panic!("first request")
-        };
-        // Reproduce arrival after selecting work, before the driver enters Wasm.
-        scheduler
-            .send(caller, object.clone(), interface, &2i64)
-            .unwrap();
-        assert!(matches!(core.turn(&instance, false), Turn::Wait));
-        core.complete(&instance, *first, Ok(Ok::<i64, String>(1).as_value()));
-        let Turn::Start(second) = core.turn(&instance, true) else {
-            panic!("second request after release")
-        };
-        assert_eq!(second.request.invocation.input, 2i64.as_value());
-        core.complete(&instance, *second, Ok(Ok::<i64, String>(2).as_value()));
-        assert!(matches!(core.turn(&instance, true), Turn::Wait));
-        core.directory.lock().unwrap().slots.clear();
+        drop(directory);
+        self.changed.notify_waiters();
     }
 }

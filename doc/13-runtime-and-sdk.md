@@ -42,7 +42,7 @@ cargo run -p forest-cli --locked -- \
 
 由网关连接宿主的反向 WS 地址；也可将 `--reverse-ws` 换成 `--events-ws`。反向 WS 必须同时配置 HTTP API。非回环监听必须配置事件令牌。HTTP 默认直连，不隐式继承系统代理。
 
-模块 Serving 后，在允许群发送 `#forest-test`，模块回复一次 `hello world`。支持文本段及消息数组中对当前账号的 @。示例接口不可重入；发送成功后才持久化 `/state/replies`。其余命令不触发回复，未允许群不会进入模块或收到原生发送。
+模块 Serving 后，在允许群发送 `#forest-test`，模块回复一次 `hello world`。支持文本段及消息数组中对当前账号的 @。示例处理器显式持有 `/replies` 锁；发送成功后才持久化 `/state/replies`。其余命令不触发回复，未允许群不会进入模块或收到原生发送。
 
 以上示例显式传入 `--allow-group` 以限制测试范围；该参数现在可选。省略时 OneBot 宿主不按群过滤，是否处理由接收模块决定，接口 ACL 始终检查。正常 Agent 实例只使用其配置表的 `allowed_groups`，见[Agent 启动](22-agent-guide.md)。需要宿主测试限制时才传此参数；`GroupScope::Only` 的空集合拒绝全部群，不将空集合解释为全放行。
 
@@ -60,7 +60,7 @@ Rust SDK 是可选的语言绑定。模块不链接调度器，也不链接被�
 
 - `create(CreateContext)` 返回模块对象，可以恢复配置表中的状态。
 - `type LifecycleError: AsSchema + AsValue` 声明 create/destroy 的模块错误类型，其 Schema 写入 Manifest 的 `lifecycle_error`。无失败路径可用 `Infallible`。
-- `handlers()` 用 `Handlers::with` 注册路径、重入属性、访问规则和具体 Rust 异步函数；输入和完整 `Result<T, E>` 的 Schema 从函数类型生成。
+- `handlers()` 用 `Handlers::with` 注册路径、访问规则和具体 Rust 异步函数；输入和完整 `Result<T, E>` 的 Schema 从函数类型生成。
 - `destroy(Rc<Self>)` 可选，默认无操作。
 - `export_module!` 生成固定 ABI 导出。
 
@@ -89,19 +89,24 @@ cargo run --release --locked -p forest-runtime --example prepare_packages -- dat
 | 操作 | 行为 |
 |---|---|
 | package(directory) | 读取 Manifest、编译 Wasm、校验固定导出与私有内存 |
-| plan_manifests(manifests, roots) | 仅从声明给出依赖优先顺序，不编译 Wasm |
-| plan_load(packages, roots) | 复用相同规划，返回编译包闭包及依赖优先顺序 |
-| load_roots(packages, roots) | 明确执行计划，依赖先初始化 |
+| plan_manifests(manifests, roots) | 仅从声明求依赖闭包并作确定性排列，不编译 Wasm |
+| plan_load(packages, roots) | 复用相同规划，返回编译包闭包 |
+| load_roots(packages, roots) | 联合检查并创建依赖闭包，全部成功后统一开放入口 |
 | load(package) | 单包装载，依赖必须已在目录中 |
-| reload(package, mode) | 以稳定对象身份交接，新请求留给候选 |
+| load_many(packages) | 联合检查并装载整个集合，包括循环依赖 |
+| reload(package, mode) | 单模块管理请求；Drain 等自然静止再提交 |
+| request_reload(packages, mode) | 请求批量重载已编译候选，返回可观察、可取消的 ManagementRequest |
+| request_reload_from(targets, mode) | 先登记请求，再读取和编译候选目录；准备期间也可取消 |
+| cancel(request_id) | 仅取消 Preparing / Waiting 请求，不回滚普通工作 |
+| unload_many(objects, mode) | 检查集合之外没有使用者，再整组停止、卸载 |
 | unload(object, mode) | 仍有静态使用者时拒绝，先移除使用者 |
 | dependents(object) | 查询直接静态使用者，无执行副作用 |
-| force(object) | 中断 create/destroy，或升级已有停止过程 |
-| shutdown(mode) | 使用者先于提供者卸载 |
+| force(object) | 明确将该对象所属管理集合改为 Force，或中断已提交集合的当前实例 |
+| shutdown(mode) | 取消待提交管理请求，等待或明确中断已提交交接，再整组卸载 |
 
-当前显式拒绝依赖环，不引入环启动和运行时死锁处理。计划不更改外部启用意图；某个 create 失败后已加载的依赖保留，不伪装成原子整批加载。
+静态依赖允许环，不提供普通调用死锁自动处理。计划不更改外部启用意图；装载集合的候选全部初始化成功后才统一发布，成员失败则整组不发布并清理。已存在的组外依赖保留，持久化和外部副作用不回滚。活动管理请求通过 Inspector 的 requests 展示，拥有 Preparing / Waiting / Committed 阶段和目标集合；请求句柄提供 snapshot、cancel 和 wait。
 
-Drain 完成截止前的旧集合；AtYield 等当前推进交回后中断其他旧请求；Force 中断原推进并跳过所有来宾析构。三者都等待已提交的本地 SQL/文件操作实际结束，之后才创建新实例，避免旧写入追上新状态。已接纳的下游调用不递归撤销，远端效果不回滚。
+Drain 保持旧实例正常服务，等目标集合中已开始任务全部完成收尾后原子关闭入口；重载时尚未首次取得执行权的请求连同原返回通道与额度交给新实例，卸载则须执行完全部已接纳请求。AtYield 提交后等当前推进交回再中断其他旧请求；Force 中断原推进并跳过所有来宾析构。三者都等待已提交的本地 SQL/文件操作实际结束，之后才创建新实例，避免旧写入追上新状态。已接纳的下游调用不递归撤销，远端效果不回滚。
 
 替换保留已发布接口，按 `old.input <: new.input`、`new.output <: old.output` 检查函数子类型；完整 Result 输出包含错误分支。加载依赖采用相同方向：`uses.input <: provides.input`、`provides.output <: uses.output`。不兼容候选在停止旧实例前拒绝，适用于全部停止方式。交接请求执行时绑定新实例的输出 Schema，正常调用也使用同一子类型关系检查 uses。配置键集合和 Schema 仍要求等价；允许原子更新默认值并保留全部当前值，后续 reset 使用新默认值。ACL 随新声明切换；create 使用自己的候选规则，外部仍看到旧规则，直到 Serving 时整体发布。已接纳请求不追溯重新鉴权。
 
@@ -136,7 +141,7 @@ ABI 结构与操作结构采用 `forest_protocol::abi` 固定小端、定长整�
 导入模块名为 `forest_host`。每个宿主操作有独立函数：
 
 ```text
-call send config_get config_set config_reset
+call send lock unlock config_get config_set config_reset
 http_request ws_connect ws_send ws_receive ws_close
 file_read file_write file_remove sqlite sleep log now
 ```
@@ -150,15 +155,17 @@ file_read file_write file_remove sqlite sleep log now
 | operation_release(id) | 放弃本地结果，不声称撤销外部效果 |
 | task_wake(task) | 合并本实例任务的就绪通知 |
 
+lock/unlock 输入是编码后的具体 Token，结果为 DispatchResult<()>。lock 等待时返回 Pending；授予先由完成槽持有，take 成功后才转移到当前任务。unlock 提交时立即完成，非持有者返回 Denied。SDK 的 LockGuard 在所属任务内离开作用域时同步解锁；create/destroy 禁止这两项操作。任务回收在不可中断本地工作结束后释放残留锁。
+
 句柄不授予身份权限，也不跨实例有效。无效控制句柄、越界内存、错误 ABI 调用属于协议破坏并 trap；正常拒绝、队列满及模块错误以 Result 返回。
 
 ## 5. 执行与资源
 
 目录转换使用短临界区，不持锁执行 Wasm 或等 I/O。每个实例由一个拥有 Store 的异步驱动器推进；实例内 Start/Resume 共用去重 FIFO，实例间另有去重就绪队列。默认并行推进数为 2，可通过 RuntimeOptions 配置。
 
-独立线程每 5 ms 推进 epoch，用于可恢复让出和显式 Force 检查，不是请求超时。Wasmtime Pending 保留原推进，SDK Pending 才释放实例执行权。不可重入接口许可直到整个请求结算才归还。
+独立线程每 5 ms 推进 epoch，用于可恢复让出和显式 Force 检查，不是请求超时。Wasmtime Pending 保留原推进，SDK Pending 才释放实例执行权。已持有的宿主锁跨主动与被动暂停保留，按模块显式作用域释放。
 
-默认每个对象保留最多 1024 个请求、64 MiB 输入，Wasm 内存上限 256 MiB。名额随请求、任务和必要收尾移动，满额原子拒绝，不经隐藏的无界入口排队。原生接口也受容量和重入约束。
+默认每个对象保留最多 1024 个请求、64 MiB 输入，Wasm 内存上限 256 MiB。名额随请求、任务和必要收尾移动，满额原子拒绝，不经隐藏的无界入口排队。原生接口也受接纳容量约束，宿主实现用自己的类型化同步结构协调数据。
 
 Wasm 使用的 HTTP/WS 原语不自动重试或重连；OneBot 宿主适配器的连接恢复与这些原语分开。受管文件由 capability directory 限制在实例目录内。卸载释放实例网络资源。配置与文件操作提交后必须等本地实际结束，丢弃 Future 不等于操作系统已撤销操作。
 
@@ -168,6 +175,6 @@ Wasm 使用的 HTTP/WS 原语不自动重试或重连；OneBot 宿主适配器�
 cargo test --workspace --all-features --locked
 ```
 
-集成测试编译真实 Wasm，使用两个代码不同、契约相同的候选。覆盖类型化调用、ACL、非重入与重入交错、自唤醒和组合 Future、容量、三种卸载方式、代码替换、trap、单线程执行器下的抢占、配置恢复和延迟 SQLite 写入交接、文件隔离、HTTP/WS，以及实际 CLI 的群消息到 OneBot 回执。自动测试流量只进入本地模拟服务。
+集成测试编译真实 Wasm，使用两个代码不同、契约相同的候选。覆盖类型化调用、ACL、宿主锁互斥与等待交错、自唤醒和组合 Future、容量、三种卸载方式、代码替换、trap、单线程执行器下的抢占、配置恢复和延迟 SQLite 写入交接、文件隔离、HTTP/WS，以及实际 CLI 的群消息到 OneBot 回执。自动测试流量只进入本地模拟服务。
 
 宿主注册 OneBot 群消息事件和 `/core/onebot` 的 `/send_group_message`、`/send_private_message`、`/query`；查询入口接受固定的只读 action 枚举，Agent 工具封装位于独立 [OneBot 工具包](28-onebot-agent-tools.md)。CLI 的 OneBot callers 授权 `/module/**`，因此独立加载的插件可使用这些原生接口；可选 `--allow-group` 额外限制群接收、查询与发送，并禁止私聊发送。CLI 另安装 `/core/control` 管理适配器，仅授权 `/module/shell`，见[群聊 Shell](26-group-shell.md)。可选 WebUI 已提供观测和模块装卸。Agent、Memory 与工具网关已由独立 Wasm 包实现，见[实现与启动](22-agent-guide.md)。热重载可更新同 Schema 的声明默认值并保留当前值；配置项集合或 Schema 变更仍拒绝。包分发与配置变更通知尚未实现。

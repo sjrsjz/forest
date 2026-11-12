@@ -1,0 +1,128 @@
+{
+  "relationship": "manual refinement review; fingerprints detect source drift, not semantic equivalence",
+  "normalization": "UTF-8 text with universal newlines, re-encoded as UTF-8",
+  "files": [
+    {
+      "path": "crates/forest-runtime/src/wasm.rs",
+      "sha256": "f2db299526874ed65ee6b884aaf1650aba0e558b43de99c2570ffb7d36702077",
+      "reviewed": [
+        "Wasm::advance",
+        "Wasm::advance_inner",
+        "imports",
+        "submit"
+      ]
+    },
+    {
+      "path": "crates/forest-runtime/src/driver.rs",
+      "sha256": "32dcb6960811d9d344b7c5f42cda0a7cf83f8e1205798ac761e691e029f647e6",
+      "reviewed": [
+        "spawn",
+        "run_guest",
+        "lifecycle"
+      ]
+    },
+    {
+      "path": "crates/forest-runtime/src/core.rs",
+      "sha256": "b85c6f7210b663b418cdbbc9223aa0bfb816db9af95702cea1db21a670b41863",
+      "reviewed": [
+        "Request",
+        "Started",
+        "Admission",
+        "Live::begin",
+        "Live::take_queued"
+      ]
+    },
+    {
+      "path": "crates/forest-runtime/src/core/lifecycle.rs",
+      "sha256": "f9e3448e1e757b227c086b2d18a9911c1a067c64a531dd4627a4e30e4b574471",
+      "reviewed": [
+        "Core::turn",
+        "Core::complete",
+        "Core::begin_releasing",
+        "Core::finish_releasing"
+      ]
+    },
+    {
+      "path": "crates/forest-runtime/src/core/changes.rs",
+      "sha256": "146302a5cf99cf3d37c10d4b292c3e1b9597529ecdf39f519e4ffba7292c44f3",
+      "reviewed": [
+        "Core::try_commit_change",
+        "Core::wait_staged",
+        "Core::create_group"
+      ]
+    },
+    {
+      "path": "crates/forest-runtime/src/operations.rs",
+      "sha256": "a4ad4403db2cceec235583bfce7be093f4c46801b6a801828e42f4ab71fee6ed",
+      "reviewed": [
+        "Operations::start",
+        "Operations::lock",
+        "Operations::unlock",
+        "Operations::take",
+        "Operations::release",
+        "Operations::finish_task",
+        "Operations::quiesce",
+        "Operations::finish"
+      ]
+    },
+    {
+      "path": "crates/forest-sdk/src/runtime.rs",
+      "sha256": "c4953070150c0e03b1c9728c4f600192195560c6abfe4b34f477f40b69646708",
+      "reviewed": [
+        "allocate",
+        "deallocate",
+        "read_input",
+        "encode_buffer",
+        "Runtime::destroy"
+      ]
+    },
+    {
+      "path": "crates/forest-sdk/src/lib.rs",
+      "sha256": "36ba173a5bafa55d7184f6bb3394ae3cb9cc885233cdca742aa1f433e58c27f0",
+      "reviewed": [
+        "export_module!"
+      ]
+    },
+    {
+      "path": "crates/forest-runtime/src/locks.rs",
+      "reviewed": [
+        "Locks::acquire"
+      ],
+      "sha256": "b293d2b203ec3f5c16501da233fa8f37627e80017f6a4f3d044aeb04341cda8c"
+    },
+    {
+      "path": "crates/forest-runtime/src/core/dispatch.rs",
+      "reviewed": [
+        "Core::permission_in",
+        "Core::lock",
+        "Core::unlock"
+      ],
+      "sha256": "17b6d42a8105ed8a87ca3e7bead5d135ae0644e9536d2d72a542ab71a4f6b770"
+    },
+    {
+      "path": "crates/forest-sdk/src/operation.rs",
+      "reviewed": [
+        "Operation::immediate",
+        "Future::poll",
+        "Drop"
+      ],
+      "sha256": "e4a56119afab2a10494821d5e6002a07995d6a8a9e5164dae6bbe3b4cb7e7748"
+    },
+    {
+      "path": "crates/forest-sdk/src/lock.rs",
+      "reviewed": [
+        "LockGuard::unlock",
+        "Drop"
+      ],
+      "sha256": "b09d6f84e3265d8555adea9b91a08271a9d6a58dbaf9ff3ee0d3b1929e297d0e"
+    },
+    {
+      "path": "crates/forest-sdk/src/host.rs",
+      "reviewed": [
+        "lock",
+        "unlock"
+      ],
+      "sha256": "9145d39b8c76a890a0f486636be495bc4430df33136f31fc8583a2b5d512fe80"
+    }
+  ]
+}

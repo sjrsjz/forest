@@ -55,7 +55,7 @@ const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', fo
               <code>{{ module.published.version }}</code>
             </dd>
           </div>
-          <template v-if="module.lifecycle.phase !== 'failed'">
+          <template v-if="'instance' in module.lifecycle">
             <div>
               <dt>Wasm SHA-256</dt>
               <dd style="overflow-wrap: anywhere">
@@ -118,7 +118,6 @@ const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', fo
           <thead>
             <tr>
               <th>接口路径</th>
-              <th>重入方式</th>
               <th class="number">排队</th>
             </tr>
           </thead>
@@ -127,11 +126,10 @@ const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', fo
               <td>
                 <code>{{ i.path }}</code>
               </td>
-              <td>{{ i.reentrant ? '可重入' : '独占至完成' }}</td>
               <td class="number">{{ i.queued }}</td>
             </tr>
             <tr v-if="!module.interfaces.length">
-              <td colspan="3" class="muted">未声明接口</td>
+              <td colspan="2" class="muted">未声明接口</td>
             </tr>
           </tbody>
         </table>
@@ -199,7 +197,6 @@ const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', fo
           <thead>
             <tr>
               <th>接口路径</th>
-              <th>重入方式</th>
             </tr>
           </thead>
           <tbody>
@@ -207,10 +204,9 @@ const modeLabel = { drain: '排空旧集合', at_yield: '主动边界停止', fo
               <td>
                 <code>{{ i.path }}</code>
               </td>
-              <td>{{ i.reentrant ? '可重入' : '串行' }}</td>
             </tr>
             <tr v-if="!host.interfaces.length">
-              <td colspan="2" class="muted">无注册接口</td>
+              <td class="muted">无注册接口</td>
             </tr>
           </tbody>
         </table>

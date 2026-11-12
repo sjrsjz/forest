@@ -93,7 +93,6 @@ async fn wasm_markdown_output_preserves_nodes_and_partial_delivery() {
     s.register_native(NativeInterface::new(
         typst::OBJECT.parse().unwrap(),
         "/typeset".parse().unwrap(),
-        false,
         access.clone(),
         move |_, source: String| {
             let image = image.clone();
@@ -112,7 +111,6 @@ async fn wasm_markdown_output_preserves_nodes_and_partial_delivery() {
     s.register_native(NativeInterface::new(
         managed::OBJECT.parse().unwrap(),
         "/get".parse().unwrap(),
-        true,
         access,
         |_, _: String| async {
             Ok::<_, managed::Error>(managed::Blob {

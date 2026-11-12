@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/describe"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -33,7 +32,6 @@ callers = [
 path = "/http"
 input = "generated/provides/1.input.schema"
 output = "generated/provides/1.output.schema"
-reentrant = true
 
 [provides.access]
 callers = ["self"]
@@ -42,7 +40,6 @@ callers = ["self"]
 path = "/invoke"
 input = "generated/provides/2.input.schema"
 output = "generated/provides/2.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -54,7 +51,6 @@ callers = [
 path = "/memory"
 input = "generated/provides/3.input.schema"
 output = "generated/provides/3.output.schema"
-reentrant = true
 
 [provides.access]
 callers = ["self"]
@@ -215,4 +211,4 @@ output = "generated/uses/17.output.schema"
 "generated/uses/8.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
 "generated/uses/9.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
 "generated/uses/9.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
-"module.wasm" = "210096327a6914e1420589d760a94ad4fb84676ca9ff9602987d669dd10a5d44"
+"module.wasm" = "3a3f4051da268e7be2680b76dd8c34eb49bd02d72c0d265edd21de7ff623e6b7"

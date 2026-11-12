@@ -1467,3 +1467,37 @@ h3 {
     font-size: 10px;
   }
 }
+
+.batch-members {
+  margin: 1rem 0;
+}
+.batch-members summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.batch-members fieldset {
+  border: 0;
+  padding: 0.75rem 0;
+}
+.batch-member {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(9rem, 1fr);
+  gap: 0.6rem;
+  align-items: center;
+  margin: 0.45rem 0;
+}
+.batch-member label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.batch-member code {
+  overflow-wrap: anywhere;
+}
+.batch-member input[type='checkbox'] {
+  width: auto;
+}
+.batch-member select {
+  min-width: 0;
+}

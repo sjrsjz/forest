@@ -1,0 +1,10 @@
+name = "forest_scheduler_verification"
+version = "0.1.0"
+defaultTargets = ["Forest"]
+
+[[lean_lib]]
+name = "Forest"
+
+[leanOptions]
+autoImplicit = false
+warningAsError = true

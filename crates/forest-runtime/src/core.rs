@@ -1,4 +1,5 @@
 mod api;
+pub(crate) mod changes;
 mod dispatch;
 pub(crate) mod inspection;
 mod lifecycle;
@@ -19,10 +20,11 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, oneshot};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModulePhase {
+    Staged,
     Creating,
     Serving,
     Stopping,
@@ -46,6 +48,7 @@ pub(crate) enum HostAccess<'a> {
     Database,
     Release,
     Wait,
+    Lock,
     Basic,
 }
 impl HostAccess<'_> {
@@ -86,7 +89,6 @@ impl NativeInterface {
     pub fn new<I, T, E, F, Fut>(
         object: Token,
         path: Token,
-        reentrant: bool,
         access: AccessPolicy,
         handler: F,
     ) -> Self
@@ -103,7 +105,6 @@ impl NativeInterface {
                 path,
                 input: I::as_schema(),
                 output: <Result<T, E>>::as_schema(),
-                reentrant,
                 access,
             },
             handler: Arc::new(move |context, value| {
@@ -119,11 +120,6 @@ struct RegisteredNative {
     declaration: InterfaceDeclaration,
     handler: Arc<dyn Fn(CallContext, Value) -> NativeFuture + Send + Sync>,
     access: AclTable,
-    gate: NativeGate,
-}
-enum NativeGate {
-    Parallel,
-    Serial(Arc<Semaphore>),
 }
 #[derive(Clone)]
 pub struct EventDefinition {
@@ -144,9 +140,12 @@ pub(crate) struct Core {
     pub directory: Mutex<Directory>,
     pub run_queue: Arc<crate::fair::RunQueue>,
     next_instance: AtomicU64,
+    next_request: AtomicU64,
+    pub changed: Arc<Notify>,
     _ticker: EpochTicker,
 }
 pub(crate) struct Directory {
+    pub changes: HashMap<crate::management::RequestId, changes::Change>,
     pub host_config: AclTable,
     pub slots: HashMap<Token, Slot>,
     natives: HashMap<(Token, Token), Arc<RegisteredNative>>,
@@ -166,10 +165,13 @@ impl Directory {
     }
 }
 pub(crate) enum State {
+    Staged {
+        inbox: Ingress,
+        failure: Option<crate::InstanceFailure>,
+    },
     Creating {
         instance: Arc<Instance>,
-        inbox: CreatingInbox,
-        completion: ManagementReply,
+        inbox: Ingress,
     },
     Serving(Live),
     Stopping {
@@ -184,6 +186,7 @@ pub(crate) enum State {
     Releasing {
         instance: Arc<Instance>,
         after: After,
+        failure: Option<crate::InstanceFailure>,
     },
     Failed(crate::InstanceFailure),
 }
@@ -193,36 +196,33 @@ pub(crate) struct Live {
 }
 pub(crate) struct Inbox {
     pub queue: VecDeque<Request>,
-    pub gate: Gate,
     pub output: Schema,
 }
-pub(crate) enum Gate {
-    Parallel,
-    Serial(Option<SerialPermit>),
-}
-pub(crate) struct SerialPermit {
-    interface: Token,
-}
-pub(crate) enum InterfacePermit {
-    Parallel,
-    Serial(SerialPermit),
-}
 pub(crate) enum After {
-    Unload {
-        completion: ManagementReply,
-        failure: Option<crate::InstanceFailure>,
-    },
-    Reload {
-        package: Package,
-        inbox: VecDeque<Request>,
-        completion: ManagementReply,
+    Change {
+        request: crate::management::RequestId,
+        inbox: Ingress,
     },
     Fail(crate::InstanceFailure),
 }
-type ManagementReply = oneshot::Sender<std::result::Result<(), crate::InstanceFailure>>;
-pub(crate) enum CreatingInbox {
+pub(crate) enum Ingress {
     Closed,
     Deferred(VecDeque<Request>),
+}
+impl Ingress {
+    pub fn reject(self, error: &DispatchError) {
+        if let Self::Deferred(queue) = self {
+            for request in queue {
+                request.outcome.settle(Err(error.clone()));
+            }
+        }
+    }
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Closed => 0,
+            Self::Deferred(queue) => queue.len(),
+        }
+    }
 }
 
 pub(crate) struct Instance {
@@ -237,10 +237,19 @@ pub(crate) struct Instance {
 pub(crate) struct Budget {
     requests: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
+    changed: Arc<Notify>,
 }
 pub(crate) struct Admission {
     _request: OwnedSemaphorePermit,
     _bytes: OwnedSemaphorePermit,
+    // Fields drop in order; notify only after the permits have returned.
+    _changed: NotifyReleased,
+}
+struct NotifyReleased(Arc<Notify>);
+impl Drop for NotifyReleased {
+    fn drop(&mut self) {
+        self.0.notify_waiters();
+    }
 }
 pub(crate) struct Request {
     pub invocation: Invocation,
@@ -257,7 +266,6 @@ pub(crate) enum Outcome {
 }
 pub(crate) struct Started {
     pub request: Request,
-    pub permit: InterfacePermit,
     pub output: Schema,
 }
 
@@ -280,10 +288,11 @@ impl Outcome {
     }
 }
 impl Budget {
-    fn new(options: &RuntimeOptions) -> Self {
+    fn new(options: &RuntimeOptions, changed: Arc<Notify>) -> Self {
         Self {
             requests: Arc::new(Semaphore::new(options.max_requests)),
             bytes: Arc::new(Semaphore::new(options.max_input_bytes)),
+            changed,
         }
     }
     fn reserve(&self, bytes: usize) -> DispatchResult<Admission> {
@@ -300,12 +309,14 @@ impl Budget {
         Ok(Admission {
             _request: request,
             _bytes: bytes,
+            _changed: NotifyReleased(self.changed.clone()),
         })
     }
 }
 impl State {
     pub fn phase(&self) -> ModulePhase {
         match self {
+            Self::Staged { .. } => ModulePhase::Staged,
             Self::Creating { .. } => ModulePhase::Creating,
             Self::Serving(_) => ModulePhase::Serving,
             Self::Stopping { .. } => ModulePhase::Stopping,
@@ -320,7 +331,7 @@ impl State {
             | Self::Destroying { instance, .. }
             | Self::Releasing { instance, .. } => Some(instance),
             Self::Serving(live) | Self::Stopping { live, .. } => Some(&live.instance),
-            Self::Failed(_) => None,
+            Self::Staged { .. } | Self::Failed(_) => None,
         }
     }
 }
@@ -338,13 +349,6 @@ impl Live {
                     Inbox {
                         queue: VecDeque::new(),
                         output: d.output.clone(),
-                        gate: if d.reentrant {
-                            Gate::Parallel
-                        } else {
-                            Gate::Serial(Some(SerialPermit {
-                                interface: d.path.clone(),
-                            }))
-                        },
                     },
                 )
             })
@@ -361,45 +365,37 @@ impl Live {
             .get_mut(&interface)
             .expect("validated interface");
         inbox.queue.push_back(request);
-        if matches!(inbox.gate, Gate::Parallel | Gate::Serial(Some(_))) {
-            self.instance.mailbox.start(interface);
-        }
+        self.instance.mailbox.start(interface);
     }
     pub fn begin(&mut self, interface: &Token) -> Started {
         let inbox = self.interfaces.get_mut(interface).expect("ready interface");
-        let permit = match &mut inbox.gate {
-            Gate::Parallel => InterfacePermit::Parallel,
-            Gate::Serial(permit) => {
-                InterfacePermit::Serial(permit.take().expect("ready interface permit"))
-            }
-        };
         let request = inbox.queue.pop_front().expect("ready interface queue");
-        if !inbox.queue.is_empty() && matches!(inbox.gate, Gate::Parallel) {
+        if !inbox.queue.is_empty() {
             self.instance.mailbox.start(interface.clone());
         }
         Started {
             request,
-            permit,
             output: inbox.output.clone(),
-        }
-    }
-    pub fn complete(&mut self, permit: InterfacePermit) {
-        if let InterfacePermit::Serial(permit) = permit {
-            let interface = permit.interface.clone();
-            let inbox = self.interfaces.get_mut(&interface).unwrap();
-            let Gate::Serial(slot) = &mut inbox.gate else {
-                unreachable!()
-            };
-            assert!(slot.replace(permit).is_none());
-            if !inbox.queue.is_empty() {
-                self.instance.mailbox.start(interface);
-            }
         }
     }
     pub fn pending(&self) -> bool {
         self.interfaces
             .values()
             .any(|inbox| !inbox.queue.is_empty())
+    }
+    pub fn queued_budget(&self) -> (usize, usize) {
+        self.interfaces
+            .values()
+            .flat_map(|inbox| &inbox.queue)
+            .fold((0, 0), |(count, bytes), request| {
+                (count + 1, bytes + request.bytes.len())
+            })
+    }
+    pub fn take_queued(&mut self) -> VecDeque<Request> {
+        self.interfaces
+            .values_mut()
+            .flat_map(|inbox| inbox.queue.drain(..))
+            .collect()
     }
     pub fn reject_queued(self, error: &DispatchError) {
         for inbox in self.interfaces.into_values() {

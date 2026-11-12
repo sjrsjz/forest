@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/group_message"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = ["/core/onebot"]
@@ -98,7 +97,7 @@ interface = "/group_message"
 "generated/provides/0.input.schema" = "0fb47ece9fe29014ae572e9bd5f5aaee5248e81d68c6385f5e416581422048fe"
 "generated/provides/0.output.schema" = "42c17661422958d2eadc811723a8fb07f7875d89f52469b77bfdf5ebeee60261"
 "generated/uses/0.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
-"generated/uses/0.output.schema" = "8c0e5b01f20951a10c7557ca4a8b69de3b4729394138d317975b3201bf4899ab"
+"generated/uses/0.output.schema" = "73d8608b6075aa42ff362c29b30301845499c2438e37055da451bc3af5169cf5"
 "generated/uses/1.input.schema" = "3fafd73fd4dcb84ef9f8966027103d054b0b57ef87d52a9d8f620dd54d081513"
 "generated/uses/1.output.schema" = "94acaec0371ce375450b5c72a91fc1c5c7b38cb6f726a52f4f8fbe8567c2d945"
 "generated/uses/2.input.schema" = "7f619919efa13dc3e8df67be1a6975e3e3e8ace0673eda9a5e2c40f4a3b3965f"
@@ -117,4 +116,4 @@ interface = "/group_message"
 "generated/uses/8.output.schema" = "524c4fa3d5efbd96e779f7cfaf7041b777d3fc8fccdf2fc771a36bffb4db20d7"
 "generated/uses/9.input.schema" = "d5e578a594814cf7fe162cb497110d22abc5d04f8436af0085255b3113d37841"
 "generated/uses/9.output.schema" = "27d66d278af0d580ff4c2058f85012e950201dc8cb7c2ee8e92a9ee494d39584"
-"module.wasm" = "66450417b2dddc97d1635a910b6d94ff7384965b4e39b1ae5a0a4253a23c6148"
+"module.wasm" = "b5ffa53809ba8993dfdb20e993876ae9530f3b751cf9df4370db25f03d21529d"

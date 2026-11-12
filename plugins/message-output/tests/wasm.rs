@@ -153,7 +153,6 @@ async fn actual_wasm_output_folds_by_group_preserves_cq_and_never_falls_back_to_
     s.register_native(NativeInterface::new(
         managed::OBJECT.parse().unwrap(),
         "/get".parse().unwrap(),
-        true,
         callers(vec![SubjectPattern::Path(OBJECT.parse().unwrap())]),
         |_, reference: String| async move {
             if reference == format!("media:{}", "a".repeat(64)) {
@@ -172,7 +171,6 @@ async fn actual_wasm_output_folds_by_group_preserves_cq_and_never_falls_back_to_
     s.register_native(NativeInterface::new(
         "/module/markdown".parse().unwrap(),
         "/format".parse().unwrap(),
-        true,
         callers(vec![SubjectPattern::Path(
             "/module/message-output".parse().unwrap(),
         )]),

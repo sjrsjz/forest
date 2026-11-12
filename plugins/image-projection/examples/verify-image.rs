@@ -23,7 +23,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     scheduler.register_native(NativeInterface::new(
         media::OBJECT.parse()?,
         "/get".parse()?,
-        true,
         callers(vec![SubjectPattern::Path(OBJECT.parse()?)]),
         move |_, _: String| {
             let bytes = bytes.clone();

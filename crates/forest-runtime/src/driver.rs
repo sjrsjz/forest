@@ -13,6 +13,16 @@ use std::{
     collections::HashMap,
     sync::{Arc, atomic::Ordering},
 };
+use tokio::sync::oneshot;
+
+pub(crate) enum Activation {
+    Serve,
+    Discard,
+}
+pub(crate) struct PreparedDriver {
+    pub ready: oneshot::Receiver<Result<(), InstanceFailure>>,
+    pub activate: oneshot::Sender<Activation>,
+}
 
 pub(crate) enum Turn {
     Start(Box<Started>),
@@ -37,11 +47,16 @@ impl From<InstanceFailure> for Fault {
     }
 }
 
-pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
+pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) -> PreparedDriver {
+    let (ready, receive) = oneshot::channel();
+    let (activate, activation) = oneshot::channel();
     tokio::spawn(async move {
+        let mut ready = Some(ready);
         let resources = core.services.mount(&instance.package.manifest).await;
         let result = match &resources {
-            Ok(resources) => run_guest(&core, &instance, resources.clone()).await,
+            Ok(resources) => {
+                run_guest(&core, &instance, resources.clone(), &mut ready, activation).await
+            }
             Err(error) => Err(Fault {
                 error: DispatchError::ExecutionFailed(error.to_string()).into(),
                 tasks: vec![],
@@ -76,20 +91,23 @@ pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
             );
         }
         core.begin_releasing(&instance, error.clone());
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(Err(error
+                .clone()
+                .unwrap_or_else(|| DispatchError::Interrupted.into())));
+        }
         let error = error
             .unwrap_or_else(|| DispatchError::Interrupted.into())
             .dispatch_error(&instance.object);
         let mut held = Vec::new();
         for task in retired {
             instance.mailbox.retire(task.signal.id);
-            let Started {
-                request, permit, ..
-            } = task.started;
+            let Started { request, .. } = task.started;
             let crate::core::Request {
                 outcome, admission, ..
             } = request;
             outcome.settle(Err(error.clone()));
-            held.push((admission, permit));
+            held.push(admission);
         }
         instance.operations.finish().await;
         if let Ok(resources) = resources {
@@ -103,12 +121,18 @@ pub(crate) fn spawn(core: Arc<Core>, instance: Arc<Instance>) {
             format!("instance {} released", instance.id),
         );
     });
+    PreparedDriver {
+        ready: receive,
+        activate,
+    }
 }
 
 async fn run_guest(
     core: &Arc<Core>,
     instance: &Arc<Instance>,
     resources: Arc<Resources>,
+    ready: &mut Option<oneshot::Sender<Result<(), InstanceFailure>>>,
+    mut activation: oneshot::Receiver<Activation>,
 ) -> std::result::Result<(), Fault> {
     let initial = instance.mailbox.register(0);
     let frame = own_frame(instance, initial.clone());
@@ -124,7 +148,29 @@ async fn run_guest(
         .map_err(Fault::from)?;
     instance.operations.finish_task(initial.id).await;
     instance.mailbox.retire(initial.id);
-    core.activate(instance).map_err(fault)?;
+    let _ = ready
+        .take()
+        .expect("initialization completion")
+        .send(Ok(()));
+    let decision = loop {
+        let notified = instance.mailbox.changed.notified();
+        if instance.force.load(Ordering::Acquire) {
+            return Err(Fault::from(InstanceFailure::from(
+                DispatchError::Interrupted,
+            )));
+        }
+        tokio::select! {
+            decision = &mut activation => break decision.unwrap_or(Activation::Discard),
+            _ = notified => {}
+        }
+    };
+    if matches!(decision, Activation::Discard) {
+        core.abort_creation(instance);
+        let cleanup = instance.mailbox.register(1);
+        let result = lifecycle(&mut wasm, instance, cleanup.clone(), Begin::Destroy).await;
+        instance.mailbox.retire(cleanup.id);
+        return result.map_err(Fault::from);
+    }
 
     let mut next = 1u64;
     let mut tasks: HashMap<u64, GuestTask> = HashMap::new();
@@ -209,14 +255,12 @@ async fn run_guest(
     let mut held = Vec::new();
     for (_, task) in tasks {
         instance.mailbox.retire(task.signal.id);
-        let Started {
-            request, permit, ..
-        } = task.started;
+        let Started { request, .. } = task.started;
         let crate::core::Request {
             outcome, admission, ..
         } = request;
         outcome.settle(Err(DispatchError::Interrupted));
-        held.push((admission, permit));
+        held.push(admission);
     }
     core.reject_old_queue(instance, &DispatchError::Interrupted);
     instance.operations.quiesce().await;

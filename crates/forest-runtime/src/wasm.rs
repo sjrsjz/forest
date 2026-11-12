@@ -160,6 +160,8 @@ impl Wasm {
 
 #[derive(Clone, Copy)]
 enum Import {
+    Lock,
+    Unlock,
     Call,
     Send,
     ConfigGet,
@@ -182,6 +184,8 @@ enum Import {
 fn imports(engine: &wasmtime::Engine) -> Result<wasmtime::Linker<HostState>> {
     let mut linker = wasmtime::Linker::new(engine);
     for (name, operation) in [
+        ("lock", Import::Lock),
+        ("unlock", Import::Unlock),
         ("call", Import::Call),
         ("send", Import::Send),
         ("config_get", Import::ConfigGet),
@@ -317,6 +321,8 @@ fn submit(
         };
     }
     Ok(match operation {
+        Import::Lock => core.lock(&instance, &signal, read(caller, ptr, len)?),
+        Import::Unlock => core.unlock(&instance, &signal, read(caller, ptr, len)?),
         Import::Call => {
             let input: CallRequest = read(caller, ptr, len)?;
             let service = core.clone();

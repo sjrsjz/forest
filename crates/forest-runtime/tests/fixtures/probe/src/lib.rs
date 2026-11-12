@@ -16,6 +16,11 @@ pub enum FailureStage {
     Create,
     Destroy,
 }
+#[derive(Clone, Debug, PartialEq, Eq, forest_sdk::DeriveSchema, forest_sdk::DeriveValue)]
+pub enum PeerConfig {
+    None,
+    Read(Token),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, forest_sdk::DeriveSchema, forest_sdk::DeriveValue)]
 pub enum LifecycleError {
@@ -31,6 +36,10 @@ impl From<forest_sdk::HostError> for LifecycleError {
 impl Module for Probe {
     type LifecycleError = LifecycleError;
     async fn create(context: CreateContext) -> Result<Self, Self::LifecycleError> {
+        assert!(matches!(
+            host::lock("/probe/lifecycle".parse().unwrap()).await,
+            Err(DispatchError::LifecycleRestricted)
+        ));
         let denied: DispatchResult<Result<i64, String>> = host::call(
             "/core/probe".parse().unwrap(),
             "/observe".parse().unwrap(),
@@ -51,6 +60,29 @@ impl Module for Probe {
             .await
             .map_err(forest_sdk::HostError::Dispatch)?
             .map_err(forest_sdk::HostError::Service)?;
+        let peer: PeerConfig =
+            host::config_get(context.object.clone(), "/lifecycle/peer".parse().unwrap())
+                .await
+                .map_err(forest_sdk::HostError::Dispatch)?
+                .map_err(forest_sdk::HostError::Service)?;
+        if let PeerConfig::Read(peer) = peer {
+            let _: i64 = host::config_get(peer, "/counter".parse().unwrap())
+                .await
+                .map_err(forest_sdk::HostError::Dispatch)?
+                .map_err(forest_sdk::HostError::Service)?;
+        }
+        let delay: i64 = host::config_get(
+            context.object.clone(),
+            "/lifecycle/create-delay".parse().unwrap(),
+        )
+        .await
+        .map_err(forest_sdk::HostError::Dispatch)?
+        .map_err(forest_sdk::HostError::Service)?;
+        if cfg!(feature = "second") && delay > 0 {
+            host::sleep(delay)
+                .await
+                .map_err(forest_sdk::HostError::Dispatch)?;
+        }
         let stage: FailureStage = host::config_get(
             context.object.clone(),
             "/lifecycle/failure".parse().unwrap(),
@@ -73,55 +105,45 @@ impl Module for Probe {
             callers(vec![SubjectPattern::Path("/user/test".parse().unwrap())])
         }
         Handlers::new()
-            .with("/echo".parse().unwrap(), true, policy(), Self::echo)
-            .with("/payload".parse().unwrap(), true, policy(), Self::payload)
-            .with("/serial".parse().unwrap(), false, policy(), Self::serial)
-            .with("/parallel".parse().unwrap(), true, policy(), Self::parallel)
-            .with("/nested".parse().unwrap(), true, policy(), Self::nested)
             .with(
-                "/increment".parse().unwrap(),
-                false,
-                policy(),
-                Self::increment,
+                "/chain".parse().unwrap(),
+                callers(vec![
+                    SubjectPattern::Path("/user/test".parse().unwrap()),
+                    SubjectPattern::Path("/module/**".parse().unwrap()),
+                ]),
+                Self::chain,
             )
+            .with("/echo".parse().unwrap(), policy(), Self::echo)
+            .with("/payload".parse().unwrap(), policy(), Self::payload)
+            .with("/serial".parse().unwrap(), policy(), Self::serial)
+            .with("/serial-alt".parse().unwrap(), policy(), Self::serial)
+            .with("/parallel".parse().unwrap(), policy(), Self::parallel)
+            .with("/nested".parse().unwrap(), policy(), Self::nested)
+            .with("/increment".parse().unwrap(), policy(), Self::increment)
             .with(
                 "/implementation".parse().unwrap(),
-                true,
                 policy(),
                 Self::implementation,
             )
-            .with(
-                "/destroyed".parse().unwrap(),
-                true,
-                policy(),
-                Self::destroyed,
-            )
-            .with("/trap".parse().unwrap(), true, policy(), Self::trap)
-            .with("/spin".parse().unwrap(), true, policy(), Self::spin)
-            .with("/file".parse().unwrap(), true, policy(), Self::file)
-            .with("/http".parse().unwrap(), true, policy(), Self::http)
-            .with("/ws".parse().unwrap(), true, policy(), Self::ws)
-            .with(
-                "/variance".parse().unwrap(),
-                false,
-                policy(),
-                Self::variance,
-            )
+            .with("/destroyed".parse().unwrap(), policy(), Self::destroyed)
+            .with("/trap".parse().unwrap(), policy(), Self::trap)
+            .with("/spin".parse().unwrap(), policy(), Self::spin)
+            .with("/file".parse().unwrap(), policy(), Self::file)
+            .with("/http".parse().unwrap(), policy(), Self::http)
+            .with("/ws".parse().unwrap(), policy(), Self::ws)
+            .with("/variance".parse().unwrap(), policy(), Self::variance)
             .with(
                 "/use-variance".parse().unwrap(),
-                true,
                 policy(),
                 Self::use_variance,
             )
             .with(
                 "/use-native-variance".parse().unwrap(),
-                true,
                 policy(),
                 Self::use_native_variance,
             )
             .with(
                 "/atomic-write".parse().unwrap(),
-                false,
                 policy(),
                 Self::atomic_write,
             )
@@ -162,6 +184,25 @@ impl Module for Probe {
 forest_sdk::export_module!(super::Probe);
 
 impl Probe {
+    async fn chain(
+        self: Rc<Self>,
+        _: CallContext,
+        (peer, depth): (Token, i64),
+    ) -> Result<i64, String> {
+        if depth == 0 {
+            return Ok(if cfg!(feature = "second") { 2 } else { 1 });
+        }
+        if depth == 1 {
+            Self::observe(501).await?;
+        }
+        host::call(
+            peer,
+            "/chain".parse().unwrap(),
+            &(self.object.clone(), depth - 1),
+        )
+        .await
+        .map_err(|e| e.to_string())?
+    }
     async fn payload(self: Rc<Self>, _: CallContext, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         // Exercise guest -> host input and host -> guest output as well as the
         // exported result. SQLite remains local to this fixture's private DB.
@@ -219,9 +260,12 @@ impl Probe {
         Ok(())
     }
     async fn serial(self: Rc<Self>, _: CallContext, delay: i64) -> Result<i64, String> {
+        let _guard = host::lock("/serial".parse().unwrap())
+            .await
+            .map_err(|error| error.to_string())?;
         assert!(
             !self.serial.replace(true),
-            "non-reentrant interface overlapped"
+            "host lock allowed overlapping critical sections"
         );
         let value = self.sequence.get() + 1;
         self.sequence.set(value);
@@ -265,6 +309,9 @@ impl Probe {
         Ok(total)
     }
     async fn increment(self: Rc<Self>, _: CallContext, _: ()) -> Result<i64, String> {
+        let _guard = host::lock("/counter".parse().unwrap())
+            .await
+            .map_err(|error| error.to_string())?;
         let value = self.counter.get() + 1;
         flatten(host::config_set(self.object.clone(), "/counter".parse().unwrap(), &value).await)?;
         self.counter.set(value);
@@ -324,6 +371,9 @@ impl Probe {
         }
     }
     async fn atomic_write(self: Rc<Self>, _: CallContext, value: i64) -> Result<(), String> {
+        let _guard = host::lock("/counter".parse().unwrap())
+            .await
+            .map_err(|error| error.to_string())?;
         let mut write = Box::pin(host::config_set(
             self.object.clone(),
             "/counter".parse().unwrap(),
@@ -346,7 +396,7 @@ fn flatten<T>(result: HostResult<T>) -> Result<T, String> {
 }
 
 pub fn manifest(object: Token) -> Manifest {
-    let mut configs = ["/counter", "/destroyed"]
+    let mut configs = ["/counter", "/destroyed", "/lifecycle/create-delay"]
         .map(|key| ConfigDeclaration {
             key: key.parse().unwrap(),
             schema: i64::as_schema(),
@@ -362,6 +412,16 @@ pub fn manifest(object: Token) -> Manifest {
         key: "/lifecycle/failure".parse().unwrap(),
         schema: FailureStage::as_schema(),
         default: FailureStage::None.as_value(),
+        access: AccessPolicy {
+            readers: vec![SubjectPattern::SelfModule],
+            writers: vec![SubjectPattern::SelfModule],
+            callers: vec![],
+        },
+    });
+    configs.push(ConfigDeclaration {
+        key: "/lifecycle/peer".parse().unwrap(),
+        schema: PeerConfig::as_schema(),
+        default: PeerConfig::None.as_value(),
         access: AccessPolicy {
             readers: vec![SubjectPattern::SelfModule],
             writers: vec![SubjectPattern::SelfModule],

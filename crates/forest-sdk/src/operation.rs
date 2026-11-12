@@ -50,6 +50,9 @@ pub(crate) fn enter(task: u64) {
         waker.wake();
     }
 }
+pub(crate) fn current() -> Option<u64> {
+    CURRENT.with(Cell::get)
+}
 pub(crate) fn leave(task: u64, complete: bool) {
     CURRENT.with(|current| assert_eq!(current.replace(None), Some(task)));
     if complete {
@@ -80,6 +83,15 @@ impl<T> Operation<T> {
                 Err(_) => State::Rejected(DispatchError::FrameTooLarge),
             },
             result: PhantomData,
+        }
+    }
+}
+
+impl<T: DeserializeOwned> Operation<DispatchResult<T>> {
+    pub(crate) fn immediate(mut self) -> DispatchResult<T> {
+        match Pin::new(&mut self).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(result) => result,
+            Poll::Pending => unreachable!("synchronous host import returned Pending"),
         }
     }
 }

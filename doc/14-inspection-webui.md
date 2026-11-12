@@ -199,7 +199,9 @@ WebUI 通过宿主控制接口访问运行时，不为界面引入专用 Wasm �
 
 加载不自动重载已有模块；恢复 Failed 对象使用 load。重载必须保持目标对象身份，契约、ACL 发布和配置恢复继续使用现有调度规则。卸载仍由调度器拒绝存在静态使用者的对象，不自动级联卸载。
 
-长操作的 HTTP 请求等待实际结算，浏览器同时通过原有 SSE 查看 Creating、Stopping、Destroying、Releasing 与 Serving。请求开始后由宿主持有执行 Future，浏览器断开不取消已提交的操作。不引入任务数据库、操作轮询或自动超时；Force 始终由管理员明确选择。各对象能否转换由原状态机决定，Web 层不复制可变生命周期。
+长操作的 HTTP 请求等待实际结算，浏览器通过原有 SSE 同时查看模块阶段和活动管理请求。管理请求提供 Preparing / Waiting / Committed 状态与整组对象；Pending 时旧模块仍 Serving，可通过取消按钮撤销。浏览器断开不取消宿主持有的请求。默认 Drain 等整组静止后才提交，候选全部初始化成功才统一开放。Force 由管理员明确选择，作用于整个管理集合；Web 层不复制可变生命周期。
+
+管理 API 新增 POST /api/modules/reload-group（replacements 数组及 mode）、POST /api/modules/unload-group（objects 数组及 mode）和 POST /api/modules/cancel（request 标识）。单模块端点使用相同管理流程。所有端点继续使用现有管理员认证。模块阶段增加 Staged，表示旧实例已释放、等待整组创建。
 
 页面增加本地包抽屉：选择包、查看 Manifest、预览依赖顺序并加载。模块标题区提供重载与卸载入口，操作面板明确展示目标对象、候选版本和三种停止方式。界面只保留实际状态、错误和操作标签。
 

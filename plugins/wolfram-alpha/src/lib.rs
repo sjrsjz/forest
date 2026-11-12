@@ -84,7 +84,6 @@ impl Module for WolframAlpha {
     fn handlers() -> Handlers<Self> {
         Handlers::new().with(
             "/query".parse().unwrap(),
-            true,
             callers(vec![
                 SubjectPattern::Path("/module/agent-tools".parse().unwrap()),
                 SubjectPattern::Path("/user/admin".parse().unwrap()),

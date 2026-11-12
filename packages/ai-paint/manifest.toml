@@ -48,7 +48,6 @@ writers = ["/user/admin"]
 path = "/generate"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -76,4 +75,4 @@ output = "generated/uses/0.output.schema"
 "generated/provides/0.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
 "generated/uses/0.input.schema" = "cff0a1a18caf701633563cd5622d4a49e1e3eb4fc33326c1c3b37257e2b4ed22"
 "generated/uses/0.output.schema" = "3800a6ddd2264b2d2570bd230d9bf00de97e3bcc731fb45fe48feb5a30a53c9f"
-"module.wasm" = "8fa637092b720f55d228f481f8f8c8b9d8f6663c1d719bb73be0ab0d5d9abb91"
+"module.wasm" = "be1ecca312b6cf1a8bcd72534c8ea5e5b09e1e6d9affaba762aa4012a9528d59"

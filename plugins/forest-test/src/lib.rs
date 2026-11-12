@@ -25,7 +25,6 @@ impl Module for Hello {
     fn handlers() -> Handlers<Self> {
         Handlers::new().with(
             "/group_message".parse().unwrap(),
-            false,
             callers(vec![SubjectPattern::Path(onebot::OBJECT.parse().unwrap())]),
             Self::on_message,
         )
@@ -36,6 +35,9 @@ impl Hello {
         if !is_command(&event) {
             return Ok(());
         }
+        let _guard = host::lock("/replies".parse().unwrap())
+            .await
+            .map_err(|error| error.to_string())?;
         let request = SendGroupMessage {
             group_id: event.group_id,
             message: Message::Cq("hello world".into()),

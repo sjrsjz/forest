@@ -12,6 +12,8 @@ pub(crate) mod imports {
         };
     }
     operations!(
+        lock,
+        unlock,
         call,
         send,
         config_get,
@@ -55,6 +57,20 @@ pub(crate) mod imports {
     pub unsafe fn task_wake(_: u64) {
         panic!("guest SDK requires Wasm")
     }
+}
+
+/// Acquire a nonrecursive, FIFO lock in this Wasm instance for the current task.
+pub async fn lock(key: Token) -> DispatchResult<crate::LockGuard> {
+    let task = crate::operation::current().expect("lock outside a guest task");
+    let result: DispatchResult<()> = Operation::new(imports::lock, &key).await;
+    result?;
+    Ok(crate::LockGuard::new(key, task))
+}
+
+/// Release only a lock held by the current task. The host completes this import
+/// synchronously, so guard destruction does not require another poll.
+pub fn unlock(key: Token) -> DispatchResult<()> {
+    Operation::new(imports::unlock, &key).immediate()
 }
 
 pub async fn call<I: AsValue, O: AsValue>(

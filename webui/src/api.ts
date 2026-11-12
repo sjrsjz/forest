@@ -2,6 +2,7 @@ export class HttpError extends Error {
   constructor(
     public status: number,
     message: string,
+    public code?: string,
   ) {
     super(message)
   }
@@ -12,12 +13,15 @@ async function response(url: string, init: RequestInit): Promise<Response> {
   if (!response.ok) {
     const text = await response.text()
     let message = text || `HTTP ${response.status}`
+    let code: string | undefined
     try {
-      message = (JSON.parse(text) as { message: string }).message ?? message
+      const error = JSON.parse(text) as { message: string; code?: string }
+      message = error.message ?? message
+      code = error.code
     } catch {
       /* Framework query errors may be plain text. */
     }
-    throw new HttpError(response.status, message)
+    throw new HttpError(response.status, message, code)
   }
   return response
 }

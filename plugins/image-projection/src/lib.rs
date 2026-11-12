@@ -61,7 +61,6 @@ impl Module for Projector {
         Handlers::new()
             .with(
                 PREPARE.parse().unwrap(),
-                false,
                 callers(vec![
                     SubjectPattern::Path("/module/memory".parse().unwrap()),
                     SubjectPattern::Path("/user/admin".parse().unwrap()),
@@ -70,7 +69,6 @@ impl Module for Projector {
             )
             .with(
                 THUMBNAIL.parse().unwrap(),
-                false,
                 callers(vec![
                     SubjectPattern::Path("/module/memory".parse().unwrap()),
                     SubjectPattern::Path("/user/admin".parse().unwrap()),
@@ -86,6 +84,9 @@ impl Projector {
         _: CallContext,
         input: Thumbnail,
     ) -> Result<media::Blob, Error> {
+        let _guard = host::lock("/project".parse().unwrap())
+            .await
+            .map_err(|error| Error::Host(error.to_string()))?;
         if input.max_side <= 0 {
             return Err(Error::Image("thumbnail max_side must be positive".into()));
         }
@@ -117,6 +118,9 @@ impl Projector {
         _: CallContext,
         reference: String,
     ) -> Result<media::Blob, Error> {
+        let _guard = host::lock("/project".parse().unwrap())
+            .await
+            .map_err(|error| Error::Host(error.to_string()))?;
         if let Some(blob) = cache::get(&reference, self.settings.max_side).await? {
             return Ok(blob);
         }

@@ -1,4 +1,11 @@
-export type Phase = 'creating' | 'serving' | 'stopping' | 'destroying' | 'releasing' | 'failed'
+export type Phase =
+  | 'staged'
+  | 'creating'
+  | 'serving'
+  | 'stopping'
+  | 'destroying'
+  | 'releasing'
+  | 'failed'
 export type StopMode = 'drain' | 'at_yield' | 'force'
 export interface PackageMetadata {
   authors?: string[]
@@ -23,6 +30,7 @@ export type InstanceFailure =
   | { kind: 'dispatch'; error: unknown }
   | { kind: 'lifecycle'; phase: 'create' | 'destroy'; schema: unknown; error: unknown }
 export type Lifecycle =
+  | { phase: 'staged'; replacement: Release | null }
   | { phase: 'creating' | 'serving'; instance: Instance }
   | {
       phase: 'stopping'
@@ -34,7 +42,6 @@ export type Lifecycle =
   | { phase: 'failed'; reason: string; failure: InstanceFailure }
 export interface Interface {
   path: string
-  reentrant: boolean
   queued: number
 }
 export interface Module {
@@ -63,6 +70,14 @@ export interface Snapshot {
   memory_limit_bytes: number
   modules: Module[]
   hosts: Host[]
+  requests: ManagementRequest[]
+}
+export interface ManagementRequest {
+  id: number
+  kind: 'load' | 'reload' | 'unload'
+  objects: string[]
+  mode: StopMode
+  phase: 'preparing' | 'waiting' | 'committed'
 }
 export interface Manifest {
   package: PackageMetadata & {
@@ -75,7 +90,7 @@ export interface Manifest {
   module: string
   lifecycle_error: unknown
   configs: { key: string; schema: unknown; default: unknown; access: unknown }[]
-  provides: { path: string; input: unknown; output: unknown; reentrant: boolean; access: unknown }[]
+  provides: { path: string; input: unknown; output: unknown; access: unknown }[]
   uses: { object: string; interface: string; input: unknown; output: unknown }[]
   subscriptions: { source: string; event: string; interface: string }[]
 }
@@ -120,6 +135,7 @@ export type Loadable<T> =
   | { status: 'ready'; value: T }
   | { status: 'error'; message: string; httpStatus?: number }
 export const phaseLabel: Record<Phase, string> = {
+  staged: '等待创建',
   creating: '初始化',
   serving: '可接纳',
   stopping: '停止中',

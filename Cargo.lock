@@ -1358,7 +1358,6 @@ dependencies = [
  "forest-protocol",
  "forest-sdk",
  "forest-serde",
- "futures",
  "serde_json",
  "sha2",
  "url",

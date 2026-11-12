@@ -72,7 +72,6 @@ impl Module for Output {
         Handlers::new()
             .with(
                 SEND.parse().unwrap(),
-                true,
                 callers(vec![
                     SubjectPattern::Path("/module/agent".parse().unwrap()),
                     SubjectPattern::Path("/module/onebot-tools".parse().unwrap()),
@@ -83,7 +82,6 @@ impl Module for Output {
             )
             .with(
                 SEND_MARKDOWN.parse().unwrap(),
-                true,
                 callers(vec![
                     SubjectPattern::Path("/module/agent".parse().unwrap()),
                     SubjectPattern::Path("/module/onebot-tools".parse().unwrap()),

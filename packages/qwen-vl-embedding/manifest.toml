@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/embed"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -35,4 +34,4 @@ callers = [
 "generated/lifecycle-error.schema" = "096a225fb87b29283f239e73446179199723e3808cfb9b9b4efdc2b7925ae7db"
 "generated/provides/0.input.schema" = "9937d432940a63c7b7fb0c9fe3cd8737d5f24b692bed46e976816b76f4e5eb2e"
 "generated/provides/0.output.schema" = "5e660b70c3f379ccbe7413453d019ed6f00c2a2ab5b48e0cfe0f7c6bf42f7378"
-"module.wasm" = "1047f318a6dbcc7dca82b7fabb1c319c7b968a6f6378441d2cba198b023839d2"
+"module.wasm" = "656890995825a4b8ab29b89d489179fbe7a7e2fde1cf32c018c2e992f96f1a8e"

@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use forest_control::packages::ReloadGroupRequest;
 pub(crate) use forest_control::packages::{LocalPackage, Packages, Plan, ReloadRequest};
 use forest_protocol::Token;
 use forest_runtime::StopMode;
@@ -20,7 +21,10 @@ pub(crate) fn routes(auth: Arc<auth::Auth>) -> Router<App> {
         .route("/plan", post(plan))
         .route("/load", post(load))
         .route("/reload", post(reload))
+        .route("/reload-group", post(reload_group))
         .route("/unload", post(unload))
+        .route("/unload-group", post(unload_group))
+        .route("/cancel", post(cancel))
         .route("/force", post(force))
         .route_layer(middleware::from_fn_with_state(auth, auth::protect))
 }
@@ -33,9 +37,13 @@ impl From<anyhow::Error> for ManagementError {
 }
 impl IntoResponse for ManagementError {
     fn into_response(self) -> Response {
+        let cancelled = matches!(
+            self.0.downcast_ref::<forest_runtime::ManagementFailure>(),
+            Some(forest_runtime::ManagementFailure::Cancelled)
+        );
         (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"message": format!("{:#}", self.0)})),
+            Json(serde_json::json!({"code": if cancelled { "cancelled" } else { "rejected" }, "message": format!("{:#}", self.0)})),
         )
             .into_response()
     }
@@ -55,6 +63,17 @@ struct StopRequest {
 #[serde(deny_unknown_fields)]
 struct ObjectRequest {
     object: Token,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupStopRequest {
+    objects: Vec<Token>,
+    mode: StopMode,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelRequest {
+    request: forest_runtime::RequestId,
 }
 
 async fn packages(State(app): State<App>) -> Result<Json<Vec<LocalPackage>>, ManagementError> {
@@ -92,6 +111,25 @@ async fn unload(
     Json(input): Json<StopRequest>,
 ) -> Result<StatusCode, ManagementError> {
     execute(async move { app.packages.unload(&input.object, input.mode).await }).await
+}
+async fn reload_group(
+    State(app): State<App>,
+    Json(input): Json<ReloadGroupRequest>,
+) -> Result<StatusCode, ManagementError> {
+    execute(async move { app.packages.reload_group(input).await }).await
+}
+async fn unload_group(
+    State(app): State<App>,
+    Json(input): Json<GroupStopRequest>,
+) -> Result<StatusCode, ManagementError> {
+    execute(async move { app.packages.unload_many(input.objects, input.mode).await }).await
+}
+async fn cancel(
+    State(app): State<App>,
+    Json(input): Json<CancelRequest>,
+) -> Result<StatusCode, ManagementError> {
+    app.packages.cancel(input.request)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 async fn force(
     State(app): State<App>,

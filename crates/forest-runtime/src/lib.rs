@@ -6,6 +6,7 @@ mod driver;
 mod failure;
 mod fair;
 mod io_settings;
+mod locks;
 mod logs;
 mod management;
 pub mod onebot;
@@ -30,5 +31,8 @@ pub use failure::{InstanceFailure, LifecyclePhase};
 pub use forest_protocol as protocol;
 pub use io_settings::{IoLimits, IoSettings};
 pub use logs::{LogBatch, LogEntry, LogReader, LogWriter};
-pub use management::ModuleManager;
+pub use management::{
+    CancelError, ManagementFailure, ManagementRequest, ModuleManager, ReloadTarget, RequestId,
+    RequestKind, RequestSnapshot, RequestState,
+};
 pub use package::Package;

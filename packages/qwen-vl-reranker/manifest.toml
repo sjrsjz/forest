@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/rank"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -35,4 +34,4 @@ callers = [
 "generated/lifecycle-error.schema" = "ab383fb186a59e62d3eeb4a0bb36240e02e72241735dcccd9dd2155aed96527f"
 "generated/provides/0.input.schema" = "00867696c7382d09307585072378a11fc1feca4bb544aa7a18456daa00e5f5b5"
 "generated/provides/0.output.schema" = "7e278eb305706e79a28102eebf4c3e4a12966c183cd6d818d33f2cbcf9e4f5c2"
-"module.wasm" = "72792ff9c7284a346404b1713bb86f60c7a32e819e9e3c76c8442063c5d978ed"
+"module.wasm" = "eee2059204a2ac7bafaca10516bd36d3a3b9a9da45a0a439b22304126498373e"

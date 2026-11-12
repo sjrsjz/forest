@@ -27,18 +27,8 @@ impl Module for OpenAi {
             SubjectPattern::Path("/user/admin".parse().unwrap()),
         ]);
         Handlers::new()
-            .with(
-                COMPLETE.parse().unwrap(),
-                true,
-                access.clone(),
-                Self::complete,
-            )
-            .with(
-                CAPABILITIES.parse().unwrap(),
-                true,
-                access,
-                Self::capabilities,
-            )
+            .with(COMPLETE.parse().unwrap(), access.clone(), Self::complete)
+            .with(CAPABILITIES.parse().unwrap(), access, Self::capabilities)
     }
 }
 

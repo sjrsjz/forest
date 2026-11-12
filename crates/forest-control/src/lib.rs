@@ -240,7 +240,6 @@ where
     scheduler.register_native(NativeInterface::new(
         OBJECT.parse()?,
         path.parse()?,
-        true,
         callers(allowed.to_vec()),
         move |context, input| handler(control.clone(), context, input),
     ))
@@ -269,6 +268,7 @@ impl Control {
                     version: m.published.version,
                     name: m.published.name,
                     phase: match m.lifecycle {
+                        LifecycleSnapshot::Staged { .. } => Phase::Staged,
                         LifecycleSnapshot::Creating { .. } => Phase::Creating,
                         LifecycleSnapshot::Serving { .. } => Phase::Serving,
                         LifecycleSnapshot::Stopping { .. } => Phase::Stopping,

@@ -56,7 +56,6 @@ pub struct InterfaceDeclaration {
     pub path: Token,
     pub input: Schema,
     pub output: Schema,
-    pub reentrant: bool,
     pub access: AccessPolicy,
 }
 

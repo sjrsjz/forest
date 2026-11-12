@@ -106,15 +106,10 @@ impl Module for Gateway {
         ]);
         let internal = callers(vec![SubjectPattern::SelfModule]);
         Handlers::new()
-            .with(
-                "/describe".parse().unwrap(),
-                true,
-                agent.clone(),
-                Self::describe,
-            )
-            .with("/invoke".parse().unwrap(), true, agent, Self::invoke)
-            .with("/http".parse().unwrap(), true, internal.clone(), Self::http)
-            .with("/memory".parse().unwrap(), true, internal, Self::memory)
+            .with("/describe".parse().unwrap(), agent.clone(), Self::describe)
+            .with("/invoke".parse().unwrap(), agent, Self::invoke)
+            .with("/http".parse().unwrap(), internal.clone(), Self::http)
+            .with("/memory".parse().unwrap(), internal, Self::memory)
     }
 }
 impl Gateway {

@@ -53,7 +53,7 @@ Wasm 构建本身不等于形成完整包。实际装载还需要 Manifest、引
 | `Greeting` | `/greet` 的类型化输入，包含 `name: String` |
 | `Error` | 保留调度异常和 OneBot 操作错误，避免压成一个 String |
 | `Hello::create` | 读取 `/settings/reply`，建立当前实例 |
-| `handlers` | 注册路径、是否重入、调用许可及实际处理函数 |
+| `handlers` | 注册路径、调用许可及实际处理函数 |
 | `on_message` | 识别命令，通过宿主 OneBot 接口发送文本 |
 | `greet` | 与群事件共用同一模块对象，返回格式化问候 |
 | `manifest` | 声明身份、配置、依赖和事件接收关系 |
@@ -61,7 +61,7 @@ Wasm 构建本身不等于形成完整包。实际装载还需要 Manifest、引
 
 `LifecycleError` 使用 SDK 的 `HostError`，配置读取中的两层错误因此可以用 `.await??` 保留类型。普通接口也返回完整 `Result`；`/greet` 的模块逻辑没有错误分支，使用 `Infallible`，外层调度仍然可能失败。
 
-`/group_message` 设置 `reentrant = false`，当前调用等待发送回执时，同接口的新事件排队。`/greet` 设置 `true`，允许多个未完成调用；同一实例仍不会同时执行两段来宾指令。
+`/group_message` 在回复与计数持久化期间显式持有 `/replies` 宿主锁；后续事件可以进入处理器，但须等锁释放才进入同一临界区。`/greet` 不操作这份状态，无需获取该锁。同一实例仍不会同时执行两段来宾指令。
 
 群事件来自 Manifest 的 subscriptions。向 OneBot 发送消息则是另一条显式 call，必须另行声明 uses。接收消息不会自动赋予发送权限。
 

@@ -10,6 +10,7 @@
 |---|---|---|
 | 模块通信 | `send`、`call` | 按对象和接口寻址、来源绑定、派发、结果关联 |
 | 配置 | `get`、`set`、`reset` | ACL、类型校验、单次原子操作及持久化 |
+| 互斥 | `lock`、`unlock` | 具体 Token 命名、任务持有、FIFO 等待与资源回收 |
 | HTTP | `request` | 异步 HTTP(S) 请求 |
 | WebSocket | `connect`、`send`、`receive`、`close` | WS(S) 连接和协议处理 |
 | 受管文件 | `read`、`write`、`remove` | 模块数据目录内的文件访问 |
@@ -72,11 +73,24 @@ call(object: Token, interface: Token, input: Value) -> DispatchResult<Value>
 
 create/destroy 都禁止 send/call，包括自身、其他模块和宿主原生服务对象。宿主在接纳前检查生命周期阶段，不因 ACL 允许而放行，也不缓存在初始化成功后发送。
 
-热重载保持对象身份、地址和结果关联，默认 Drain 完成已接受的旧请求，AtYield/Force 可显式中断旧请求；模块不需要重绑定。同一实例的执行权、被动与主动让出、接口重入限制和队列规则见[调度设计](09-scheduling.md)。嵌套等待的死锁处理不属于当前范围。
+热重载保持对象身份、地址和结果关联，默认 Drain 完成已接受的旧请求，AtYield/Force 可显式中断旧请求；模块不需要重绑定。同一实例的执行权、被动与主动让出、显式宿主锁和队列规则见[调度设计](09-scheduling.md)。嵌套等待的死锁处理不属于当前范围。
 
 宿主事件转发向每个接收入口提交请求时沿用相同的接纳语义。某个接收者 QueueFull 不撤回其他接收者已经接受的请求；逐目标提交结果由宿主事件接入和管理诊断处理，不作为模块发布操作的返回值。
 
-### 4.1 宿主事件接收
+### 4.1 宿主锁
+
+```rust
+lock(key: Token) -> DispatchResult<()>
+unlock(key: Token) -> DispatchResult<()>
+```
+
+同一 Wasm 实例中的相同具体 Token 命名同一把独占、非递归锁；不同实例与不同代际的锁表完全独立。锁名不表示授权身份或宿主内部互斥锁。持有者由当前可信实例与任务决定，调用方不能指定；跨接口可以使用相同锁名。lock 按导入提交顺序 FIFO 等待，不阻塞实例或执行线程；未就绪时由 SDK 返回 Pending。
+
+锁授予后先归操作完成槽持有，operation_take 成功复制结果后转给任务。取消未取走的等待或授予会释放许可；取走以后由 unlock 或任务清理释放。非持有者 unlock 返回 Denied。unlock 的结果使用相同 operation 协议，但提交后立即就绪；SDK 可同步取走，支持 LockGuard 的 Drop。
+
+create/destroy 的 lock/unlock 返回 LifecycleRestricted。任务结束时先终结已提交且不可中断的原生工作，再释放其已持有锁。trap/Force 停止整个实例，取消等待，不再推进任何来宾任务。详细所有权见[调度规则](09-scheduling.md#5-显式宿主锁)。
+
+### 4.2 宿主事件接收
 
 notifier 是宿主内部机制，不是模块宿主函数。模块在 Manifest 的 subscriptions 中声明接收哪些宿主事件，以及对应的 provides 接口；事件及其 Schema 由宿主定义。接收接口的 access.callers 须允许对应可信宿主事件源。调度器按静态注册表提交普通请求，不直接重入处理器、不等待其完成，也不保存历史待补发，见[notifier 设计](11-notifier-and-dependencies.md)。
 

@@ -22,13 +22,8 @@ impl Module for Markdown {
             SubjectPattern::Path("/user/admin".parse().unwrap()),
         ]);
         Handlers::new()
-            .with(
-                "/format".parse().unwrap(),
-                true,
-                access.clone(),
-                Self::format,
-            )
-            .with("/encode".parse().unwrap(), true, access, Self::encode)
+            .with("/format".parse().unwrap(), access.clone(), Self::format)
+            .with("/encode".parse().unwrap(), access, Self::encode)
     }
 }
 impl Markdown {

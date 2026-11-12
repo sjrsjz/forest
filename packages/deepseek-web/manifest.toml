@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/fetch"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -33,7 +32,6 @@ callers = [
 path = "/search"
 input = "generated/provides/1.input.schema"
 output = "generated/provides/1.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -49,4 +47,4 @@ callers = [
 "generated/provides/0.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
 "generated/provides/1.input.schema" = "a1523c8baea3c6f5efa9e50bae1bc153f914bd49bdc96a88444d4bf1e45529c9"
 "generated/provides/1.output.schema" = "4f49e90c4189987e0c315399e9339772d1a9c586b39fbba137403df64acb7a83"
-"module.wasm" = "d598e171b0235033542627c8882c61f372ab4b36b6c2f92112f38212be63cdd2"
+"module.wasm" = "aa7262d00df95544bb9b60d8925020dbe0cd30b700d879f61aa5d2a892c5661a"

@@ -1,4 +1,4 @@
-use crate::core::{Core, Directory, Instance, State};
+use crate::core::{Core, Directory, Instance};
 use crate::{ConfigWriteError, IoSettings};
 use anyhow::Result;
 use cap_std::fs::Dir;
@@ -77,7 +77,7 @@ impl Services {
             database_root,
         })
     }
-    pub async fn mount(&self, manifest: &Manifest) -> Result<Arc<Resources>> {
+    pub async fn declare(&self, manifest: &Manifest) -> Result<()> {
         let object = manifest.package.id.clone();
         let target = object.clone();
         let existing = self
@@ -96,6 +96,10 @@ impl Services {
         } else {
             self.config.register(object.clone(), declarations).await?;
         }
+        Ok(())
+    }
+    pub async fn mount(&self, manifest: &Manifest) -> Result<Arc<Resources>> {
+        let object = &manifest.package.id;
         let name = object
             .to_string()
             .as_bytes()
@@ -187,12 +191,7 @@ impl Core {
         access: Access,
     ) -> DispatchResult<()> {
         let owner = &target.object;
-        if owner == &instance.object
-            && directory
-                .slots
-                .get(owner)
-                .is_some_and(|slot| matches!(slot.state, State::Creating { .. }))
-        {
+        if owner == &instance.object {
             return instance
                 .package
                 .access

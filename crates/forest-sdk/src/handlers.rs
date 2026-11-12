@@ -26,13 +26,7 @@ impl<M: 'static> Handlers<M> {
             routes: BTreeMap::new(),
         }
     }
-    pub fn with<I, T, E, F, Fut>(
-        mut self,
-        path: Token,
-        reentrant: bool,
-        access: AccessPolicy,
-        handler: F,
-    ) -> Self
+    pub fn with<I, T, E, F, Fut>(mut self, path: Token, access: AccessPolicy, handler: F) -> Self
     where
         I: AsSchema + AsValue,
         T: AsSchema + AsValue,
@@ -44,7 +38,6 @@ impl<M: 'static> Handlers<M> {
             path: path.clone(),
             input: I::as_schema(),
             output: <Result<T, E>>::as_schema(),
-            reentrant,
             access,
         };
         let handler = Box::new(move |module, context, input| -> HandlerFuture {

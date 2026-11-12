@@ -21,7 +21,6 @@ writers = ["/user/admin"]
 path = "/send"
 input = "generated/provides/0.input.schema"
 output = "generated/provides/0.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -35,7 +34,6 @@ callers = [
 path = "/send_markdown"
 input = "generated/provides/1.input.schema"
 output = "generated/provides/1.output.schema"
-reentrant = true
 
 [provides.access]
 callers = [
@@ -76,4 +74,4 @@ output = "generated/uses/2.output.schema"
 "generated/uses/1.output.schema" = "4d980205471782dbd4195c353ecf862074599807c7b4f6cfd2fa94ac98f54e20"
 "generated/uses/2.input.schema" = "d5e578a594814cf7fe162cb497110d22abc5d04f8436af0085255b3113d37841"
 "generated/uses/2.output.schema" = "27d66d278af0d580ff4c2058f85012e950201dc8cb7c2ee8e92a9ee494d39584"
-"module.wasm" = "53b22813deb204cecff7ae312e2e212cb23b403246ddcdb1d3e3ff67f1ce67da"
+"module.wasm" = "1a58195a444820da516fa5921c5f364b0febc8b39713ddf29596c7e33fe1464c"

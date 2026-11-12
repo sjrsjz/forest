@@ -31,55 +31,46 @@ impl Module for OneBotTools {
         Handlers::new()
             .with(
                 "/get_login_info".parse().unwrap(),
-                true,
                 access.clone(),
                 Self::login,
             )
             .with(
                 "/get_friend_list".parse().unwrap(),
-                true,
                 access.clone(),
                 Self::friends,
             )
             .with(
                 "/get_group_list".parse().unwrap(),
-                true,
                 access.clone(),
                 Self::groups,
             )
             .with(
                 "/get_group_info".parse().unwrap(),
-                true,
                 access.clone(),
                 Self::group,
             )
             .with(
                 "/get_group_member_list".parse().unwrap(),
-                true,
                 access.clone(),
                 Self::members,
             )
             .with(
                 "/get_group_member_info".parse().unwrap(),
-                true,
                 access.clone(),
                 Self::member,
             )
             .with(
                 "/get_stranger_info".parse().unwrap(),
-                true,
                 access.clone(),
                 Self::user,
             )
             .with(
                 "/send_group_message".parse().unwrap(),
-                true,
                 access.clone(),
                 Self::send_group,
             )
             .with(
                 "/send_private_message".parse().unwrap(),
-                true,
                 access,
                 Self::send_private,
             )

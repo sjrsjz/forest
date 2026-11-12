@@ -55,7 +55,6 @@ pub fn install<T: Transport + Send + 'static>(
     scheduler.register_native(NativeInterface::new(
         contract::OBJECT.parse()?,
         contract::SEND_GROUP_MESSAGE.parse()?,
-        true,
         callers(permitted_callers.clone()),
         move |_, request: SendGroupMessage| {
             let client = group_client.clone();
@@ -81,7 +80,6 @@ pub fn install<T: Transport + Send + 'static>(
     scheduler.register_native(NativeInterface::new(
         contract::OBJECT.parse()?,
         contract::SEND_PRIVATE_MESSAGE.parse()?,
-        true,
         callers(permitted_callers.clone()),
         move |_, request: SendPrivateMessage| {
             let client = private_client.clone();
@@ -110,7 +108,6 @@ pub fn install<T: Transport + Send + 'static>(
     scheduler.register_native(NativeInterface::new(
         contract::OBJECT.parse()?,
         contract::QUERY.parse()?,
-        true,
         callers(permitted_callers),
         move |_, request: Query| {
             let client = client.clone();

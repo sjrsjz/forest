@@ -6,14 +6,9 @@ mod store;
 use contract::{Blob, Error, OBJECT, Source};
 use forest_protocol::{manifest::callers, *};
 use forest_sdk::{Handlers, Module, host};
-use std::{
-    cell::{Cell, RefCell},
-    collections::BTreeMap,
-    rc::Rc,
-};
+use std::{cell::Cell, rc::Rc};
 
 pub struct Media {
-    locks: RefCell<BTreeMap<String, Rc<futures::lock::Mutex<()>>>>,
     wake_pending: Cell<bool>,
 }
 
@@ -23,7 +18,6 @@ impl Module for Media {
     async fn create(_: CreateContext) -> Result<Self, Self::LifecycleError> {
         store::initialize().await?;
         Ok(Self {
-            locks: RefCell::new(BTreeMap::new()),
             wake_pending: Cell::new(false),
         })
     }
@@ -43,28 +37,14 @@ impl Module for Media {
             SubjectPattern::Path("/user/admin".parse().unwrap()),
         ]);
         Handlers::new()
-            .with("/put".parse().unwrap(), true, producers, Self::put)
-            .with("/register".parse().unwrap(), true, memory, Self::register)
-            .with("/get".parse().unwrap(), true, readers, Self::get)
+            .with("/put".parse().unwrap(), producers, Self::put)
+            .with("/register".parse().unwrap(), memory, Self::register)
+            .with("/get".parse().unwrap(), readers, Self::get)
             .with(
                 "/acquire".parse().unwrap(),
-                false,
                 callers(vec![SubjectPattern::SelfModule]),
                 Self::acquire,
             )
-    }
-}
-
-struct Lease<'a> {
-    owner: &'a Media,
-    reference: String,
-    lock: Rc<futures::lock::Mutex<()>>,
-}
-impl Drop for Lease<'_> {
-    fn drop(&mut self) {
-        if Rc::strong_count(&self.lock) == 2 {
-            self.owner.locks.borrow_mut().remove(&self.reference);
-        }
     }
 }
 
@@ -99,18 +79,8 @@ impl Media {
     }
     async fn read(&self, reference: String) -> Result<Blob, Error> {
         validate_reference(&reference)?;
-        let lock = self
-            .locks
-            .borrow_mut()
-            .entry(reference.clone())
-            .or_insert_with(|| Rc::new(futures::lock::Mutex::new(())))
-            .clone();
-        let lease = Lease {
-            owner: self,
-            reference: reference.clone(),
-            lock,
-        };
-        let _guard = lease.lock.lock().await;
+        let key = format!("/blob/{}", &reference["media:".len()..]);
+        let _guard = host::lock(key.parse().unwrap()).await?;
         match store::read(&reference).await? {
             store::Stored::Bytes(blob) => Ok(blob),
             store::Stored::Source(source) => {
@@ -121,6 +91,7 @@ impl Media {
         }
     }
     async fn acquire(self: Rc<Self>, _: CallContext, _: ()) -> Result<(), Error> {
+        let _guard = host::lock("/acquisition".parse().unwrap()).await?;
         self.wake_pending.set(false);
         while let Some(reference) = store::pending().await? {
             if let Err(error) = self.read(reference.clone()).await {

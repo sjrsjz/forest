@@ -27,6 +27,7 @@ pub struct RuntimeSnapshot {
     pub memory_limit_bytes: usize,
     pub modules: Vec<ModuleSnapshot>,
     pub hosts: Vec<HostSnapshot>,
+    pub requests: Vec<crate::RequestSnapshot>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct ModuleSnapshot {
@@ -88,6 +89,9 @@ impl From<&Instance> for InstanceView {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum LifecycleSnapshot {
+    Staged {
+        replacement: Option<ReleaseView>,
+    },
     Creating {
         instance: InstanceView,
     },
@@ -115,7 +119,7 @@ pub enum LifecycleSnapshot {
 #[derive(Clone, Debug, Serialize)]
 pub struct InterfaceView {
     pub path: Token,
-    pub reentrant: bool,
+
     pub queued: usize,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -150,20 +154,35 @@ struct CapturedModule {
     queues: HashMap<Token, usize>,
     queued_next: usize,
 }
-fn replacement(after: &After) -> Option<ReleaseView> {
+fn replacement(after: &After, directory: &Directory, object: &Token) -> Option<ReleaseView> {
     match after {
-        After::Reload { package, .. } => Some((&package.manifest.package).into()),
+        After::Change { request, .. } => directory
+            .changes
+            .get(request)
+            .and_then(|c| c.replacements.get(object))
+            .map(|p| (&p.manifest().package).into()),
         _ => None,
     }
 }
 fn deferred(after: &After) -> usize {
     match after {
-        After::Reload { inbox, .. } => inbox.len(),
+        After::Change { inbox, .. } => inbox.len(),
         _ => 0,
     }
 }
-fn capture(slot: &Slot, options: &RuntimeOptions) -> CapturedModule {
+fn capture(slot: &Slot, options: &RuntimeOptions, directory: &Directory) -> CapturedModule {
     let (lifecycle, live, queued_next) = match &slot.state {
+        State::Staged { inbox, .. } => (
+            LifecycleSnapshot::Staged {
+                replacement: directory
+                    .changes
+                    .values()
+                    .find_map(|c| c.replacements.get(&slot.published.package.id))
+                    .map(|p| (&p.manifest().package).into()),
+            },
+            None,
+            inbox.len(),
+        ),
         State::Creating {
             instance, inbox, ..
         } => (
@@ -172,8 +191,8 @@ fn capture(slot: &Slot, options: &RuntimeOptions) -> CapturedModule {
             },
             None,
             match inbox {
-                CreatingInbox::Closed => 0,
-                CreatingInbox::Deferred(queue) => queue.len(),
+                Ingress::Closed => 0,
+                Ingress::Deferred(queue) => queue.len(),
             },
         ),
         State::Serving(live) => (
@@ -187,7 +206,7 @@ fn capture(slot: &Slot, options: &RuntimeOptions) -> CapturedModule {
             LifecycleSnapshot::Stopping {
                 instance: live.instance.as_ref().into(),
                 mode: *mode,
-                replacement: replacement(after),
+                replacement: replacement(after, directory, &slot.published.package.id),
             },
             Some(live),
             deferred(after),
@@ -195,15 +214,17 @@ fn capture(slot: &Slot, options: &RuntimeOptions) -> CapturedModule {
         State::Destroying { instance, after } => (
             LifecycleSnapshot::Destroying {
                 instance: instance.as_ref().into(),
-                replacement: replacement(after),
+                replacement: replacement(after, directory, &slot.published.package.id),
             },
             None,
             deferred(after),
         ),
-        State::Releasing { instance, after } => (
+        State::Releasing {
+            instance, after, ..
+        } => (
             LifecycleSnapshot::Releasing {
                 instance: instance.as_ref().into(),
-                replacement: replacement(after),
+                replacement: replacement(after, directory, &slot.published.package.id),
             },
             None,
             deferred(after),
@@ -255,26 +276,25 @@ impl Inspector {
     }
     pub fn snapshot(&self) -> std::result::Result<RuntimeSnapshot, InspectError> {
         let core = self.host()?;
-        let (modules, natives, events) = {
+        let (modules, natives, events, requests) = {
             let directory = core.directory.lock().unwrap();
             (
                 directory
                     .slots
                     .values()
-                    .map(|slot| capture(slot, &core.options))
+                    .map(|slot| capture(slot, &core.options, &directory))
                     .collect::<Vec<_>>(),
                 directory
                     .natives
                     .values()
-                    .map(|native| {
-                        (
-                            native.object.clone(),
-                            native.declaration.path.clone(),
-                            native.declaration.reentrant,
-                        )
-                    })
+                    .map(|native| (native.object.clone(), native.declaration.path.clone()))
                     .collect::<Vec<_>>(),
                 directory.events.keys().cloned().collect::<Vec<_>>(),
+                directory
+                    .changes
+                    .values()
+                    .map(|c| c.snapshot())
+                    .collect::<Vec<_>>(),
             )
         };
         let mut modules: Vec<_> = modules
@@ -292,7 +312,7 @@ impl Inspector {
                         .iter()
                         .map(|p| InterfaceView {
                             path: p.path.clone(),
-                            reentrant: p.reentrant,
+
                             queued: *captured.queues.get(&p.path).unwrap_or(&0),
                         })
                         .collect(),
@@ -327,7 +347,7 @@ impl Inspector {
                 events: vec![],
             },
         );
-        for (object, path, reentrant) in natives {
+        for (object, path) in natives {
             hosts
                 .entry(object.clone())
                 .or_insert_with(|| HostSnapshot {
@@ -336,11 +356,7 @@ impl Inspector {
                     events: vec![],
                 })
                 .interfaces
-                .push(InterfaceView {
-                    path,
-                    reentrant,
-                    queued: 0,
-                });
+                .push(InterfaceView { path, queued: 0 });
         }
         for (object, event) in events {
             hosts
@@ -362,6 +378,7 @@ impl Inspector {
             })
             .collect();
         Ok(RuntimeSnapshot {
+            requests,
             sampled_at_ms: timestamp(),
             parallelism: core.options.parallelism,
             memory_limit_bytes: core.options.memory_bytes,
